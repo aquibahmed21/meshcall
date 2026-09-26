@@ -6,6 +6,7 @@ import type { PeerConnectionState } from '../../types/state';
 import type { DataUsageSnapshot } from '../../webrtc/DataUsageMonitor';
 import type { PeerStatsSnapshot, StatsReport } from '../../webrtc/StatsMonitor';
 import { probeIceServers, type ProbeResult } from '../../webrtc/IceServerProbe';
+import { PUSH_STATUS_LABEL, type PushDiagnostics } from '../../services/PushNotificationService';
 import { h } from '../dom';
 import { icons } from '../icons';
 
@@ -24,6 +25,8 @@ export class DiagnosticsPanel {
   private logLevel: LogLevel = 'INFO';
   private pending = false;
   private probe: ProbeResult[] | 'running' | null = null;
+  private pushDiag: PushDiagnostics | null = null;
+  private pushDiagKey = '';
 
   constructor(
     private readonly app: AppContext,
@@ -84,6 +87,8 @@ export class DiagnosticsPanel {
         ['Fallback', `${this.app.webrtc.gateMode()} · P2P window ${config.ice.directP2PTimeoutMs} ms`],
       ]),
     );
+
+    sections.push(this.pushSection());
 
     const probe = h('section', { class: 'diag-section' }, h('h3', {}, 'STUN / TURN health check'));
     if (this.probe === 'running') probe.append(h('p', { class: 'hint' }, 'Probing servers…'));
@@ -175,6 +180,35 @@ export class DiagnosticsPanel {
       h('h3', {}, title, badge ? h('span', { class: 'path-badge', 'data-type': badge }, badge) : null),
       h('dl', {}, ...rows.flatMap(([k, v]) => [h('dt', {}, k), h('dd', {}, v)])),
     );
+  }
+
+  /** Push diagnostics (endpoint redacted; subscription keys are never shown). */
+  private pushSection(): HTMLElement {
+    void this.app.push.diagnostics().then((d) => {
+      const key = JSON.stringify(d);
+      if (key !== this.pushDiagKey) {
+        this.pushDiagKey = key;
+        this.pushDiag = d;
+        this.render();
+      }
+    });
+    const d = this.pushDiag;
+    const yes = (b: boolean) => (b ? 'Yes' : 'No');
+    const rows: Array<[string, string]> = d
+      ? [
+          ['Browser Support', yes(d.browserSupport)],
+          ['Notification Permission', d.permission],
+          ['Service Worker', d.serviceWorker],
+          ['Status', PUSH_STATUS_LABEL[d.status]],
+          ['Push Subscription', d.subscription === 'active' ? `Active${d.serverVerified === true ? ' (server confirmed)' : d.serverVerified === false ? ' (NOT on server)' : ''}` : 'None'],
+          ['Endpoint', d.endpoint ?? '—'],
+          ['Push Server', d.pushServer],
+          ['Last Registration', d.lastRegistration ? new Date(d.lastRegistration).toLocaleString() : '—'],
+          ['Targeted delivery', d.targetedDelivery ? 'Supported' : 'Not supported by the push server (broadcast only) – closed apps cannot be woken for a call'],
+        ]
+      : [['Status', 'Loading…']];
+    if (d?.lastError) rows.push(['Last error', d.lastError]);
+    return this.section('Push Notifications', rows);
   }
 
   private async runProbe(): Promise<void> {

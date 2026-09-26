@@ -1,198 +1,398 @@
-import { withTimeout } from '../core/async';
 import { Emitter } from '../core/emitter';
 import { createLogger, errorMessage } from '../core/logger';
+import { storage } from '../core/storage';
 import type { AppConfig } from '../config';
-import type { InvitePayload } from '../types/signaling';
-import type { IdentityService } from './IdentityService';
+import { uint8ArrayToUrlBase64, urlBase64ToUint8Array } from '../push/base64url';
+import type { IncomingCallPush } from '../push/payloads';
+import { PushUnsupportedError, WebPushServerBackend, type PushBackend } from '../push/PushBackend';
 import { PwaService } from './PwaService';
 
 const log = createLogger('Push');
+const PREF_KEY = 'voip.push.wanted';
+const LAST_REG_KEY = 'voip.push.lastRegistration';
 
+/**
+ * UI-facing state.
+ *   enabled     → browser subscription exists AND the push server knows it
+ *   disabled    → supported, not subscribed (user can enable)
+ *   connecting  → talking to the push server / browser push service
+ *   denied      → notifications blocked in browser settings (never re-prompted)
+ *   unavailable → push server unreachable / VAPID unavailable (retryable)
+ *   unsupported / insecure / install-required / not-configured → cannot be used here
+ */
 export type PushStatus =
   | 'unsupported'
   | 'insecure'
-  /** iOS/iPadOS: Web Push only exists inside the Home Screen app. */
   | 'install-required'
   | 'not-configured'
-  | 'available'
+  | 'disabled'
+  | 'connecting'
+  | 'enabled'
   | 'denied'
-  | 'subscribed'
+  | 'unavailable'
   | 'error';
 
-export interface CallPushPayload extends InvitePayload {
-  type: 'call-invite';
-  callId: string;
-  callerId: string;
-  callerName: string;
-}
+export const PUSH_STATUS_LABEL: Record<PushStatus, string> = {
+  enabled: 'Enabled',
+  disabled: 'Disabled',
+  connecting: 'Connecting…',
+  denied: 'Blocked by browser',
+  unavailable: 'Unavailable (push server not reachable)',
+  unsupported: 'Unavailable (not supported by this browser)',
+  insecure: 'Unavailable (requires HTTPS)',
+  'install-required': 'Unavailable until installed to the Home Screen',
+  'not-configured': 'Unavailable (no push server configured)',
+  error: 'Error – see log',
+};
 
-function urlBase64ToUint8Array(base64: string): Uint8Array<ArrayBuffer> {
-  const padding = '='.repeat((4 - (base64.length % 4)) % 4);
-  const raw = atob((base64 + padding).replace(/-/g, '+').replace(/_/g, '/'));
-  const out = new Uint8Array(new ArrayBuffer(raw.length));
-  for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
-  return out;
+export type NotifyResult = 'sent' | 'unsupported' | 'failed';
+
+export interface PushDiagnostics {
+  browserSupport: boolean;
+  permission: NotificationPermission | 'unsupported';
+  serviceWorker: string;
+  status: PushStatus;
+  subscription: 'active' | 'none';
+  serverVerified: boolean | null;
+  endpoint: string | null;
+  pushServer: string;
+  targetedDelivery: boolean;
+  lastRegistration: number | null;
+  lastError: string | null;
 }
 
 /**
- * Web Push for incoming calls while the app is closed.
+ * Web Push integration with the EXISTING push backend (see PushBackend.ts for its contract).
  *
- * Browsers cannot send Web Push directly (the VAPID private key must stay secret and push
- * services do not allow CORS), so a tiny relay server is required: server/push-server.mjs.
- *   callee: SW registration → pushManager.subscribe(VAPID) → POST /subscribe {deviceId, sub}
- *   caller: POST /notify {toDeviceId, payload} → relay → push service → callee's Service Worker
+ *   initialize → (SW ready) getSubscription → verify with /isPushSubscribed → re-register if needed
+ *   subscribe  → (user gesture) permission → GET /vapid → pushManager.subscribe → POST /subscribe
+ *   unsubscribe → POST /unsubscribe {endpoint} → subscription.unsubscribe()
  *
- * A Service Worker can only show a notification; it can NOT hold a WebRTC call. The call is
- * negotiated after the user opens/focuses the app from the notification.
+ * The browser (pushManager.getSubscription) is the source of truth; localStorage only remembers
+ * that the user WANTED push, so an expired/rotated subscription is silently recreated.
+ *
+ * Incoming calls: `notifyIncomingCall` requires targeted delivery. The current backend only
+ * offers /notifyAll, so it returns 'unsupported' – a call is NEVER broadcast to all subscribers.
+ * Background-tab notifications do not need the backend (NotificationService + Service Worker).
+ *
+ * Nothing here can affect WebRTC/ScaleDrone: every method catches its own errors.
  */
 export class PushNotificationService {
   readonly events = new Emitter<{ status: PushStatus }>();
-  private _status: PushStatus = 'unsupported';
+  private readonly backend: PushBackend | null;
   private registration: ServiceWorkerRegistration | null = null;
-  private vapidKey: string;
+  private _status: PushStatus = 'unsupported';
+  private vapidKey: string | null;
+  private readonly configuredKey: boolean;
+  private serverVerified: boolean | null = null;
+  private lastError: string | null = null;
+  private busy: Promise<unknown> = Promise.resolve();
+  private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  private retryAttempt = 0;
 
-  constructor(
-    private readonly config: AppConfig,
-    private readonly identity: IdentityService,
-  ) {
-    this.vapidKey = config.push.vapidPublicKey;
+  constructor(config: AppConfig) {
+    this.backend = config.push.serverUrl ? new WebPushServerBackend(config.push.serverUrl) : null;
+    this.vapidKey = config.push.vapidPublicKey || null;
+    this.configuredKey = !!config.push.vapidPublicKey;
   }
 
   get status(): PushStatus {
     return this._status;
   }
 
-  get canSend(): boolean {
-    return !!this.config.push.serverUrl;
+  /** Whether an incoming call can be pushed to ONE specific device (false for the current backend). */
+  get canTarget(): boolean {
+    return !!this.backend?.capabilities.targetedDelivery && this._status === 'enabled';
   }
 
-  async init(registration: ServiceWorkerRegistration | null): Promise<void> {
+  get serverUrl(): string {
+    return this.backend?.url ?? '';
+  }
+
+  // ── lifecycle ─────────────────────────────────────────────────────────────
+
+  async initialize(registration: ServiceWorkerRegistration | null): Promise<void> {
     this.registration = registration;
-    if (!window.isSecureContext) return this.setStatus('insecure');
-    if (!('PushManager' in window) && PwaService.isIos() && !PwaService.isStandalone()) return this.setStatus('install-required');
-    if (!registration || !('PushManager' in window)) return this.setStatus('unsupported');
-    if (!this.config.push.serverUrl) return this.setStatus('not-configured');
+    const blocked = this.environmentStatus();
+    if (blocked) return this.setStatus(blocked);
     if (Notification.permission === 'denied') return this.setStatus('denied');
-    try {
-      const existing = await registration.pushManager.getSubscription();
-      if (existing && Notification.permission === 'granted') {
-        await this.register(existing); // refresh deviceId ↔ subscription mapping
-        return this.setStatus('subscribed');
-      }
-    } catch (err) {
-      log.warn('Could not restore push subscription', errorMessage(err));
-    }
-    this.setStatus('available');
+    await this.refreshSubscription();
   }
 
-  /** Must be called from a user gesture (permission prompt). */
-  async enable(): Promise<boolean> {
-    if (!this.registration || !this.config.push.serverUrl) return false;
+  /**
+   * Startup / pushsubscriptionchange / "back online":
+   *   subscription exists → make sure the server has it (register again if not)
+   *   no subscription but the user wanted push and permission is granted → recreate it
+   */
+  refreshSubscription(): Promise<void> {
+    return this.exclusive(async () => {
+      if (this.environmentStatus() || !this.registration || !this.backend) return;
+      if (Notification.permission === 'denied') return this.setStatus('denied');
+      let sub = await this.getSubscription();
+      if (!sub && storage.get(PREF_KEY, false) && Notification.permission === 'granted') {
+        log.info('Push subscription missing/expired – recreating it');
+        sub = await this.createSubscription().catch((err) => this.fail(err, 'unavailable'));
+        if (!sub) return;
+      }
+      if (!sub) return this.setStatus('disabled');
+      this.setStatus('connecting');
+      try {
+        // A subscription created for a different VAPID key (server rotated keys) can't receive.
+        if (!(await this.keyMatches(sub))) {
+          log.info('Push server VAPID key changed – re-subscribing');
+          await sub.unsubscribe().catch(() => undefined);
+          sub = await this.createSubscription();
+        }
+        this.serverVerified = await this.backend.isRegistered(sub.endpoint);
+        if (!this.serverVerified) {
+          await this.backend.register(sub.toJSON());
+          this.serverVerified = true;
+          this.markRegistered();
+          log.info('Push subscription re-registered with the server');
+        }
+        storage.set(PREF_KEY, true);
+        this.lastError = null;
+        this.retryAttempt = 0;
+        this.setStatus('enabled');
+      } catch (err) {
+        this.fail(err, 'unavailable');
+        this.scheduleRetry();
+      }
+    });
+  }
+
+  /** Transient backend failures (cold start, network blip) during an automatic refresh. */
+  private scheduleRetry(): void {
+    const delays = [5_000, 20_000, 60_000];
+    if (this.retryTimer || this.retryAttempt >= delays.length) return;
+    const delay = delays[this.retryAttempt++]!;
+    log.info(`Retrying push registration in ${delay / 1000} s`);
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = null;
+      void this.refreshSubscription();
+    }, delay);
+  }
+
+  // ── API ───────────────────────────────────────────────────────────────────
+
+  getPermissionState(): NotificationPermission | 'unsupported' {
+    return typeof Notification === 'undefined' ? 'unsupported' : Notification.permission;
+  }
+
+  /** Only ever call from a user gesture. Never re-prompts once denied. */
+  async requestPermission(): Promise<boolean> {
+    if (typeof Notification === 'undefined') return false;
+    if (Notification.permission !== 'default') return Notification.permission === 'granted';
     try {
-      const perm = await Notification.requestPermission();
-      if (perm !== 'granted') {
-        this.setStatus(perm === 'denied' ? 'denied' : 'available');
+      return (await Notification.requestPermission()) === 'granted';
+    } catch (err) {
+      log.warn('Notification permission request failed', errorMessage(err));
+      return false;
+    }
+  }
+
+  async getSubscription(): Promise<PushSubscription | null> {
+    try {
+      return (await this.registration?.pushManager.getSubscription()) ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** "Enable notifications" button: permission → subscription → server registration. */
+  subscribe(): Promise<PushSubscription | null> {
+    return this.exclusive(async () => {
+      const blocked = this.environmentStatus();
+      if (blocked || !this.registration || !this.backend) {
+        this.setStatus(blocked ?? 'unsupported');
+        return null;
+      }
+      const granted = await this.requestPermission();
+      if (!granted) {
+        this.setStatus(Notification.permission === 'denied' ? 'denied' : 'disabled');
+        return null;
+      }
+      this.setStatus('connecting');
+      try {
+        let sub = await this.getSubscription();
+        if (sub && !(await this.keyMatches(sub))) {
+          await sub.unsubscribe().catch(() => undefined);
+          sub = null;
+        }
+        sub ??= await this.createSubscription();
+        const result = await this.backend.register(sub.toJSON());
+        this.serverVerified = true;
+        this.markRegistered();
+        storage.set(PREF_KEY, true);
+        this.lastError = null;
+        log.info(`Push enabled (${result === 'created' ? 'new subscription' : 'already registered'})`);
+        this.setStatus('enabled');
+        return sub;
+      } catch (err) {
+        this.fail(err, 'unavailable');
+        return null;
+      }
+    });
+  }
+
+  /** "Turn off": tell the server first, then drop the browser subscription. */
+  unsubscribe(): Promise<boolean> {
+    return this.exclusive(async () => {
+      storage.set(PREF_KEY, false);
+      const sub = await this.getSubscription();
+      if (!sub) {
+        this.setStatus(this.environmentStatus() ?? 'disabled');
+        return true;
+      }
+      let serverOk = true;
+      try {
+        await this.backend?.unregister(sub.endpoint); // 404 = already gone → fine
+      } catch (err) {
+        serverOk = false; // still remove locally; the server prunes dead endpoints (404/410) itself
+        this.lastError = errorMessage(err);
+        log.warn('Push server unsubscribe failed – removing the browser subscription anyway', this.lastError);
+      }
+      try {
+        await sub.unsubscribe();
+      } catch (err) {
+        log.warn('Browser unsubscribe failed', errorMessage(err));
         return false;
       }
-      const key = await this.getVapidKey();
-      const sub =
-        (await this.registration.pushManager.getSubscription()) ??
-        (await this.registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(key) }));
-      await this.register(sub);
-      this.setStatus('subscribed');
-      log.info('Push notifications enabled');
-      return true;
+      this.serverVerified = false;
+      log.info('Push disabled');
+      this.setStatus('disabled');
+      return serverOk;
+    });
+  }
+
+  /** Browser subscription exists AND the server confirms it. */
+  async isSubscribed(): Promise<boolean> {
+    const sub = await this.getSubscription();
+    if (!sub || !this.backend) return false;
+    try {
+      this.serverVerified = await this.backend.isRegistered(sub.endpoint);
+      return this.serverVerified;
     } catch (err) {
-      log.error('Enabling push failed', errorMessage(err));
-      this.setStatus('error');
+      this.lastError = errorMessage(err);
       return false;
     }
   }
 
-  /** Browser rotated/expired the subscription (pushsubscriptionchange) → subscribe again. */
-  async resubscribe(): Promise<void> {
-    if (this._status !== 'subscribed' || !this.registration) return;
+  /**
+   * Wake a specific callee. Requires targeted delivery – with the current backend this returns
+   * 'unsupported' and nothing is sent (broadcasting a call to everyone would be wrong).
+   */
+  async notifyIncomingCall(targetDeviceId: string, payload: IncomingCallPush): Promise<NotifyResult> {
+    if (!this.backend?.capabilities.targetedDelivery) return 'unsupported';
     try {
-      const key = await this.getVapidKey();
-      const sub =
-        (await this.registration.pushManager.getSubscription()) ??
-        (await this.registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(key) }));
-      await this.register(sub);
-      log.info('Push subscription renewed');
+      await this.backend.notifyDevice(targetDeviceId, payload);
+      return 'sent';
     } catch (err) {
-      log.warn('Renewing push subscription failed', errorMessage(err));
-      this.setStatus('error');
+      if (err instanceof PushUnsupportedError) return 'unsupported';
+      log.warn('Targeted push failed', errorMessage(err));
+      return 'failed';
     }
   }
 
-  /** Turn off offline call notifications (browser + relay). */
-  async disable(): Promise<void> {
-    try {
-      const sub = await this.registration?.pushManager.getSubscription();
-      await sub?.unsubscribe();
-      if (this.config.push.serverUrl) {
-        await withTimeout(
-          fetch(`${this.config.push.serverUrl}/unsubscribe`, {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ deviceId: this.identity.deviceId }),
-          }),
-          6_000,
-          'push unsubscribe',
-        );
-      }
-      log.info('Push notifications disabled');
-    } catch (err) {
-      log.warn('Disabling push failed', errorMessage(err));
-    }
-    this.setStatus('available');
+  /** DEVELOPMENT ONLY: POST /notifyAll – reaches EVERY subscriber of the push server. */
+  async broadcastTest(): Promise<string> {
+    if (!import.meta.env.DEV) throw new Error('Broadcast test is only available in development builds');
+    if (!this.backend) return 'No push server configured';
+    const r = await this.backend.notifyAll('MeshCall Test', 'Push notifications are working.');
+    return `Sent to ${r.successes} subscriber(s), ${r.failures} failed`;
   }
 
-  /** Ask the relay to wake the callee. Resolves false when the callee has no subscription. */
-  async notifyCall(toDeviceId: string, payload: CallPushPayload): Promise<boolean> {
-    if (!this.config.push.serverUrl) return false;
-    try {
-      const res = await withTimeout(
-        fetch(`${this.config.push.serverUrl}/notify`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ toDeviceId, payload }),
-        }),
-        6_000,
-        'push notify',
-      );
-      if (res.ok) log.info('Push sent to offline callee');
-      else log.info(`Push not delivered (${res.status})`);
-      return res.ok;
-    } catch (err) {
-      log.warn('Push relay unreachable', errorMessage(err));
-      return false;
-    }
+  async diagnostics(): Promise<PushDiagnostics> {
+    const sub = await this.getSubscription();
+    const sw = this.registration?.active?.state ?? (this.registration ? 'registered' : 'none');
+    return {
+      browserSupport: 'PushManager' in window && 'serviceWorker' in navigator && typeof Notification !== 'undefined',
+      permission: this.getPermissionState(),
+      serviceWorker: sw,
+      status: this._status,
+      subscription: sub ? 'active' : 'none',
+      serverVerified: sub ? this.serverVerified : null,
+      endpoint: sub ? redactEndpoint(sub.endpoint) : null,
+      pushServer: this.backend?.url ?? '(none)',
+      targetedDelivery: !!this.backend?.capabilities.targetedDelivery,
+      lastRegistration: storage.get<number | null>(LAST_REG_KEY, null),
+      lastError: this.lastError,
+    };
+  }
+
+  // ── internals ───────────────────────────────────────────────────────────
+
+  private environmentStatus(): PushStatus | null {
+    if (!window.isSecureContext) return 'insecure';
+    if (!('PushManager' in window) && PwaService.isIos() && !PwaService.isStandalone()) return 'install-required';
+    if (!('serviceWorker' in navigator) || !('PushManager' in window) || typeof Notification === 'undefined') return 'unsupported';
+    if (!this.registration) return 'unsupported';
+    if (!this.backend) return 'not-configured';
+    return null;
   }
 
   private async getVapidKey(): Promise<string> {
     if (this.vapidKey) return this.vapidKey;
-    const res = await withTimeout(fetch(`${this.config.push.serverUrl}/vapid-public-key`), 6_000, 'vapid key');
-    if (!res.ok) throw new Error(`VAPID key request failed (${res.status})`);
-    this.vapidKey = ((await res.json()) as { publicKey: string }).publicKey;
-    return this.vapidKey;
+    const key = await this.backend!.getVapidPublicKey();
+    // Must be an uncompressed P-256 public key (65 bytes, 0x04 prefix) – never cache garbage.
+    let bytes: Uint8Array;
+    try {
+      bytes = urlBase64ToUint8Array(key);
+    } catch {
+      throw new Error('Push server returned an invalid VAPID public key');
+    }
+    if (bytes.length !== 65 || bytes[0] !== 0x04) throw new Error('Push server returned an invalid VAPID public key');
+    this.vapidKey = key;
+    return key;
   }
 
-  private async register(sub: PushSubscription): Promise<void> {
-    const res = await withTimeout(
-      fetch(`${this.config.push.serverUrl}/subscribe`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ deviceId: this.identity.deviceId, name: this.identity.displayName, subscription: sub.toJSON() }),
-      }),
-      6_000,
-      'push subscribe',
-    );
-    if (!res.ok) throw new Error(`Subscribe failed (${res.status})`);
+  private async createSubscription(): Promise<PushSubscription> {
+    const key = await this.getVapidKey();
+    return this.registration!.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(key) });
+  }
+
+  private async keyMatches(sub: PushSubscription): Promise<boolean> {
+    const current = sub.options?.applicationServerKey;
+    if (!current) return true; // browser doesn't expose it – assume fine
+    try {
+      return uint8ArrayToUrlBase64(current) === (await this.getVapidKey()).replace(/=+$/, '');
+    } catch {
+      return true; // can't verify while the server is unreachable – keep the subscription
+    }
+  }
+
+  private markRegistered(): void {
+    storage.set(LAST_REG_KEY, Date.now());
+  }
+
+  private fail(err: unknown, status: PushStatus): null {
+    if (!this.configuredKey) this.vapidKey = null; // re-fetch next time (server may have rotated keys)
+    this.lastError = errorMessage(err);
+    log.warn(`Push: ${this.lastError}`);
+    this.setStatus(status);
+    return null;
+  }
+
+  private exclusive<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.busy.then(fn, fn);
+    this.busy = run.catch(() => undefined);
+    return run;
   }
 
   private setStatus(s: PushStatus): void {
+    if (this._status === s) return;
     this._status = s;
     this.events.emit('status', s);
+  }
+}
+
+/** Show where a subscription points without exposing the full capability URL. */
+export function redactEndpoint(endpoint: string): string {
+  try {
+    const u = new URL(endpoint);
+    const tail = u.pathname.slice(-8);
+    return `${u.origin}/…${tail}`;
+  } catch {
+    return '(invalid endpoint)';
   }
 }

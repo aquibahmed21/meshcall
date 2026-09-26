@@ -12,13 +12,12 @@
     "typecheck": "tsc --noEmit && tsc -p tsconfig.node.json",
     "test": "vitest run",
     "test:e2e": "node tests/e2e/two-peer.mjs",
-    "push-server": "node server/push-server.mjs",
-    "vapid": "web-push generate-vapid-keys",
     "test:resilience": "node tests/e2e/resilience.mjs",
     "test:screens": "node tests/e2e/screens.mjs",
     "test:features": "node tests/e2e/features.mjs",
     "test:rooms": "node tests/e2e/rooms.mjs",
-    "test:pwa": "node tests/e2e/pwa.mjs"
+    "test:pwa": "node tests/e2e/pwa.mjs",
+    "test:push": "node tests/e2e/push.mjs"
   },
   "devDependencies": {
     "@types/node": "^26.6.3",
@@ -27,7 +26,6 @@
     "playwright-core": "^1.63.0",
     "typescript": "^5.9.0",
     "vite": "^7.3.0",
-    "vitest": "^3.2.0",
-    "web-push": "^3.6.7"
+    "vitest": "^3.2.0"
   }
 }

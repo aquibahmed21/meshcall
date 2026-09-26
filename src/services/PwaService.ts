@@ -1,5 +1,6 @@
 import { Emitter } from '../core/emitter';
 import { createLogger, errorMessage } from '../core/logger';
+import { isCallLaunchContext, type CallLaunchContext } from '../push/payloads';
 
 const log = createLogger('PWA');
 const UPDATE_CHECK_MS = 30 * 60_000;
@@ -156,6 +157,27 @@ export class PwaService {
       await this._registration?.update();
     } catch {
       /* offline – try later */
+    }
+  }
+
+  /**
+   * Context of the call notification that launched the app (written by the Service Worker into
+   * a short-lived Cache entry – never put in the URL). Read once, then deleted; ignored if stale.
+   */
+  async consumeLaunchContext(maxAgeMs = 120_000): Promise<CallLaunchContext | null> {
+    if (typeof caches === 'undefined') return null;
+    try {
+      const cache = await caches.open('launch-context-v1');
+      const key = new URL('__launch-context', new URL(import.meta.env.BASE_URL, location.origin)).href;
+      const res = await cache.match(key);
+      if (!res) return null;
+      await cache.delete(key);
+      const ctx: unknown = await res.json();
+      if (!isCallLaunchContext(ctx) || Date.now() - ctx.at > maxAgeMs) return null;
+      log.info('Launched from a call notification');
+      return ctx;
+    } catch {
+      return null;
     }
   }
 

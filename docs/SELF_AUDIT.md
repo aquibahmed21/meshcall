@@ -342,3 +342,69 @@ Verification: `npm run test:pwa`, 21 checks, including a **real** push delivered
 - **The relay's `/notify` has no authentication:** add auth before production use.
 - **iOS:** push works only for the Home Screen app. There is no install prompt API, so the app shows guidance instead.
 - **A Service Worker cannot run a call:** a notification only wakes the user; the call is negotiated after the app opens.
+
+---
+
+## G. Web Push against the existing backend (`https://web-push-3zaz.onrender.com`)
+
+Verification:
+
+- `npm test`: 82 unit tests, including 15 for the push layer (Base64URL, payload guards, the exact backend HTTP contract, "incoming call never calls `/notifyAll`").
+- `npm run test:push`: 36/36 checks against the **real** backend from `http://localhost:5173/meshcall/`. It covers permission states, subscribe/restore/refresh/expiry/unsubscribe/resubscribe, SW push handling and malformed payloads, notification click → room → Accept/Reject recovery with a real WebRTC call, the no-duplicate and cross-room cases, and failures (server down, VAPID 503, invalid key, CORS). Every test subscription is removed from the server afterwards, and the removal is verified.
+- `test:pwa` 10/10, plus every earlier suite with no regressions: `test:e2e` 20/20, `test:rooms` 60/60, `test:features` 45/45, `test:resilience` 7/7, `test:screens` with no overflow.
+
+### Backend limitation (reported, not worked around)
+
+**The current push backend supports subscription registration but does not provide secure per-user notification targeting.** It stores bare `PushSubscription`s and only offers `/notifyAll`. MeshCall therefore never pushes incoming calls; broadcasting them would notify unrelated users. The frontend is structured for a future `POST /notify {targetDeviceId, payload}`: the `PushBackend.capabilities.targetedDelivery` adapter.
+
+### Issues found and fixed
+
+#### G1. A garbage VAPID key was cached forever
+
+- **Found by:** e2e.
+- **Impact:** once the server answered badly, every later subscribe attempt failed until reload.
+- **Fix:** the key is validated as a 65-byte P-256 point before caching, and the cache is cleared on failure.
+
+#### G2. A transient backend failure during the automatic refresh left push "Unavailable"
+
+- **Found by:** e2e (the backend is a cold-starting shared instance).
+- **Fix:** automatic retries at 5 s, 20 s and 60 s, and again on `online` and `pushsubscriptionchange`.
+
+#### G3. Every generic push replaced the previous one
+
+- **Found by:** e2e.
+- **Root cause:** every generic push notification used the same `tag`.
+- **Fix:** generic notifications no longer share a tag.
+
+#### G4. Duplicate notification-permission logic
+
+- **Found by:** code audit (`NotificationService.requestPermission`).
+- **Fix:** removed. Permission is requested only by `PushNotificationService.requestPermission()`, only from a click, and never again after it was denied.
+
+#### G5. Notification "Answer" auto-accepted the call, and call data was passed in the URL
+
+- **Fix:**
+  - The click hands over the context by `postMessage`, or through a one-time Cache entry when the app must be opened.
+  - The URL stays `/meshcall/`.
+  - The call rings with Accept/Reject, and nothing is auto-accepted.
+
+#### G6. A self-hosted relay duplicated the push backend
+
+- **Found by:** review.
+- **Fix:** removed `server/` and `web-push`; the frontend talks only to the existing backend.
+
+### Checklist
+
+| Check | Result |
+|---|---|
+| Duplicate SW registration | One `register()` call (`PwaService`, idempotent). |
+| SW scope / GitHub Pages path | `${BASE_URL}sw.js` with scope `/meshcall/`, verified in e2e. |
+| Duplicate push subscriptions | The existing browser subscription is reused; the server answers 200 "Already subscribed". |
+| Permission requested repeatedly | Only on click; blocked state shows instructions (e2e). |
+| Subscription not refreshed | Startup verification + re-register + recreate on expiry (e2e). |
+| Notification click / context lost | postMessage or a one-time launch context → room → call recovered (e2e, real call). |
+| Cross-room notification | Rooms are isolated: "Switch room" offer, never a silent switch (e2e). |
+| Duplicate incoming-call notifications | No system notification while the page is visible and focused; SW posts to the page instead (e2e). |
+| Push errors affecting WebRTC | Every push method catches its own errors; signaling and calls are unaffected (e2e). |
+| Sensitive data | Only the VAPID *public* key reaches the frontend; endpoints are redacted in diagnostics; keys are never logged. |
+| CORS | The backend allows `https://aquibahmed21.github.io` and `http://localhost:5173`. Foreign origins are blocked by the browser, which the e2e verifies, and the frontend never bypasses this. |

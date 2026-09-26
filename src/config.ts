@@ -13,6 +13,9 @@ const env = import.meta.env;
 /** Default ScaleDrone channel (a channel ID is an identifier, not a secret). */
 export const SCALEDRONE_CHANNEL_ID = 'EoIG3R1I4JdyS4L1';
 
+/** Existing Web Push backend (see src/push/PushBackend.ts). Override with VITE_PUSH_SERVER_URL. */
+export const PUSH_SERVER_URL = 'https://web-push-3zaz.onrender.com';
+
 /** Public Google STUN servers – used for STUN only (they are NOT TURN servers). */
 const FALLBACK_STUN = ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'];
 
@@ -114,7 +117,8 @@ export const CONFIG: AppConfig = {
   mesh: { heartbeatMs: 10_000, peerTimeoutMs: 35_000, maxParticipants: 6, maxLiveViewers: 8 },
   stats: { intervalMs: 2_000 },
   push: {
-    serverUrl: (env.VITE_PUSH_SERVER_URL ?? '').replace(/\/+$/, ''),
+    // `||` (not `??`): an empty variable from CI must also fall back to the default server.
+    serverUrl: (env.VITE_PUSH_SERVER_URL || PUSH_SERVER_URL).replace(/\/+$/, ''),
     vapidPublicKey: env.VITE_VAPID_PUBLIC_KEY ?? '',
   },
   logLevel: env.VITE_LOG_LEVEL ?? 'INFO',

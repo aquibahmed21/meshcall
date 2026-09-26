@@ -3,10 +3,7 @@ dist
 .env
 .env.local
 *.log
-server/subscriptions.json
 tests/e2e/artifacts
-server/vapid.json
 node_modules/
 dist/
 .env.*.local
-dist-push

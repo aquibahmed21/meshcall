@@ -54,7 +54,7 @@ export function createApp(): AppContext {
   const devices = new DeviceManager(settings, media);
   const webrtc = new WebRTCManager(config, settings);
   const notifications = new NotificationService();
-  const push = new PushNotificationService(config, identity);
+  const push = new PushNotificationService(config);
   const calls = new CallManager({ identity, signaling, presence, media, settings, webrtc, network, notifications, push, config });
   const groups = new GroupCallManager(calls, identity);
   const live = new LiveStreamManager(calls, signaling, identity, presence, config);
@@ -78,15 +78,17 @@ export async function startApp(app: AppContext): Promise<void> {
     if (s && (s.status === 'connecting' || s.status === 'connected' || s.status === 'reconnecting')) app.chat.bind(s.callId);
     else if (!s || isTerminal(s.status)) app.chat.unbind();
   });
-  app.push.events.on('status', (s) => app.presence.setPushEnabled(s === 'subscribed'));
+  // Advertise "reachable while closed" only if the backend can deliver to THIS device.
+  app.push.events.on('status', () => app.presence.setPushEnabled(app.push.canTarget));
   const registration = await app.pwa.register();
   app.notifications.attach(registration);
-  void app.push.init(registration);
+  void app.push.initialize(registration);
   app.pwa.events.on('message', (m) => {
-    if (m.type === 'push-subscription-change') void app.push.resubscribe();
+    if (m.type === 'push-subscription-change') void app.push.refreshSubscription();
   });
+  window.addEventListener('online', () => void app.push.refreshSubscription());
   // Installing on iOS unlocks Web Push – re-evaluate when that happens.
-  app.pwa.events.on('install', (s) => s === 'installed' && void app.push.init(app.pwa.registration));
+  app.pwa.events.on('install', (s) => s === 'installed' && void app.push.initialize(app.pwa.registration));
   void app.devices.start();
   void app.signaling.start();
 }

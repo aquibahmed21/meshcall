@@ -7,6 +7,7 @@ import type { CallState } from '../../types/state';
 import { colorFor, h, initials, nodes } from '../dom';
 import { icons } from '../icons';
 import { Modal } from './Modal';
+import { renderNotificationSettings } from './NotificationSettings';
 
 function field(label: string, control: HTMLElement, hint?: string): HTMLElement {
   return h('label', { class: 'field' }, h('span', { class: 'field-label' }, label), control, hint ? h('small', { class: 'hint' }, hint) : null);
@@ -47,17 +48,6 @@ export function openSettings(app: AppContext): Modal {
         nameInput.value = app.identity.displayName;
       }
     });
-    const pushStatus = app.push.status;
-    const pushText: Record<string, string> = {
-      unsupported: 'Not supported in this browser',
-      insecure: 'Requires HTTPS',
-      'install-required': 'Install MeshCall to your Home Screen first (iOS requirement)',
-      'not-configured': 'No push relay configured for this deployment (VITE_PUSH_SERVER_URL)',
-      available: 'Off',
-      denied: 'Blocked in browser settings',
-      subscribed: 'On – you can be called while the app is closed',
-      error: 'Error – see log',
-    };
     const install = app.pwa.installState;
     const installText: Record<string, string> = {
       installed: 'Installed – running as an app',
@@ -99,21 +89,7 @@ export function openSettings(app: AppContext): Modal {
           toggle('Noise suppression', s.noiseSuppression, (v) => app.settings.update({ noiseSuppression: v })),
           toggle('Auto gain control', s.autoGainControl, (v) => app.settings.update({ autoGainControl: v })),
         ),
-        h(
-          'section',
-          {},
-          h('h3', {}, 'Notifications'),
-          h('p', {}, `Offline call alerts: ${pushText[pushStatus] ?? pushStatus}`),
-          pushStatus === 'available' ? h('button', { class: 'btn', onclick: () => void app.push.enable().then(render) }, 'Enable push notifications') : null,
-          pushStatus === 'subscribed' ? h('button', { class: 'btn', onclick: () => void app.push.disable().then(render) }, 'Turn off push notifications') : null,
-          pushStatus === 'install-required' ? h('button', { class: 'btn', onclick: () => openInstallHelp(app) }, 'How to install') : null,
-          app.notifications.permission === 'default'
-            ? h('button', { class: 'btn', onclick: () => void app.notifications.requestPermission().then(render) }, 'Allow notifications while backgrounded')
-            : null,
-          app.notifications.permission === 'granted'
-            ? h('button', { class: 'btn', onclick: () => void app.notifications.showTest() }, 'Send a test notification')
-            : null,
-        ),
+        renderNotificationSettings(app, render),
         h(
           'section',
           {},

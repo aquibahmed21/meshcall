@@ -74,7 +74,8 @@ export class CallManager {
   private mesh: MeshSession | null = null;
   private inviteSender: { deviceId: string; sessionId: string } | null = null;
   private acceptedSessionId: string | null = null;
-  private pendingAutoAnswer: { callId: string; until: number } | null = null;
+  /** Opened from a call notification: the call we expect an invite for (NOT auto-accepted). */
+  private expected: { callId: string; callerName?: string; timer: ReturnType<typeof setTimeout> } | null = null;
   private pushSent = false;
   private inviteAcked = false;
   private seenInvites = new BoundedSet<string>(200);
@@ -100,7 +101,7 @@ export class CallManager {
 
   /** Enter the current room: subscribe to this device's room inbox and wire listeners. */
   start(): void {
-    const { signaling, identity, network, presence, notifications, media } = this.d;
+    const { signaling, identity, network, presence, media } = this.d;
     const room = signaling.currentRoom;
     if (!room) throw new Error('CallManager.start() requires a room');
     this.disposer.dispose();
@@ -108,27 +109,12 @@ export class CallManager {
     this.disposer.add(signaling.events.on('message', ({ msg }) => this.onMessage(msg)));
     this.disposer.add(network.events.on('change', ({ reason }) => this.mesh?.onNetworkChange(reason)));
     this.disposer.add(presence.events.on('change', () => this.onPresenceChange()));
-    this.disposer.add(notifications.events.on('action', (a) => this.onNotificationAction(a.action, a.callId)));
     this.disposer.add(media.events.on('warning', (w) => this.toast('warn', w)));
     this.disposer.listen(window, 'pagehide', () => this.persistActiveCall());
 
     const saved = storage.get<SavedCall | null>(SAVED_CALL_KEY, null, 'session');
     this.setRejoinOffer(saved && saved.roomId === room.roomId && Date.now() - saved.savedAt < REJOIN_WINDOW_MS ? saved : null);
 
-    // Opened from a push/notification "Answer" click: accept as soon as the invite arrives.
-    const params = new URLSearchParams(location.search);
-    const callId = params.get('callId');
-    if (params.get('action') === 'answer' && callId) {
-      this.pendingAutoAnswer = { callId, until: Date.now() + 30_000 };
-      log.info('Opened from notification – waiting for the call invite to answer it');
-      history.replaceState(null, '', location.pathname);
-      setTimeout(() => {
-        if (this.pendingAutoAnswer?.callId === callId) {
-          this.pendingAutoAnswer = null;
-          if (!this.call) this.toast('warn', 'That call is no longer available');
-        }
-      }, 30_000);
-    }
   }
 
   /**
@@ -140,7 +126,7 @@ export class CallManager {
     this.reset();
     this.clearPendingInvites();
     this.disposer.dispose();
-    this.pendingAutoAnswer = null;
+    this.clearExpected();
     this.seenInvites.clear();
     this.inviteParticipants = [];
     this.liveAuthorize = undefined;
@@ -197,7 +183,7 @@ export class CallManager {
     if (user?.status !== 'online') void this.sendPush(userId);
     this.noAckTimer.start(config.timeouts.offlineNoAckMs, () => {
       if (this.call?.callId !== callId || this.call.status !== 'calling' || this.inviteAcked) return;
-      if (this.pushSent || this.d.push.canSend) {
+      if (this.pushSent || this.d.push.canTarget) {
         if (!this.pushSent) void this.sendPush(userId);
         this.setStatus('calling', `${name} is offline – sent a notification`);
       } else {
@@ -280,7 +266,7 @@ export class CallManager {
     entry.timers.push(
       setTimeout(() => {
         if (this.pendingInvites.get(userId) !== entry || entry.acked) return;
-        if (!this.d.push.canSend) {
+        if (!this.d.push.canTarget) {
           this.toast('warn', `${name} appears to be offline`);
           this.clearPendingInvite(userId);
         }
@@ -371,9 +357,34 @@ export class CallManager {
     if (c?.kind === 'live' && c.role === 'broadcaster') this.mesh?.reinstate(deviceId);
   }
 
-  /** Answer this call automatically when its invite arrives (user already chose "Answer"). */
-  autoAnswer(callId: string): void {
-    this.pendingAutoAnswer = { callId, until: Date.now() + 30_000 };
+  /**
+   * The user opened MeshCall from a call notification. If that call is already ringing, the
+   * normal Accept/Reject dialog is on screen. Otherwise wait for its invite (the caller re-sends
+   * it when we come online) – it then rings normally; it is never auto-accepted. If nothing
+   * arrives, tell the user instead of silently doing nothing.
+   */
+  expectCall(callId: string, callerName?: string): void {
+    const c = this.call;
+    if (c?.callId === callId && !isTerminal(c.status)) return;
+    this.clearExpected();
+    log.info('Opened from a call notification – waiting for the invite');
+    const timer = setTimeout(() => {
+      if (this.expected?.callId !== callId) return;
+      this.expected = null;
+      if (this.call?.callId !== callId) this.toast('warn', callerName ? `Missed call from ${callerName} – the call is no longer available` : 'That call is no longer available');
+    }, 30_000);
+    this.expected = { callId, callerName, timer };
+  }
+
+  /** Notification "Decline" for the call that is ringing now. */
+  declineFromNotification(callId: string): void {
+    const c = this.call;
+    if (c?.callId === callId && c.status === 'ringing' && c.direction === 'incoming') this.rejectIncoming();
+  }
+
+  private clearExpected(): void {
+    if (this.expected) clearTimeout(this.expected.timer);
+    this.expected = null;
   }
 
   /** End the current call/stream locally with a reason (e.g. removed from a stream audience). */
@@ -538,7 +549,7 @@ export class CallManager {
     }
     // A 1:1 invite we already handled (declined/missed) is never re-rung; group calls may
     // legitimately re-invite someone who left.
-    if (!this.seenInvites.add(callId) && p.callKind === 'direct' && this.pendingAutoAnswer?.callId !== callId) return;
+    if (!this.seenInvites.add(callId) && p.callKind === 'direct' && this.expected?.callId !== callId) return;
     if (this.inCall) {
       log.info(`Busy – rejecting call from ${msg.senderName}`);
       reply('call-reject', { reason: 'busy' });
@@ -557,13 +568,19 @@ export class CallManager {
     log.info(`Incoming ${p.callKind === 'group' ? 'group ' : ''}${p.media} call from ${msg.senderName}`);
     this.emit();
 
-    if (this.pendingAutoAnswer?.callId === callId && Date.now() < this.pendingAutoAnswer.until) {
-      this.pendingAutoAnswer = null;
-      void this.acceptIncoming();
-      return;
-    }
+    if (this.expected?.callId === callId) this.clearExpected(); // it rings normally below
     this.ringtone.start('incoming');
-    void notifications.showIncomingCall({ callId, callerName: msg.senderName, media: p.media, callKind: p.callKind, groupName: p.groupName });
+    const room = this.d.signaling.currentRoom;
+    void notifications.showIncomingCall({
+      callId,
+      callerId: msg.senderId,
+      callerName: msg.senderName,
+      media: p.media,
+      callKind: p.callKind,
+      groupName: p.groupName,
+      roomId: room?.roomId,
+      roomName: room?.roomName,
+    });
     this.ringTimer.start(this.d.config.timeouts.ringMs + 5_000, () => {
       if (this.call?.callId === callId && this.call.status === 'ringing') {
         void notifications.showMissedCall(callId, msg.senderName);
@@ -673,16 +690,7 @@ export class CallManager {
     }
   }
 
-  private onNotificationAction(action: 'answer' | 'dismiss' | 'open', callId?: string): void {
-    const c = this.call;
-    const matches = !!c && (!callId || c.callId === callId);
-    if (action === 'answer') {
-      if (matches && c!.status === 'ringing') void this.acceptIncoming();
-      else if (callId) this.pendingAutoAnswer = { callId, until: Date.now() + 30_000 };
-    } else if (action === 'dismiss' && matches && c!.status === 'ringing') {
-      this.rejectIncoming();
-    }
-  }
+
 
   // ── mesh / status ────────────────────────────────────────────────────────
 
@@ -902,24 +910,29 @@ export class CallManager {
     this.d.signaling.send(userId, 'call-invite', payload, { callId: c.callId });
   }
 
+  /**
+   * Wake an offline callee through Web Push – ONLY via targeted delivery. With a broadcast-only
+   * backend this is a no-op ('unsupported'); a call is never broadcast to all subscribers.
+   */
   private async sendPush(userId: string): Promise<void> {
     const c = this.call;
-    if (!c || !this.d.push.canSend) return;
+    const room = this.d.signaling.currentRoom;
+    if (!c || !room || !this.d.push.canTarget) return;
     this.pushSent = true;
-    const ok = await this.d.push.notifyCall(userId, {
-      type: 'call-invite',
+    const result = await this.d.push.notifyIncomingCall(userId, {
+      type: 'incoming-call',
       callId: c.callId,
+      roomId: room.roomId,
+      roomName: room.roomName,
       callerId: this.d.identity.deviceId,
       callerName: this.d.identity.displayName,
-      callKind: c.kind,
-      media: c.media,
-      hostId: c.hostId,
-      groupName: c.title,
-      roomName: this.d.signaling.currentRoom?.roomName,
+      callType: c.kind === 'group' ? 'group' : c.media,
+      timestamp: Date.now(),
       expiresAt: Date.now() + this.d.config.timeouts.ringMs,
     });
-    if (!ok) this.pushSent = false;
+    if (result !== 'sent') this.pushSent = false;
   }
+
 
   private persistActiveCall(): void {
     const c = this.call;

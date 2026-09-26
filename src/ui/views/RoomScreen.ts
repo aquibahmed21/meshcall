@@ -5,6 +5,8 @@ export interface RoomScreenOptions {
   userName: string;
   prefill?: string;
   error?: string;
+  /** Neutral context line, e.g. "Alice is calling you in …". */
+  info?: string;
   recent: string[];
   onJoin: (room: RoomContext) => Promise<void>;
 }
@@ -72,6 +74,7 @@ export function renderRoomScreen(root: HTMLElement, opts: RoomScreenOptions): vo
     h('h1', {}, 'MeshCall'),
     h('h2', {}, 'Join a Room'),
     h('p', { class: 'hint' }, `Signed in as ${opts.userName}. People only see and call others in the same room.`),
+    opts.info ? h('p', { class: 'room-info', role: 'status' }, opts.info) : null,
     h('label', { for: 'room-name' }, 'Room Name'),
     input,
     error,

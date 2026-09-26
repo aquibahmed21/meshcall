@@ -10,6 +10,7 @@ import { openAddParticipants, openGoLive, openGroupCall, openIncomingCall, openI
 import type { Modal } from './views/Modal';
 import { Sidebar } from './views/Sidebar';
 import { Toasts } from './views/Toasts';
+import { renderEnableNotificationsCard } from './views/NotificationSettings';
 
 type MobileView = 'people' | 'live' | 'call';
 
@@ -318,9 +319,9 @@ export class UIManager {
     const inst = this.app.pwa.installState;
     if (inst === 'available' || inst === 'ios-manual')
       hints.push(h('li', {}, h('button', { class: 'btn small', onclick: () => this.install() }, h('span', { html: icons.download }), 'Install MeshCall as an app')));
-    if (push.status === 'install-required') hints.push(h('li', {}, 'On iPhone/iPad, install MeshCall to your Home Screen to receive call notifications while it is closed.'));
-    if (push.status === 'available') hints.push(h('li', {}, h('button', { class: 'btn small', onclick: () => void push.enable() }, h('span', { html: icons.bell }), 'Enable offline call notifications')));
+    if (push.status === 'install-required') hints.push(h('li', {}, 'On iPhone/iPad, install MeshCall to your Home Screen to receive call notifications.'));
     if (!window.isSecureContext) hints.push(h('li', { class: 'warn' }, 'This page is not a secure context – camera, microphone and notifications need HTTPS.'));
-    this.idleHints.replaceChildren(h('ul', {}, ...hints));
+    const card = renderEnableNotificationsCard(this.app, () => this.renderIdleHints());
+    this.idleHints.replaceChildren(...(card ? [card] : []), h('ul', {}, ...hints));
   }
 }

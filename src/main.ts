@@ -5,6 +5,7 @@ import { createLogger, logHub } from './core/logger';
 import { renderOnboarding } from './ui/views/Onboarding';
 import { renderRoomScreen } from './ui/views/RoomScreen';
 import { validateRoomName } from './services/RoomService';
+import type { CallLaunchContext } from './push/payloads';
 import { UIManager } from './ui/UIManager';
 import { collectDiagnostics } from './ui/views/DiagnosticsPanel';
 import { probeIceServers } from './webrtc/IceServerProbe';
@@ -37,20 +38,22 @@ async function boot(): Promise<void> {
   // A notification click may carry the room of the call (?room=…) → prefill, never auto-join.
   const params = new URLSearchParams(location.search);
   let prefill = params.get('room') ?? undefined;
-  let answerAfterJoin: string | undefined;
+  /** Call we were told about by a notification but can only receive after joining its room. */
+  let expectAfterJoin: CallLaunchContext | undefined;
 
-  const showRoomScreen = (error?: string) => {
+  const showRoomScreen = (error?: string, info?: string) => {
     document.title = 'MeshCall – Join a room';
     renderRoomScreen(mount, {
       userName: app.identity.displayName,
       prefill,
       error,
+      info,
       recent: app.rooms.recent(),
       onJoin: async (room) => {
         await joinRoom(app, room);
         prefill = undefined;
-        if (answerAfterJoin) app.calls.autoAnswer(answerAfterJoin); // user already pressed "Answer"
-        answerAfterJoin = undefined;
+        if (expectAfterJoin) app.calls.expectCall(expectAfterJoin.callId, expectAfterJoin.callerName);
+        expectAfterJoin = undefined;
         document.title = `${room.roomName} – MeshCall`;
         if (!ui) {
           ui = new UIManager(app, mount, {
@@ -67,24 +70,30 @@ async function boot(): Promise<void> {
   };
 
   /**
-   * A call notification/push for ANOTHER room than the one we are in (or while on the room
-   * screen): rooms are isolated, so offer to switch – never switch silently.
+   * A call notification was clicked (or a call push arrived while the app was visible).
+   * Recover the call WITHOUT auto-accepting it:
+   *   same room          → the call rings (or will ring when the caller re-sends the invite)
+   *   other room / none  → rooms are isolated: offer to switch (never silently), prefill the
+   *                        room screen, and expect the call after joining
    */
-  const offerRoomSwitch = (roomName: string | undefined, callId: string | undefined, callerName: string | undefined, answer: boolean) => {
-    if (!roomName) return;
-    const v = validateRoomName(roomName);
-    if (!v.ok) return;
+  const handleCallContext = (ctx: CallLaunchContext) => {
+    if (ctx.action === 'decline') return app.calls.declineFromNotification(ctx.callId);
+    const target = ctx.roomName ? validateRoomName(ctx.roomName) : null;
     const current = app.rooms.current;
-    if (current?.roomId === v.room.roomId) return; // same room → the normal in-app ringing handles it
-    const who = callerName ?? 'Someone';
+    if (current && (!target?.ok || target.room.roomId === current.roomId)) {
+      app.calls.expectCall(ctx.callId, ctx.callerName);
+      return;
+    }
+    if (!target?.ok) return;
+    const who = ctx.callerName ?? 'Someone';
     const go = () => {
       if (current) leaveRoom(app);
-      prefill = v.room.roomName;
-      answerAfterJoin = answer ? callId : undefined;
-      showRoomScreen(`${who} is calling you in “${v.room.roomName}”. Join the room to ${answer ? 'answer' : 'see the call'}.`);
+      prefill = target.room.roomName;
+      expectAfterJoin = ctx;
+      showRoomScreen(undefined, `${who} is calling you in “${target.room.roomName}”. Join the room to answer.`);
     };
     if (!current || !ui) return go();
-    ui.toast('info', `${who} is calling you in room “${v.room.roomName}”`, {
+    ui.toast('info', `${who} is calling you in room “${target.room.roomName}”`, {
       label: 'Switch room',
       run: () => {
         if (app.calls.inCall && !confirm('Switching rooms ends your current call. Switch anyway?')) return;
@@ -92,19 +101,15 @@ async function boot(): Promise<void> {
       },
     });
   };
-  app.pwa.events.on('message', (m) => {
-    if (m.type !== 'push-call' || !m.data || typeof m.data !== 'object') return;
-    const d = m.data as { roomName?: string; callId?: string; callerName?: string };
-    offerRoomSwitch(d.roomName, d.callId, d.callerName, false);
-  });
-  app.notifications.events.on('action', (a) => {
-    if (a.action !== 'dismiss') offerRoomSwitch(a.roomName, a.callId, undefined, a.action === 'answer');
-  });
+  app.notifications.events.on('click', (ctx) => handleCallContext(ctx));
+  app.notifications.events.on('pushCall', (ctx) => handleCallContext(ctx));
 
   const launch = async () => {
     await startApp(app);
+    const launchCtx = await app.pwa.consumeLaunchContext();
     log.info(`Started as ${app.identity.displayName} (${app.identity.deviceId.slice(0, 8)})`);
-    showRoomScreen();
+    if (launchCtx) handleCallContext(launchCtx);
+    else showRoomScreen();
   };
 
   if (!app.identity.isRegistered) {

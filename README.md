@@ -159,7 +159,7 @@ src/
 │   ├── PresenceService         online/offline/connecting/unknown via observable lobby
 │   ├── NetworkMonitor          online/offline, connection type, sleep/wake, resume
 │   ├── NotificationService     in-app system notifications + SW click bridge
-│   ├── PushNotificationService Web Push subscription + relay client
+│   ├── PushNotificationService Web Push lifecycle against the existing push backend (src/push/)
 │   ├── RoomService             room-name validation/normalisation, roomId + roomKey
 │   ├── ChatService             call-scoped text chat over the mesh room (dedupe, ordering, unread)
 │   ├── SettingsService         quality, devices, ICE test mode
@@ -191,7 +191,6 @@ src/
     ├── ViewModeController      Picture-in-Picture + Fullscreen, synced with the browser APIs
     └── views/ChatPanel         chat list + composer (Enter = send, Shift+Enter = newline)
 public/sw.js                    Service Worker (push → notification → open/focus app)
-server/push-server.mjs          optional Web Push relay (VAPID)
 ```
 
 ```mermaid
@@ -459,40 +458,73 @@ flowchart TD
   - The app shows *"A new version of MeshCall is available [Reload]"*, and asks for confirmation during a call.
   - It checks for updates every 30 min and whenever the app returns to the foreground.
 
-## Push notifications and Service Worker
+## Push notifications
 
-```mermaid
-sequenceDiagram
-    participant A as Caller
-    participant R as Push relay (server/push-server.mjs)
-    participant P as Browser push service
-    participant SW as Callee Service Worker
-    participant App as Callee app
+MeshCall uses the **existing push backend `https://web-push-3zaz.onrender.com`**. Override it with `VITE_PUSH_SERVER_URL`; its code default is `PUSH_SERVER_URL` in `src/config.ts`. The frontend implements exactly its API:
 
-    A->>R: POST /notify {toDeviceId, invite}
-    R->>P: Web Push (VAPID-signed, TTL 60s, urgency high)
-    P->>SW: push event
-    SW->>SW: showNotification("Incoming Video Call", [Answer][Dismiss])
-    SW->>App: notification click → openWindow/focus (?action=answer&callId=…)
-    App->>App: init, connect signaling (presence: online)
-    A->>App: caller sees callee come online → re-sends call-invite
-    App->>A: call-accept (auto, because the user pressed Answer)
-    Note over A,App: normal mesh join + WebRTC negotiation
+| Endpoint | Used for |
+|---|---|
+| `GET /vapid` | VAPID **public** key (validated: 65-byte P-256 point; never cached if invalid) |
+| `POST /subscribe` | the browser's `PushSubscription.toJSON()`, unchanged |
+| `POST /isPushSubscribed` `{endpoint}` | startup verification, keeping the UI in sync |
+| `POST /unsubscribe` `{endpoint}` | turning notifications off (a 404 counts as already gone) |
+| `POST /notifyAll` | **development-only** test button; never used for calls |
+
+### Architecture
+
+- **Code layout:**
+  - `src/push/PushBackend.ts` is a backend adapter; `WebPushServerBackend` implements the contract above.
+  - `src/push/payloads.ts` defines the typed payloads (`PushNotificationType`, `IncomingCallPush`, `CallLaunchContext`).
+  - `src/push/base64url.ts` converts Base64URL to a `Uint8Array`.
+  - `src/services/PushNotificationService.ts` provides `initialize`, `getPermissionState`, `requestPermission`, `getSubscription`, `subscribe`, `unsubscribe`, `isSubscribed`, `refreshSubscription`, `notifyIncomingCall` and `diagnostics`.
+- **Source of truth:** `pushManager.getSubscription()`. `localStorage` only remembers that the user *wanted* push.
+- **Startup:**
+  1. Wait for the Service Worker, then call `getSubscription()`.
+  2. `POST /isPushSubscribed`, and re-register if the server lost the subscription.
+  3. If the subscription was created with an old VAPID key, re-subscribe.
+  4. If it expired while the user wants push, recreate it.
+  5. Transient backend errors are retried at 5 s, 20 s and 60 s, and again on `online` and on `pushsubscriptionchange`.
+- **Permission is only requested from a click:** Settings → Notifications → **Incoming calls** switch, or the idle-screen **Enable Notifications** card. When the browser has denied it, the app shows per-browser unblock instructions and never re-prompts.
+- **States:** Enabled / Disabled / Connecting / Blocked by browser / Unavailable (with the reason). They appear in Settings and in Diagnostics → Push Notifications. The diagnostics show support, permission, SW state, the subscription and server confirmation, a redacted endpoint, the server URL, the last registration, and targeting capability. Subscription keys are never shown or logged.
+
+### Incoming calls: backend limitation (important)
+
+> **The current push backend supports subscription registration but does not provide per-user notification targeting.** It stores bare subscriptions (no `deviceId`/user) and can only broadcast (`/notifyAll`).
+
+Because a call must never be broadcast to every subscriber:
+
+- `notifyIncomingCall(targetDeviceId, payload)` goes through `PushBackend.notifyDevice`, which the current backend does not support. It returns `'unsupported'`, and **nothing is sent**; the e2e test asserts no `/notifyAll` request is made.
+- **Consequence:** a *closed* MeshCall cannot yet be woken for an incoming call. The caller falls back to the existing behaviour ("appears to be offline" after 8 s).
+- **What works today:**
+  - **Tab in the background, or not focused:** the app shows a local system notification through the Service Worker, with *Open MeshCall* and *Decline*. No backend is needed.
+  - **App visible:** only the in-app Accept/Reject dialog is shown, with no duplicate notification.
+- **Backend change needed for closed-app calls:** see below. Once the backend has it, only a new adapter with `targetedDelivery: true` is required, not changes in calls or UI:
+
+```text
+POST /subscribe  { subscription, deviceId }            ← associate subscription with the MeshCall device
+POST /notify     { targetDeviceId, payload }           ← deliver to that device only (authenticated)
+payload = { type:'incoming-call', callId, roomId, roomName, callerId, callerName, callType, timestamp, expiresAt }
 ```
 
-- **A Service Worker cannot hold a WebRTC call.** It has no `RTCPeerConnection`, and the browser kills it when it is idle. It can only show a notification. The call is negotiated after the user opens or focuses the app.
-- **A relay server is required.** Browsers cannot send Web Push themselves: the VAPID private key must stay secret, and push services do not allow browser CORS requests. `npm run push-server` starts a small relay. Set `VITE_PUSH_SERVER_URL` to point at it. Without a relay, push is disabled and the UI says so.
-- **Backgrounded tabs:** while the app is open but hidden, incoming calls use `registration.showNotification()`. A visible tab rings in-page.
-- **iOS/iPadOS:** Web Push only works when the site is installed to the Home Screen (iOS 16.4 and later). The app shows *install required* and the install guide.
-- **Controls:** Settings → Notifications can turn push on and off (turning it off also unregisters at the relay) and send a **test notification**.
-- **Rotated subscriptions:** when the browser rotates a subscription (`pushsubscriptionchange`), the app re-registers it.
-- **Room of the call:** notifications name the room. If the app is open in *another* room, a push is routed to the page instead, which offers **Switch room**. A notification **Answer** opens the room screen prefilled with the call's room, and the call is answered automatically after Join.
-- **Deploying the relay:** `server/` is self-contained (`server/package.json`, `server/Dockerfile`, `GET /health`) and can run on Render, Fly.io, Railway, Cloud Run and similar hosts. Set:
-  - `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT`
-  - `ALLOWED_ORIGIN=https://<you>.github.io`
-  - optionally `SUBSCRIPTIONS_FILE`, on a persistent volume
-- **Enabling push on the Pages deployment:** add repository variables (Settings → Secrets and variables → Actions → Variables) named `VITE_PUSH_SERVER_URL` (and optionally `VITE_VAPID_PUBLIC_KEY`), then push. The Pages workflow passes every `VITE_*` variable into the build (`VITE_TURN_*` works the same way). Without a relay, push stays off and the UI says so.
-- **Offline callee without push:** if the callee is offline and push is unavailable, the call fails after 8 s with "User appears to be offline".
+### Service Worker (`public/sw.js`)
+
+- **Registration:** at `${BASE_URL}sw.js` with scope `${BASE_URL}`, i.e. `/meshcall/` on GitHub Pages. This is verified by the e2e test.
+- **`push`:** payloads are parsed defensively:
+  - `incoming-call` → *"Incoming Video Call — Alice is calling you in Engineering"*, with an **Open MeshCall** action;
+  - `{title, body}` and `{notification:{…}}` (the `/notifyAll` style) → a generic notification;
+  - plain text → a generic notification;
+  - a malformed payload → a generic notification. The worker never crashes.
+- **Visible app:** if MeshCall is visible, the worker posts the call to the page instead of notifying, so there is no duplicate.
+- **`notificationclick`:**
+  - The notification is closed, and the worker focuses an existing MeshCall window and `postMessage`s the call context.
+  - If no window exists, it stores the context in a short-lived Cache entry and opens `/meshcall/`. **No call data goes in the URL.**
+  - The app reads the context once, asks for or switches to the call's room, and then the call rings with the normal **Accept / Reject** dialog. **Nothing is auto-accepted.**
+- **`notificationclose`:** dismissing is not declining; the page is informed.
+- **`pushsubscriptionchange`:** the page re-registers the new subscription.
+
+**Limitation:** a Service Worker cannot hold a WebRTC call. Push only shows the notification. The chain is: user opens MeshCall → app starts → ScaleDrone connects → room joined → the caller re-sends the invite → WebRTC negotiation.
+
+**CORS:** the backend allows `https://aquibahmed21.github.io` and `http://localhost:5173` (verified). Any other deployment origin must be added to the backend's CORS configuration. The frontend never tries to bypass CORS.
 
 ## Data usage and bandwidth monitoring
 
@@ -690,10 +722,9 @@ npm run test:resilience        # glare, offline→online, signaling reconnect, p
 npm run test:screens           # responsive screenshots → tests/e2e/artifacts/
 npm run test:features          # PiP, fullscreen, chat (1:1 + group), combined states, mobile layout
 npm run test:rooms             # rooms & isolation, 5 layouts × 3 viewports, 1:1→group, live audience control
-npm run test:pwa               # SW, installability, offline shell, update flow, REAL push via relay → FCM
-                               #  (needs: base build on :4173 is served by the test itself; push build on :4174
-                               #   `VITE_PUSH_SERVER_URL=http://localhost:8787 npx vite build --base=/meshcall/ --outDir dist-push`
-                               #   + `npx vite preview --base=/meshcall/ --outDir dist-push --port 4174`; relay: `cd server && npm i && npm start`)
+npm run test:pwa               # SW, installability, offline shell, update flow (run `npx vite build --base=/meshcall/` first)
+npm run test:push              # Web Push against the real backend – needs `npx vite --base=/meshcall/ --port 5173`
+                               #  (never calls /notifyAll; removes every test subscription afterwards)
 ```
 
 The e2e suite checks:

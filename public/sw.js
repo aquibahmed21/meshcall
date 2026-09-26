@@ -109,96 +109,158 @@ function offlinePage() {
 }
 
 // ── push ────────────────────────────────────────────────────────────────────
+/*
+ * Payload shapes (parsed defensively – a malformed push must never break the worker, and with
+ * userVisibleOnly every push must still show SOMETHING):
+ *   { type: 'incoming-call', callId, roomId, roomName, callerId, callerName, callType, expiresAt }
+ *   { title, body } | { notification: { title, body } }   (e.g. the push server's /notifyAll)
+ *   plain text
+ */
+const LAUNCH_CACHE = 'launch-context-v1'; // not "meshcall-" prefixed → survives release clean-up
+const LAUNCH_KEY = () => appUrl('__launch-context');
+
 self.addEventListener('push', (event) => {
-  let data = {};
-  try {
-    data = event.data ? event.data.json() : {};
-  } catch {
-    data = { title: 'MeshCall', body: event.data ? event.data.text() : '' };
-  }
-  event.waitUntil(handlePush(data));
+  event.waitUntil(
+    handlePush(parsePush(event)).catch(() =>
+      self.registration.showNotification('MeshCall', { body: 'You have a new notification.', icon: ICON, badge: BADGE }),
+    ),
+  );
 });
 
-async function handlePush(data) {
-  if (data.type !== 'call-invite') {
-    return self.registration.showNotification(data.title || 'MeshCall', { body: data.body || '', icon: ICON, badge: BADGE });
+function parsePush(event) {
+  if (!event.data) return { kind: 'system' };
+  let json = null;
+  try {
+    json = event.data.json();
+  } catch {
+    const text = safeText(event);
+    return { kind: 'system', body: text.slice(0, 300) };
   }
-  const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+  if (json && typeof json === 'object') {
+    if (json.type === 'incoming-call' && typeof json.callId === 'string' && typeof json.callerName === 'string') {
+      return { kind: 'incoming-call', ...json };
+    }
+    const n = json.notification && typeof json.notification === 'object' ? json.notification : json;
+    return {
+      kind: 'system',
+      title: typeof n.title === 'string' ? n.title.slice(0, 120) : undefined,
+      body: typeof n.body === 'string' ? n.body.slice(0, 300) : undefined,
+    };
+  }
+  return { kind: 'system', body: String(json).slice(0, 300) };
+}
+
+function safeText(event) {
+  try {
+    return event.data.text();
+  } catch {
+    return '';
+  }
+}
+
+async function handlePush(p) {
+  if (p.kind !== 'incoming-call') {
+    return self.registration.showNotification(p.title || 'MeshCall', { body: p.body || '', icon: ICON, badge: BADGE, data: { kind: 'system' } });
+  }
+  const windows = await appWindows();
   const visible = windows.filter((c) => c.visibilityState === 'visible');
   if (visible.length) {
-    // The app is on screen: it rings in-page if it is in the caller's room. Tell it anyway, so
-    // an app that is open in ANOTHER room (or on the room screen) can offer to switch.
-    visible.forEach((c) => c.postMessage({ type: 'push-call', data }));
+    // The app is on screen and rings in-page (no duplicate system notification). An app that is
+    // open in ANOTHER room gets the context so it can offer to switch.
+    visible.forEach((c) => c.postMessage({ type: 'push-call', context: toContext(p, 'open') }));
     return;
   }
-
-  const expired = typeof data.expiresAt === 'number' && Date.now() > data.expiresAt + 60000;
-  if (expired) {
+  const where = p.roomName ? ` in ${p.roomName}` : '';
+  if (typeof p.expiresAt === 'number' && Date.now() > p.expiresAt + 60000) {
     return self.registration.showNotification('Missed call', {
-      body: `You missed a call from ${data.callerName || 'someone'}${data.roomName ? ` · ${data.roomName}` : ''}`,
-      tag: `missed-${data.callId}`,
+      body: `You missed a call from ${p.callerName}${where}`,
+      tag: `missed-${p.callId}`,
       icon: ICON,
       badge: BADGE,
+      data: { kind: 'system' },
     });
   }
-  const video = data.media === 'video';
-  const title = data.callKind === 'group' ? 'Group call invitation' : `Incoming ${video ? 'Video' : 'Audio'} Call`;
-  const who = data.callKind === 'group' ? `${data.callerName} invites you to a group call` : `${data.callerName} is calling you`;
+  const title = p.callType === 'group' ? 'Group Call Invitation' : p.callType === 'video' ? 'Incoming Video Call' : 'Incoming Audio Call';
+  const body = p.callType === 'group' ? `${p.callerName} invites you to a group call${where}` : `${p.callerName} is calling you${where}`;
   return self.registration.showNotification(title, {
-    body: data.roomName ? `${who}\nRoom: ${data.roomName}` : who,
-    tag: `call-${data.callId}`,
+    body,
+    tag: `call-${p.callId}`,
     renotify: true,
     requireInteraction: true,
     icon: ICON,
     badge: BADGE,
     vibrate: [400, 200, 400, 200, 400],
     timestamp: Date.now(),
-    data: { type: 'call', callId: data.callId, roomName: data.roomName },
-    actions: [
-      { action: 'answer', title: 'Answer' },
-      { action: 'dismiss', title: 'Dismiss' },
-    ],
+    data: { kind: 'incoming-call', callId: p.callId, roomId: p.roomId, roomName: p.roomName, callerId: p.callerId, callerName: p.callerName, callType: p.callType },
+    // The app is closed: "Open" is the only meaningful action (declining needs the app).
+    actions: [{ action: 'open', title: 'Open MeshCall' }],
   });
 }
 
-// Browser rotated/expired the subscription → tell open pages so they re-register it.
+function toContext(d, action) {
+  return {
+    kind: 'incoming-call',
+    action,
+    callId: d.callId,
+    roomId: d.roomId,
+    roomName: d.roomName,
+    callerId: d.callerId,
+    callerName: d.callerName,
+    callType: d.callType,
+    at: Date.now(),
+  };
+}
+
+async function appWindows() {
+  const all = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+  return all.filter((c) => c.url.startsWith(self.registration.scope));
+}
+
+// Browser rotated/expired the subscription → tell open pages so they register the new one.
 self.addEventListener('pushsubscriptionchange', (event) => {
-  event.waitUntil(
-    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((ws) => ws.forEach((c) => c.postMessage({ type: 'push-subscription-change' }))),
-  );
+  event.waitUntil(appWindows().then((ws) => ws.forEach((c) => c.postMessage({ type: 'push-subscription-change' }))));
 });
 
+/*
+ * Click: close → focus an existing MeshCall window and postMessage the call context, or open
+ * MeshCall and leave the context in a short-lived Cache entry the app reads once on start-up.
+ * No call data goes into the URL. The app shows the normal Accept/Reject UI – nothing is
+ * auto-accepted.
+ */
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
-  const action = event.action || 'open';
-  const callId = (event.notification.data && event.notification.data.callId) || undefined;
-  const roomName = (event.notification.data && event.notification.data.roomName) || undefined;
-  event.waitUntil(onClick(action, callId, roomName));
+  const data = event.notification.data || {};
+  const action = event.action === 'decline' ? 'decline' : 'open';
+  event.waitUntil(onClick(data, action).catch(() => self.clients.openWindow(appUrl('./'))));
 });
 
-async function onClick(action, callId, roomName) {
-  const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
-  const message = { type: 'notification-action', action, callId, roomName };
-  if (action === 'dismiss') {
-    windows.forEach((c) => c.postMessage(message));
-    return;
-  }
+async function onClick(data, action) {
+  const windows = await appWindows();
+  const context = data.kind === 'incoming-call' && typeof data.callId === 'string' ? toContext(data, action) : null;
   if (windows.length) {
-    const target = windows.find((c) => c.focused) || windows[0];
-    try {
-      await target.focus();
-    } catch {
-      /* focus can fail without user activation */
+    const target = windows.find((c) => c.focused) || windows.find((c) => c.visibilityState === 'visible') || windows[0];
+    if (action !== 'decline') {
+      try {
+        await target.focus();
+      } catch {
+        /* focus can be refused without user activation */
+      }
     }
-    target.postMessage(message);
+    if (context) target.postMessage({ type: 'notification-click', context });
     return;
   }
-  const url = new URL(appUrl('./'));
-  // The app always asks for the room first; the room name is only used to prefill that screen.
-  if (roomName) url.searchParams.set('room', roomName);
-  if (action === 'answer' && callId) {
-    url.searchParams.set('action', 'answer');
-    url.searchParams.set('callId', callId);
+  if (!context || action === 'decline') {
+    if (!context) await self.clients.openWindow(appUrl('./'));
+    return; // app closed + "decline": the caller's invite simply times out
   }
-  await self.clients.openWindow(url.href);
+  const cache = await caches.open(LAUNCH_CACHE);
+  await cache.put(LAUNCH_KEY(), new Response(JSON.stringify(context), { headers: { 'content-type': 'application/json' } }));
+  await self.clients.openWindow(appUrl('./'));
 }
+
+self.addEventListener('notificationclose', (event) => {
+  const data = event.notification.data || {};
+  if (data.kind !== 'incoming-call') return;
+  // Dismissing is not declining: the call keeps ringing in the app until answered/rejected.
+  event.waitUntil(appWindows().then((ws) => ws.forEach((c) => c.postMessage({ type: 'notification-closed', callId: data.callId }))));
+});
