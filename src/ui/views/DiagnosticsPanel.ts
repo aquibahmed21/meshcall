@@ -240,6 +240,7 @@ export function collectDiagnostics(app: AppContext) {
           remoteCandidates: p.peer?.remoteCandidates,
           iceRestarts: p.peer?.iceRestarts,
           generation: p.peer?.generation,
+          pcId: p.peer?.pcId,
           rttMs: st?.smoothedRttMs,
           lossPct: st?.lossPct,
           bytesSent: st?.bytesSent,

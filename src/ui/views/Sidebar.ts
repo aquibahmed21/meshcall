@@ -92,7 +92,7 @@ export class Sidebar {
           'li',
           { class: 'stream' },
           h('span', { class: 'live-dot' }, 'LIVE'),
-          h('div', { class: 'grow' }, h('span', {}, s.title), h('small', {}, `${s.hostName} · ${s.viewers}/${s.maxViewers} viewers · ${formatDuration(Date.now() - s.startedAt)}`)),
+          h('div', { class: 'grow' }, h('span', {}, s.title), h('small', {}, `${s.audienceMode === 'selected' ? 'Private · ' : ''}${s.hostName} · ${s.viewers}/${s.maxViewers} viewers · ${formatDuration(Date.now() - s.startedAt)}`)),
           h('button', { class: 'btn small', disabled: inCall || s.viewers >= s.maxViewers, onclick: () => this.app.live.join(s.streamId) }, 'Watch'),
         ),
       ),

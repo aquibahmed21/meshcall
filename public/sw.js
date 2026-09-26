@@ -7,6 +7,10 @@
  * when idle, so the call itself is negotiated by the page after the user opens it:
  *   push → notification → click → app opens/focuses → signaling → WebRTC negotiation → call
  */
+// Resolve app URLs against the SW scope so the app also works from a sub-path (GitHub Pages).
+const appUrl = (path) => new URL(path, self.registration.scope).href;
+const ICON = appUrl('icon.svg');
+
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', (event) => event.waitUntil(self.clients.claim()));
 
@@ -22,7 +26,7 @@ self.addEventListener('push', (event) => {
 
 async function handlePush(data) {
   if (data.type !== 'call-invite') {
-    return self.registration.showNotification(data.title || 'MeshCall', { body: data.body || '', icon: '/icon.svg' });
+    return self.registration.showNotification(data.title || 'MeshCall', { body: data.body || '', icon: ICON });
   }
   const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
   // A visible app already receives the invite over signaling and rings in-page.
@@ -33,7 +37,7 @@ async function handlePush(data) {
     return self.registration.showNotification('Missed call', {
       body: `You missed a call from ${data.callerName || 'someone'}`,
       tag: `missed-${data.callId}`,
-      icon: '/icon.svg',
+      icon: ICON,
     });
   }
   const video = data.media === 'video';
@@ -44,10 +48,10 @@ async function handlePush(data) {
     tag: `call-${data.callId}`,
     renotify: true,
     requireInteraction: true,
-    icon: '/icon.svg',
-    badge: '/icon.svg',
+    icon: ICON,
+    badge: ICON,
     vibrate: [400, 200, 400, 200, 400],
-    data: { type: 'call', callId: data.callId },
+    data: { type: 'call', callId: data.callId, roomName: data.roomName },
     actions: [
       { action: 'answer', title: 'Answer' },
       { action: 'dismiss', title: 'Dismiss' },
@@ -59,10 +63,11 @@ self.addEventListener('notificationclick', (event) => {
   event.notification.close();
   const action = event.action || 'open';
   const callId = (event.notification.data && event.notification.data.callId) || undefined;
-  event.waitUntil(onClick(action, callId));
+  const roomName = (event.notification.data && event.notification.data.roomName) || undefined;
+  event.waitUntil(onClick(action, callId, roomName));
 });
 
-async function onClick(action, callId) {
+async function onClick(action, callId, roomName) {
   const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
   const message = { type: 'notification-action', action, callId };
   if (action === 'dismiss') {
@@ -79,7 +84,9 @@ async function onClick(action, callId) {
     target.postMessage(message);
     return;
   }
-  const url = new URL('/', self.location.origin);
+  const url = new URL(appUrl('./'));
+  // The app always asks for the room first; the room name is only used to prefill that screen.
+  if (roomName) url.searchParams.set('room', roomName);
   if (action === 'answer' && callId) {
     url.searchParams.set('action', 'answer');
     url.searchParams.set('callId', callId);

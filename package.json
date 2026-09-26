@@ -15,7 +15,9 @@
     "push-server": "node server/push-server.mjs",
     "vapid": "web-push generate-vapid-keys",
     "test:resilience": "node tests/e2e/resilience.mjs",
-    "test:screens": "node tests/e2e/screens.mjs"
+    "test:screens": "node tests/e2e/screens.mjs",
+    "test:features": "node tests/e2e/features.mjs",
+    "test:rooms": "node tests/e2e/rooms.mjs"
   },
   "devDependencies": {
     "@vitejs/plugin-basic-ssl": "^2.3.0",

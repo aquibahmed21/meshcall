@@ -22,6 +22,7 @@ To test on phones or other PCs on your LAN, use `npm run dev:lan`. It serves ove
 
 ## Contents
 
+0. [Rooms, layouts, 1:1 → group, live audience](#rooms-layouts-11--group-live-audience)
 1. [Architecture](#architecture)
 2. [Mesh topology](#mesh-topology)
 3. [Signaling](#signaling-scaledrone)
@@ -36,11 +37,12 @@ To test on phones or other PCs on your LAN, use `npm run dev:lan`. It serves ove
 12. [Push notifications and Service Worker](#push-notifications--service-worker)
 13. [Data usage and bandwidth monitoring](#data-usage--bandwidth-monitoring)
 14. [Weak network handling](#weak-network-handling)
-15. [Diagnostics: TURN, STUN and WebRTC debugging](#diagnostics--turn--stun--webrtc-debugging)
-16. [Configuration and security](#configuration--security)
-17. [Browser limitations](#browser-limitations)
-18. [Mesh scalability limitations](#mesh-scalability-limitations)
-19. [Testing](#testing)
+15. [In-call chat, Picture-in-Picture and fullscreen](#in-call-chat-picture-in-picture-and-fullscreen)
+16. [Diagnostics: TURN, STUN and WebRTC debugging](#diagnostics--turn--stun--webrtc-debugging)
+17. [Configuration and security](#configuration--security)
+18. [Browser limitations](#browser-limitations)
+19. [Mesh scalability limitations](#mesh-scalability-limitations)
+20. [Testing](#testing)
 
 More detail:
 
@@ -48,6 +50,99 @@ More detail:
 - [`docs/SELF_AUDIT.md`](docs/SELF_AUDIT.md) lists the issues found during the final audit, each with its root cause, impact and fix.
 
 ---
+
+## Rooms, layouts, 1:1 → group, live audience
+
+### Rooms
+
+- **Every fresh page load asks for a room.** A previous room is never restored silently. Recently used names are offered as chips that only fill the input; you still have to press Join. A notification click may prefill the room (`?room=`), but still needs Join.
+- **Validation:** room names are trimmed, internal whitespace is collapsed, and Unicode is NFKC-normalised. They must be at most 64 characters, using only letters, digits, spaces and `- _ . '`.
+- **`roomId`:** the lower-cased, dash-joined name, e.g. "Engineering Team" → `engineering-team`. It is stamped on every signaling message.
+- **`roomKey`:** a 64-bit FNV hash of the `roomId`, used to build ScaleDrone room names: `observable-room-<key>` and `inbox-<key>-<deviceId>`.
+- **Identity:** always the `deviceId`, never the room or display name.
+- **Isolation, in two layers:**
+  1. Each room uses different ScaleDrone rooms.
+  2. `SignalingService` drops every incoming message whose `roomId` isn't the current room. Protocol v2 requires `roomId`, so v1 clients are ignored.
+
+  Calls are further isolated by `callId`, and streams by `streamId` (the stream's `callId`).
+- **Lifecycle:**
+
+```mermaid
+flowchart LR
+  A[Page load] --> R[Room screen] --> J[joinRoom: scope signaling → room presence → room inbox → live discovery → wait for member list, 15 s]
+  J -->|ok| U[Users & calls]
+  J -->|timeout / ScaleDrone down| R
+  U -->|Leave Room| L[end call/stream · close peer connections · stop media · unsubscribe · clear presence/streams/chat · drop room scope] --> R
+```
+
+The top bar shows **Room: name**, with **Copy** (copies only the name, never any credential) and **Leave**.
+
+### Call layouts
+
+`CallLayoutManager` (`src/ui/layout/`) is pure logic. It turns the tiles, the pinned participant and the active speaker into a `LayoutPlan`: the main tile(s), the strip order, and the effective layout. `VideoGrid` renders that plan by *moving* the existing tiles between the main area and the strip. Switching layout never touches an `RTCPeerConnection`, `MediaStream`, SDP or ICE; the e2e test verifies that the same `pcId` and the same `<video>` element survive, and that media keeps flowing.
+
+| Layout | Desktop / tablet | Phone |
+|---|---|---|
+| Grid | responsive equal tiles | 1 or 2 columns |
+| Speaker | active speaker large + equal row | main + horizontal strip |
+| Spotlight | one person full size + small chips | same |
+| Sidebar | main + vertical column | main + **horizontal** strip |
+| Filmstrip | main + scrollable thumbnails | same |
+
+- **Main participant, in priority order:** pinned (click a tile; click again to unpin) → active speaker (Speaker layout) → screen share → active speaker → first remote with video → you. The same participant is the PiP target.
+- **Active speaker:** detected from `RTCRtpReceiver.getSynchronizationSources().audioLevel`, read about 4×/s. There is no WebAudio pipeline. EWMA smoothing, a sustained lead of 0.9 s at 1.5× loudness, and a minimum 2.5 s dwell prevent flicker.
+- **Picker:** the Layout control (on phones: More → Layout) opens a picker, which becomes a bottom sheet on phones. The choice is saved as a per-device preference.
+
+### Adding people to a call (1:1 → group)
+
+```mermaid
+sequenceDiagram
+  participant A as Alice
+  participant B as Bob
+  participant C as Carol
+  Note over A,B: 1:1 call, A↔B connected
+  A->>B: call-participants-added {participantIds:[C]} (mesh room)
+  Note over A,B: both mark the call "group" – A↔B RTCPeerConnection untouched
+  A->>C: call-invite {callKind: group, participants:[A,B]}
+  C->>A: call-accept
+  C->>A: mesh-join {invitedBy: A}
+  C->>B: mesh-join {invitedBy: A}
+  Note over A,C: impolite side offers → P2P first → STUN → TURN
+  Note over B,C: impolite side offers → P2P first → STUN → TURN
+```
+
+- **Who may add:** any current participant, through **Add** (desktop) or **More → Add** (phones). Receivers accept `call-participants-added` only from a participant of that exact call.
+- **Group access policy:** participants + invitees + joiners vouched for by an allowed participant (`invitedBy`). Welcomes (replies to our own join) are trusted. The e2e verifies that a forged add or join from a non-participant gets no connection.
+- **Duplicates:** people already in the call or already invited are skipped.
+- **Unanswered invites:** declines, busy, no answer and offline each produce a toast. The call itself is never affected.
+- **Rejects:** only the host can reject a joiner, so a race between two simultaneous invitees can't break the call.
+- **Mesh cap:** 6 participants.
+- **Rejoin:** a participant who reloads rejoins with a fresh `RTCPeerConnection`, so P2P is attempted again.
+
+### Live-stream audience
+
+- **Go live** asks *Who can watch?*: **Everyone** in the room, or **Selected participants** from a room checklist.
+- **Enforcement:** the audience is enforced inside the broadcaster's mesh (the `authorize` callback), on every join *and* every negotiation message. An unselected user never gets an `RTCPeerConnection`, so the media is never sent to them; the video element isn't merely hidden. A forced join by an unselected user is refused (e2e).
+- **Manage audience** (while live):
+  - A removed viewer's connection is closed (media stops immediately), and they are barred from reconnecting.
+  - An added viewer is invited and connects P2P-first.
+  - Nobody else's connection is touched.
+- **Audience panel:** shows each person as *Streaming / Connecting / Can watch / Invited / Not selected / Disconnected*, with the **measured upload per viewer** and the total, taken from WebRTC transport stats, not estimated.
+- **Signaling:**
+
+| Message | Direction |
+|---|---|
+| `live-started` (+ heartbeat) | lobby |
+| `live-audience-updated` | lobby |
+| `live-stopped` | lobby |
+| `live-viewer-added` | streamer → viewer inbox |
+| `live-viewer-removed` | streamer → viewer inbox |
+| `live-viewer-joined` | viewer → streamer |
+| `live-viewer-left` | viewer → streamer (also sent on page unload, so the upload slot is freed immediately) |
+
+  All of them carry `roomId`, `callId` = `streamId`, `senderId`, `messageId` and `timestamp`, plus `targetUserId` where it applies. Audience-changing messages are accepted only from the stream's own streamer.
+- **Signaling confidentiality:** ScaleDrone without JWT is not confidential, so stream titles and allowed ids are visible to room members. The access control applies to the **media**.
+- **Viewer reconnect:** the viewer is re-authorised on join. Allowed viewers get a fresh P2P-first connection; revoked viewers are refused.
 
 ## Architecture
 
@@ -65,6 +160,8 @@ src/
 │   ├── NetworkMonitor          online/offline, connection type, sleep/wake, resume
 │   ├── NotificationService     in-app system notifications + SW click bridge
 │   ├── PushNotificationService Web Push subscription + relay client
+│   ├── RoomService             room-name validation/normalisation, roomId + roomKey
+│   ├── ChatService             call-scoped text chat over the mesh room (dedupe, ordering, unread)
 │   ├── SettingsService         quality, devices, ICE test mode
 │   └── Ringtone                WebAudio ring/ringback
 ├── media/
@@ -80,14 +177,19 @@ src/
 │   ├── StatsMonitor/StatsParser   getStats() polling and parsing (selected pair = truth)
 │   ├── DataUsageMonitor        per-call byte accounting across reconnects
 │   ├── AdaptiveLadder/AdaptiveQualityManager  hysteresis-based video adaptation
-│   └── IceServerProbe          STUN/TURN health check
+│   ├── IceServerProbe          STUN/TURN health check
+│   └── ActiveSpeaker           audio-level (getSynchronizationSources) speaker detection + hysteresis
 ├── calls/
 │   ├── CallManager             call state machine, invites, accept/reject/hangup, rejoin
 │   ├── CallStateMachine        allowed status transitions
 │   ├── MeshSession             membership protocol + wiring for one call/stream
 │   ├── GroupCallManager        create/add/remove/leave
 │   └── LiveStreamManager       go live, discovery, viewer cap
-└── ui/                         UIManager + views (grid, call, sidebar, dialogs, diagnostics)
+└── ui/                         UIManager + views (grid, call, chat, sidebar, dialogs, diagnostics)
+    ├── layout/CallLayoutManager  grid · speaker · spotlight · sidebar · filmstrip (pure logic)
+    ├── views/RoomScreen        "Join a Room" – shown on every page load
+    ├── ViewModeController      Picture-in-Picture + Fullscreen, synced with the browser APIs
+    └── views/ChatPanel         chat list + composer (Enter = send, Shift+Enter = newline)
 public/sw.js                    Service Worker (push → notification → open/focus app)
 server/push-server.mjs          optional Web Push relay (VAPID)
 ```
@@ -137,9 +239,9 @@ The app uses channel `EoIG3R1I4JdyS4L1`, configurable with `VITE_SCALEDRONE_CHAN
 
 | Room | Purpose |
 |---|---|
-| `observable-lobby` | presence (ScaleDrone member list), heartbeats, live stream announcements |
-| `inbox-<deviceId>` | directed messages: invites, SDP, ICE, welcome, reject… |
-| `mesh-<callId>` | broadcast within a call: join, leave, heartbeat, media state |
+| `observable-room-<roomKey>` | room presence (ScaleDrone member list), heartbeats, live-stream announcements |
+| `inbox-<roomKey>-<deviceId>` | directed messages within the room: invites, SDP, ICE, welcome, reject… |
+| `mesh-<callId>` | broadcast within a call: join, leave, heartbeat, media state, **chat messages** |
 
 Every message is a typed envelope (`src/types/signaling.ts`) containing:
 
@@ -148,6 +250,7 @@ Every message is a typed envelope (`src/types/signaling.ts`) containing:
 - `messageType`
 - `senderId` and `receiverId`: persistent device IDs, never display names
 - `senderSessionId`: changes on every reload, so reloads can be recognised as rejoins
+- `roomId`: the room scope; messages from any other room are dropped on receipt
 - `callId`
 - `peerId`: the sender's `RTCPeerConnection` id for negotiation messages
 - `payload`
@@ -399,6 +502,73 @@ RTT and loss are smoothed with an EWMA.
 - **Fixed presets:** Low, 360p, 480p, 720p and 1080p set fixed encodings and camera capture constraints.
 - **Audio:** runs at a high sender priority. Audio bitrate presets are 16, 32 and 64 kbps.
 
+## In-call chat, Picture-in-Picture and fullscreen
+
+These features sit entirely in the UI and signaling layers. The ICE strategy, Perfect Negotiation, recovery logic and peer-connection lifecycle are unchanged.
+
+### Chat
+
+Chat goes over **ScaleDrone**, not a WebRTC DataChannel:
+
+- Every participant is already subscribed to `mesh-<callId>`, so chat adds no subscription, no peer connection and no new failure mode to the media path.
+- It also works for peers whose media is currently down (for example, a peer that is reconnecting).
+
+Wire format: the standard signaling envelope with `messageType: "chat-message"` and `payload: { text }`. The envelope already carries `messageId`, `senderId`, `senderName`, `callId` and `timestamp`. `ChatService` maps it onto the domain type:
+
+```ts
+interface ChatMessage {
+  type: 'chat-message';
+  messageId: string;      // uuid, unique per message (a retry re-uses it)
+  senderId: string;       // persistent deviceId
+  senderName: string;
+  receiverId?: string;    // unset = everyone in the call
+  callId?: string;        // isolates the conversation
+  text: string;           // trimmed, ≤ 2000 chars
+  timestamp: number;
+}
+```
+
+- **Isolation:** `ChatService` is bound to one `callId`. A message carrying any other `callId`, or arriving while no call is bound, is ignored. Chat is bound while the call is *connecting*, *connected* or *reconnecting*, so a WebRTC outage does **not** clear it. It is cleared once the call ends (messages, unread count and processed ids), so the next call always starts clean.
+- **De-duplication and ordering:** `processedMessageIds` means each message is shown once. Messages are kept sorted by `(timestamp, messageId)`, so out-of-order arrival is fine. Ordering is by the sender's clock, so small clock skew between devices can reorder near-simultaneous messages.
+- **Delivery:** our own message appears immediately as *Sending…*. It flips to sent when ScaleDrone echoes our publish back. With no echo within 12 s it becomes *Not delivered · Retry*. A retry uses the same `messageId`, so peers that already received it drop the duplicate.
+- **Composer:**
+  - **Enter** sends; **Shift+Enter** inserts a newline; IME composition is respected.
+  - Empty or whitespace-only messages are not sent.
+  - Identical text submitted twice within 0.8 s is treated as an accidental double send.
+  - While signaling is down, input is disabled with the placeholder *Connecting…* or *Messaging unavailable*.
+- **Unread count:** while the chat panel is closed, the **Chat** control shows a badge such as `Chat (2)`. Opening the chat clears it. Your own messages never count.
+- **No history:** there is no backend. A participant who reloads starts with an empty chat, while the others keep theirs.
+
+### Picture-in-Picture
+
+- The **Enter PiP / Exit PiP** control, and a PiP button on each tile, use `HTMLVideoElement.requestPictureInPicture()` on the **existing tile `<video>`**. No second stream is created.
+- **What PiP shows:** the *main participant*. That is the tile you clicked (outlined); otherwise a screen share, otherwise the first remote participant with video, otherwise your own video. Selecting another tile while PiP is open moves PiP to it.
+- **If the PiP participant leaves:** PiP follows the new main participant if that tile has video; otherwise the browser closes it.
+- **UI state is re-read from the browser:** `document.pictureInPictureElement` is checked on each `enterpictureinpicture` and `leavepictureinpicture` event. Closing the PiP window yourself therefore resets the button to *Enter PiP*.
+- **Call end:** PiP is exited immediately.
+- **States:** `inactive | entering | active | exiting | unsupported | error`.
+- **Unsupported browsers:** the control is hidden, as in Firefox, which has only its own built-in PiP toggle.
+
+### Fullscreen
+
+- `requestFullscreen()` targets the **call container** (video area, chat panel and controls), never the whole app.
+- In fullscreen the grid switches to a **spotlight** layout: the main participant is large and the others form a filmstrip.
+- Clicking a filmstrip tile switches the main participant. The controls and chat stay usable.
+- **ESC** exits; the browser handles it natively, and the `fullscreenchange` event resynchronises the UI.
+- `fullscreenerror` shows a toast. Fullscreen is exited when the call ends.
+- **States:** `inactive | active | unsupported | error`.
+- **Fullscreen → PiP** and **PiP → Fullscreen** both work where the browser allows them. Button labels are always derived from the browser's current state, so they can't show a conflicting state.
+
+### Layout
+
+| Width | Chat / participants |
+|---|---|
+| Desktop (> 1100 px) | right-hand column inside the call view: Users · Video · Chat |
+| Tablet (≤ 1100 px) | drawer over the video; controls stay visible; secondary controls move into **More** |
+| Phone (≤ 767 px) | Video → Controls → Participants/Chat stacked; while typing, the video shrinks to a strip. The app height follows `visualViewport`, and `interactive-widget=resizes-content` keeps the on-screen keyboard from covering the input. |
+
+Chat and participants share one panel with tabs. On desktop, all controls are inline: Mute, Camera, Share, Chat, People, Invite, Fullscreen, PiP, Stats and End. On smaller screens the primary controls stay inline (Mute, Camera, Chat, More, End) and the rest are in the **More** menu.
+
 ## Diagnostics: TURN, STUN and WebRTC debugging
 
 Open the **Diagnostics** panel with the chart icon in the top bar.
@@ -465,6 +635,8 @@ Other security notes:
 - **Speaker selection** (`setSinkId`) is available in Chromium and Firefox 116+, not Safari.
 - **Screen sharing** is desktop only.
 - **Background throttling:** mobile browsers throttle or kill background tabs. The call recovers through ICE restart when the tab returns, but may drop if the OS kills the tab.
+- **Picture-in-Picture:** available in Chromium (desktop and Android) and Safari. Firefox exposes no PiP API, so the control is hidden there.
+- **Element fullscreen:** not available on iPhone Safari (`document.fullscreenEnabled` is false), so the control is hidden there. iPad Safari supports it.
 - **Web Push on iOS** requires the app to be installed to the Home Screen. A Service Worker can never run a call.
 - **`navigator.connection`** (the Network Information API) exists only in Chromium, so network-change detection falls back to online/offline events, sleep detection and signaling liveness elsewhere.
 
@@ -489,6 +661,8 @@ npm run dev &                  # then, with a real ScaleDrone channel:
 npm run test:e2e               # two/three-browser end-to-end suite (headless Chrome, fake media)
 npm run test:resilience        # glare, offline→online, signaling reconnect, peer vanishes
 npm run test:screens           # responsive screenshots → tests/e2e/artifacts/
+npm run test:features          # PiP, fullscreen, chat (1:1 + group), combined states, mobile layout
+npm run test:rooms             # rooms & isolation, 5 layouts × 3 viewports, 1:1→group, live audience control
 ```
 
 The e2e suite checks:

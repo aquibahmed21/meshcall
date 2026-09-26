@@ -17,8 +17,9 @@ export class GroupCallManager {
     return this.calls.startGroupCall(userIds, media, name);
   }
 
+  /** Works for 1:1 calls too (converts them into a group call). */
   addParticipant(userId: string): void {
-    this.calls.inviteToCall(userId);
+    this.calls.addParticipants([userId]);
   }
 
   /** Host only. */

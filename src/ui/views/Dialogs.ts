@@ -1,9 +1,10 @@
 import type { AppContext } from '../../app';
 import { logHub } from '../../core/logger';
 import type { AudioQualityPreset, IceTestMode, VideoQualityPreset } from '../../services/SettingsService';
-import type { MediaKind } from '../../types/signaling';
+import type { AudienceMode, MediaKind } from '../../types/signaling';
+import type { LiveInvite } from '../../calls/LiveStreamManager';
 import type { CallState } from '../../types/state';
-import { colorFor, h, initials } from '../dom';
+import { colorFor, h, initials, nodes } from '../dom';
 import { icons } from '../icons';
 import { Modal } from './Modal';
 
@@ -175,51 +176,108 @@ export function openGroupCall(app: AppContext): Modal {
   return m.open();
 }
 
-export function openInvite(app: AppContext): Modal {
-  const m = new Modal('Add participant');
-  const inCall = new Set(app.calls.state?.participants.keys() ?? []);
+/** Multi-select of room users: used to add people to a 1:1 (→ group) or group call. */
+export function openAddParticipants(app: AppContext): Modal {
+  const c = app.calls.state;
+  const m = new Modal(c?.kind === 'direct' ? 'Add participants' : 'Add to call');
+  const inCall = new Set([...(c?.participants.keys() ?? []), ...app.calls.pendingInviteIds]);
   const users = app.presence.list().filter((u) => !inCall.has(u.deviceId));
+  const chosen = new Set<string>();
+  const add = h('button', { class: 'btn primary', disabled: true }, 'Add to Call');
+  const max = app.config.mesh.maxParticipants - 1 - (c?.participants.size ?? 0) - app.calls.pendingInviteIds.length;
+  add.addEventListener('click', () => {
+    const invited = app.calls.addParticipants([...chosen]);
+    if (invited.length) m.close();
+  });
   m.setContent(
-    users.length
-      ? h(
-          'ul',
-          { class: 'pick-list' },
-          ...users.map((u) =>
-            h(
-              'li',
-              {},
-              h('span', { class: `dot ${u.status}` }),
-              h('span', { class: 'grow' }, u.name),
-              h(
-                'button',
-                {
-                  class: 'btn small',
-                  disabled: u.status !== 'online' && !u.pushEnabled,
-                  onclick: () => {
-                    app.groups.addParticipant(u.deviceId);
-                    m.close();
-                  },
-                },
-                'Invite',
-              ),
-            ),
-          ),
-        )
-      : h('p', { class: 'hint' }, 'No other users available.'),
+    ...nodes(
+      c?.kind === 'direct' ? h('p', { class: 'hint' }, 'This 1:1 call becomes a group call. Your current connection stays up – only new connections are set up for the people you add.') : null,
+      users.length && max > 0
+        ? h(
+            'ul',
+            { class: 'pick-list' },
+            ...users.map((u) => {
+              const reachable = u.status === 'online' || u.pushEnabled;
+              const cb = h('input', { type: 'checkbox', disabled: !reachable, 'data-user': u.deviceId });
+              cb.addEventListener('change', () => {
+                if (cb.checked && chosen.size >= max) {
+                  cb.checked = false;
+                  return;
+                }
+                if (cb.checked) chosen.add(u.deviceId);
+                else chosen.delete(u.deviceId);
+                add.disabled = chosen.size === 0;
+                add.textContent = chosen.size > 1 ? `Add ${chosen.size} to Call` : 'Add to Call';
+              });
+              return h(
+                'li',
+                {},
+                h('label', {}, cb, h('span', { class: `dot ${u.status}` }), h('span', { class: 'grow' }, u.name), h('small', {}, u.busy ? 'in another call' : reachable ? u.status : 'offline')),
+              );
+            }),
+          )
+        : h('p', { class: 'hint' }, max <= 0 ? `The call is full (mesh limit ${app.config.mesh.maxParticipants}).` : 'Nobody else is available in this room.'),
+      h('p', { class: 'hint' }, `Mesh: every participant sends a separate stream to every other participant (max ${app.config.mesh.maxParticipants}).`),
+      h('div', { class: 'modal-actions' }, add),
+    ),
   );
   return m.open();
 }
 
+/** Everyone / Selected members + room-user checklist (Go live & Manage audience). */
+function audiencePicker(app: AppContext, mode: AudienceMode, selected: Set<string>, onChange: () => void) {
+  const state = { mode, ids: new Set(selected) };
+  const users = app.presence.list();
+  const list = h(
+    'ul',
+    { class: 'pick-list audience-pick' },
+    ...(users.length
+      ? users.map((u) => {
+          const cb = h('input', { type: 'checkbox', checked: state.ids.has(u.deviceId), 'data-user': u.deviceId });
+          cb.addEventListener('change', () => {
+            if (cb.checked) state.ids.add(u.deviceId);
+            else state.ids.delete(u.deviceId);
+            onChange();
+          });
+          return h('li', {}, h('label', {}, cb, h('span', { class: `dot ${u.status}` }), h('span', { class: 'grow' }, u.name), h('small', {}, u.status)));
+        })
+      : [h('li', { class: 'empty' }, 'Nobody else is in this room yet.')]),
+  );
+  const radio = (value: AudienceMode, label: string, hint: string) => {
+    const input = h('input', { type: 'radio', name: 'audience', value, checked: state.mode === value });
+    input.addEventListener('change', () => {
+      state.mode = value;
+      list.hidden = value !== 'selected';
+      onChange();
+    });
+    return h('label', { class: 'radio-row' }, input, h('span', {}, h('strong', {}, label), h('small', {}, hint)));
+  };
+  list.hidden = state.mode !== 'selected';
+  const el = h(
+    'fieldset',
+    { class: 'audience-fieldset' },
+    h('legend', {}, 'Who can watch?'),
+    radio('everyone', 'Everyone', 'Anyone in this room can join'),
+    radio('selected', 'Selected participants', 'Only the people you pick receive the stream'),
+    list,
+  );
+  return { el, state };
+}
+
 export function openGoLive(app: AppContext): Modal {
-  const m = new Modal('Go live');
+  const m = new Modal('Go live', { className: 'wide-sm' });
   const title = h('input', { type: 'text', placeholder: `${app.identity.displayName}'s stream`, maxlength: 60 });
-  const start = h('button', { class: 'btn primary' }, 'Start streaming');
+  const start = h('button', { class: 'btn primary' }, 'Start Live Stream');
+  const picker = audiencePicker(app, 'everyone', new Set(), () => {
+    start.disabled = picker.state.mode === 'selected' && picker.state.ids.size === 0;
+  });
   start.addEventListener('click', () => {
     m.close();
-    void app.live.goLive(title.value.trim());
+    void app.live.goLive(title.value.trim(), { mode: picker.state.mode, viewerIds: [...picker.state.ids] });
   });
   m.setContent(
     field('Title', title),
+    picker.el,
     h(
       'div',
       { class: 'notice' },
@@ -227,6 +285,51 @@ export function openGoLive(app: AppContext): Modal {
       `Every viewer receives a separate copy of your stream straight from your device, so your upload is roughly bitrate × viewers (e.g. 8 viewers × 1 Mbps ≈ 8 Mbps up). Viewers are capped at ${app.config.mesh.maxLiveViewers}. There is no media server.`,
     ),
     h('div', { class: 'modal-actions' }, start),
+  );
+  return m.open();
+}
+
+/** Streamer: change the audience while live. Removed viewers stop receiving immediately. */
+export function openManageAudience(app: AppContext): Modal | null {
+  const st = app.live.state;
+  if (!st?.streamId) return null;
+  const m = new Modal('Manage audience', { className: 'wide-sm' });
+  const update = h('button', { class: 'btn primary' }, 'Update Audience');
+  const picker = audiencePicker(app, st.audienceMode, st.selectedViewerIds, () => undefined);
+  update.addEventListener('click', () => {
+    app.live.updateAudience(picker.state.mode, [...picker.state.ids]);
+    m.close();
+  });
+  m.setContent(
+    picker.el,
+    h('p', { class: 'hint' }, 'Viewers you remove are disconnected at once – the stream is no longer sent to them. People you add are invited and connect peer-to-peer (TURN only if needed).'),
+    h('div', { class: 'modal-actions' }, update),
+  );
+  return m.open();
+}
+
+/** Viewer: the streamer added you to a (selected-audience) live stream. */
+export function openLiveInvite(app: AppContext, invite: LiveInvite): Modal {
+  const m = new Modal('Live stream invitation');
+  m.setContent(
+    h('div', { class: 'avatar big', style: `--avatar:${colorFor(invite.hostId)}` }, initials(invite.hostName)),
+    h('p', { class: 'incoming-text' }, `${invite.hostName} added you to the live stream “${invite.title}”`),
+    h(
+      'div',
+      { class: 'modal-actions' },
+      h('button', { class: 'btn', onclick: () => m.close() }, 'Not now'),
+      h(
+        'button',
+        {
+          class: 'btn primary',
+          onclick: () => {
+            m.close();
+            app.live.watch(invite);
+          },
+        },
+        'Watch',
+      ),
+    ),
   );
   return m.open();
 }

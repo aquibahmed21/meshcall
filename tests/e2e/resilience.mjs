@@ -7,6 +7,15 @@
  */
 import { chromium } from 'playwright-core';
 
+const ROOM = process.env.E2E_ROOM || `e2e-${Date.now().toString(36)}`;
+/** Every page load asks for a room – enter the shared test room. */
+async function enterRoom(page, room = ROOM) {
+  await page.waitForSelector('#room-name', { timeout: 30_000 });
+  await page.fill('#room-name', room);
+  await page.click('.room-screen button[type=submit]');
+  await page.waitForFunction(() => !!window.__voip?.app.rooms.current && window.__voip.app.signaling.status === 'connected', null, { timeout: 30_000 });
+}
+
 const URL = process.env.E2E_URL || 'http://localhost:5173/';
 const results = [];
 const check = (name, ok, detail = '') => {
@@ -38,6 +47,7 @@ async function user(name) {
   await page.goto(URL);
   await page.fill('#name', name);
   await page.click('button[type=submit]');
+  await enterRoom(page);
   await page.waitForFunction(() => window.__voip?.app.signaling.status === 'connected', null, { timeout: 30_000 });
   return { name, ctx, page, id: await page.evaluate(() => window.__voip.app.identity.deviceId) };
 }

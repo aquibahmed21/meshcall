@@ -12,7 +12,7 @@ import type { PresenceService } from '../services/PresenceService';
 import type { PushNotificationService } from '../services/PushNotificationService';
 import { Ringtone } from '../services/Ringtone';
 import type { SettingsService } from '../services/SettingsService';
-import { inboxRoom, type SignalingService } from '../services/SignalingService';
+import { inboxRoom, meshRoom, type SignalingService } from '../services/SignalingService';
 import type { CallKind, InvitePayload, MediaKind, MeshRole, MessageOf, SignalingMessage } from '../types/signaling';
 import type { CallState, CallStatus } from '../types/state';
 import type { DataUsageSnapshot } from '../webrtc/DataUsageMonitor';
@@ -40,6 +40,8 @@ export interface CallDeps {
 }
 
 export interface SavedCall {
+  roomId: string;
+  participantIds?: string[];
   callId: string;
   kind: CallKind;
   media: MediaKind;
@@ -86,12 +88,23 @@ export class CallManager {
   private disposer = new Disposer();
   private everConnectedPeer = false;
   private calleeOnline = false;
+  /** Group invitations we sent that are not answered yet (duplicate/offline/decline handling). */
+  private pendingInvites = new Map<string, { name: string; acked: boolean; timers: Array<ReturnType<typeof setTimeout>> }>();
+  /** Invitee: participants listed in the invitation (seed for the join allow-list). */
+  private inviteParticipants: string[] = [];
+  private liveAuthorize: ((deviceId: string) => boolean) | undefined;
+  private rejoinParticipants: string[] | null = null;
+  private _rejoinOffer: SavedCall | null = null;
 
   constructor(private readonly d: CallDeps) {}
 
-  init(): void {
+  /** Enter the current room: subscribe to this device's room inbox and wire listeners. */
+  start(): void {
     const { signaling, identity, network, presence, notifications, media } = this.d;
-    this.disposer.add(signaling.subscribe(inboxRoom(identity.deviceId)));
+    const room = signaling.currentRoom;
+    if (!room) throw new Error('CallManager.start() requires a room');
+    this.disposer.dispose();
+    this.disposer.add(signaling.subscribe(inboxRoom(room.roomKey, identity.deviceId)));
     this.disposer.add(signaling.events.on('message', ({ msg }) => this.onMessage(msg)));
     this.disposer.add(network.events.on('change', ({ reason }) => this.mesh?.onNetworkChange(reason)));
     this.disposer.add(presence.events.on('change', () => this.onPresenceChange()));
@@ -100,8 +113,7 @@ export class CallManager {
     this.disposer.listen(window, 'pagehide', () => this.persistActiveCall());
 
     const saved = storage.get<SavedCall | null>(SAVED_CALL_KEY, null, 'session');
-    if (saved && Date.now() - saved.savedAt < REJOIN_WINDOW_MS) this.events.emit('rejoinAvailable', saved);
-    else storage.remove(SAVED_CALL_KEY, 'session');
+    this.setRejoinOffer(saved && saved.roomId === room.roomId && Date.now() - saved.savedAt < REJOIN_WINDOW_MS ? saved : null);
 
     // Opened from a push/notification "Answer" click: accept as soon as the invite arrives.
     const params = new URLSearchParams(location.search);
@@ -117,6 +129,32 @@ export class CallManager {
         }
       }, 30_000);
     }
+  }
+
+  /**
+   * Leave the room: end any call/stream (peer connections, media, mesh room), cancel pending
+   * invitations, and remove every room listener/subscription.
+   */
+  stop(): void {
+    if (this.call && !isTerminal(this.call.status)) this.hangup();
+    this.reset();
+    this.clearPendingInvites();
+    this.disposer.dispose();
+    this.pendingAutoAnswer = null;
+    this.seenInvites.clear();
+    this.inviteParticipants = [];
+    this.liveAuthorize = undefined;
+    this.setRejoinOffer(null);
+  }
+
+  /** Current "rejoin your previous call" offer (state, so late subscribers can read it). */
+  get rejoinOffer(): SavedCall | null {
+    return this._rejoinOffer;
+  }
+
+  private setRejoinOffer(saved: SavedCall | null): void {
+    this._rejoinOffer = saved;
+    this.events.emit('rejoinAvailable', saved);
   }
 
   get state(): CallState | null {
@@ -185,15 +223,108 @@ export class CallManager {
     await this.acquireMedia(media);
     if (this.call?.callId !== callId) return;
     this.startMesh();
+    this.mesh?.allow(userIds);
     for (const id of userIds) this.inviteToCall(id);
+  }
+
+  /**
+   * Add people to the running call. A 1:1 call is converted into a group call first; the
+   * existing peer connection is kept – only the new participants' links get negotiated.
+   * Returns the ids actually invited (duplicates / people already in the call are skipped).
+   */
+  addParticipants(userIds: string[]): string[] {
+    const c = this.call;
+    const me = this.d.identity.deviceId;
+    if (!c || !this.mesh || c.kind === 'live' || (c.status !== 'connected' && c.status !== 'connecting' && c.status !== 'reconnecting')) {
+      this.toast('warn', 'Unable to add participants right now');
+      return [];
+    }
+    const added: string[] = [];
+    for (const id of new Set(userIds)) {
+      const name = this.d.presence.nameOf(id);
+      if (id === me) continue;
+      if (c.participants.has(id)) {
+        this.toast('info', `${name} is already in the call`);
+        continue;
+      }
+      if (this.pendingInvites.has(id)) {
+        this.toast('info', `${name} has already been invited`);
+        continue;
+      }
+      added.push(id);
+    }
+    // Mesh cap: every extra participant costs everyone another upstream copy.
+    const room = this.d.config.mesh.maxParticipants - 1 - c.participants.size - this.pendingInvites.size;
+    if (added.length > room) {
+      this.toast('warn', room > 0 ? `Only ${room} more participant(s) fit in a mesh call` : 'The call is full');
+      added.splice(Math.max(0, room));
+    }
+    if (!added.length) return [];
+    if (c.kind === 'direct') this.convertToGroup('you added participants');
+    // Tell current participants first (widens their join allow-list), then invite.
+    this.d.signaling.broadcast(meshRoom(c.callId), 'call-participants-added', { participantIds: added, title: c.title }, { callId: c.callId });
+    this.mesh.allow(added);
+    for (const id of added) this.inviteToCall(id);
+    return added;
   }
 
   inviteToCall(userId: string): void {
     const c = this.call;
     if (!c || c.kind !== 'group' || isTerminal(c.status)) return;
+    const name = this.d.presence.nameOf(userId);
+    this.clearPendingInvite(userId);
     this.sendInvite(userId, 'group');
-    if (this.d.presence.status(userId) !== 'online') void this.sendPush(userId);
-    this.toast('info', `Invited ${this.d.presence.nameOf(userId)}`);
+    const online = this.d.presence.status(userId) === 'online';
+    if (!online) void this.sendPush(userId);
+    const entry = { name, acked: false, timers: [] as Array<ReturnType<typeof setTimeout>> };
+    entry.timers.push(
+      setTimeout(() => {
+        if (this.pendingInvites.get(userId) !== entry || entry.acked) return;
+        if (!this.d.push.canSend) {
+          this.toast('warn', `${name} appears to be offline`);
+          this.clearPendingInvite(userId);
+        }
+      }, this.d.config.timeouts.offlineNoAckMs),
+      setTimeout(() => {
+        if (this.pendingInvites.get(userId) !== entry) return;
+        this.toast('info', `${name} didn't answer`);
+        this.clearPendingInvite(userId);
+      }, this.d.config.timeouts.ringMs),
+    );
+    this.pendingInvites.set(userId, entry);
+    this.toast('info', `Invited ${name}`);
+  }
+
+  /** People invited to the current call who have not answered yet. */
+  get pendingInviteIds(): string[] {
+    return [...this.pendingInvites.keys()];
+  }
+
+  private clearPendingInvite(userId: string): void {
+    const e = this.pendingInvites.get(userId);
+    if (!e) return;
+    e.timers.forEach(clearTimeout);
+    this.pendingInvites.delete(userId);
+    this.emit();
+  }
+
+  private clearPendingInvites(): void {
+    for (const id of [...this.pendingInvites.keys()]) this.clearPendingInvite(id);
+  }
+
+  /** 1:1 → group. Metadata + access policy only; RTCPeerConnections are not touched. */
+  private convertToGroup(reason: string): void {
+    const c = this.call;
+    if (!c || c.kind !== 'direct') return;
+    log.info(`1:1 call converted to a group call (${reason})`);
+    c.kind = 'group';
+    c.type = 'group';
+    c.title = c.title ?? 'Group call';
+    this.connectTimer.clear();
+    this.reconnectTimer.clear();
+    this.mesh?.convertToGroup([]);
+    if (c.status === 'reconnecting' || c.status === 'connecting') this.setStatus('connected');
+    this.emit();
   }
 
   removeParticipant(userId: string): void {
@@ -202,8 +333,13 @@ export class CallManager {
 
   // ── live ─────────────────────────────────────────────────────────────────
 
-  async startLive(title: string): Promise<string | null> {
+  /**
+   * Start broadcasting. `authorize` is the streamer's audience rule – the mesh consults it before
+   * accepting ANY viewer (join or negotiation), so unselected users never receive the media.
+   */
+  async startLive(title: string, authorize?: (deviceId: string) => boolean): Promise<string | null> {
     if (!this.guardIdle()) return null;
+    this.liveAuthorize = authorize;
     const streamId = uuid();
     this.call = this.newCall({ callId: streamId, kind: 'live', media: 'video', role: 'broadcaster', hostId: this.d.identity.deviceId, direction: 'outgoing', status: 'connecting' });
     this.call.title = title;
@@ -216,6 +352,28 @@ export class CallManager {
     }
     this.startMesh();
     return streamId;
+  }
+
+  /** Streamer removed a viewer from the audience: close only that viewer's connection. */
+  revokeViewer(deviceId: string, reason: string): void {
+    const c = this.call;
+    if (c?.kind === 'live' && c.role === 'broadcaster') this.mesh?.revoke(deviceId, reason);
+  }
+
+  /** Streamer: a viewer announced it left – free its connection immediately. */
+  viewerLeft(deviceId: string): void {
+    const c = this.call;
+    if (c?.kind === 'live' && c.role === 'broadcaster' && c.participants.has(deviceId)) this.mesh?.dropParticipant(deviceId, 'viewer left');
+  }
+
+  reinstateViewer(deviceId: string): void {
+    const c = this.call;
+    if (c?.kind === 'live' && c.role === 'broadcaster') this.mesh?.reinstate(deviceId);
+  }
+
+  /** End the current call/stream locally with a reason (e.g. removed from a stream audience). */
+  terminate(detail: string): void {
+    this.finish('ended', detail);
   }
 
   joinLive(streamId: string, broadcaster: { deviceId: string; name: string }, title: string): void {
@@ -306,7 +464,7 @@ export class CallManager {
 
   async rejoin(saved: SavedCall): Promise<void> {
     storage.remove(SAVED_CALL_KEY, 'session');
-    this.events.emit('rejoinAvailable', null);
+    this.setRejoinOffer(null);
     if (!this.guardIdle()) return;
     this.call = this.newCall({
       callId: saved.callId,
@@ -319,6 +477,7 @@ export class CallManager {
     });
     this.call.remoteUser = saved.remote;
     this.call.title = saved.title;
+    this.rejoinParticipants = saved.participantIds ?? [];
     this.emit();
     if (saved.role !== 'viewer') await this.acquireMedia(saved.media);
     if (this.call?.callId !== saved.callId) return;
@@ -328,7 +487,7 @@ export class CallManager {
 
   dismissRejoin(): void {
     storage.remove(SAVED_CALL_KEY, 'session');
-    this.events.emit('rejoinAvailable', null);
+    this.setRejoinOffer(null);
   }
 
   // ── signaling ────────────────────────────────────────────────────────────
@@ -347,6 +506,8 @@ export class CallManager {
         return this.onCancel(msg);
       case 'call-hangup':
         return this.onHangup(msg);
+      case 'call-participants-added':
+        return this.onParticipantsAdded(msg);
       default:
         if (msg.callId && this.mesh && msg.callId === this.mesh.callId) this.mesh.handleMessage(msg);
     }
@@ -382,6 +543,8 @@ export class CallManager {
     if (this.call) this.reset(); // an "ended" screen is still showing
 
     this.inviteSender = { deviceId: msg.senderId, sessionId: msg.senderSessionId };
+    this.inviteParticipants = Array.isArray(p.participants) ? p.participants.map((x) => x.deviceId).filter((x) => typeof x === 'string') : [];
+    for (const x of p.participants ?? []) if (x.deviceId !== this.d.identity.deviceId) presence.learn(x.deviceId, x.name);
     this.call = this.newCall({ callId, kind: p.callKind, media: p.media, role: 'participant', hostId: p.hostId, direction: 'incoming', status: 'ringing' });
     this.call.remoteUser = { deviceId: msg.senderId, name: msg.senderName };
     this.call.title = p.groupName;
@@ -404,7 +567,26 @@ export class CallManager {
     });
   }
 
+  private onParticipantsAdded(msg: MessageOf<'call-participants-added'>): void {
+    const c = this.call;
+    if (!c || !this.mesh || c.callId !== msg.callId || isTerminal(c.status) || c.kind === 'live') return;
+    // Only a current participant of THIS call may add people.
+    if (!c.participants.has(msg.senderId)) {
+      log.warn(`Ignoring participant-add from non-participant ${msg.senderName}`);
+      return;
+    }
+    const ids = (Array.isArray(msg.payload.participantIds) ? msg.payload.participantIds : []).filter(
+      (id): id is string => typeof id === 'string' && id !== this.d.identity.deviceId,
+    );
+    if (c.kind === 'direct') this.convertToGroup(`${msg.senderName} added participants`);
+    this.mesh.allow(ids);
+    const names = ids.map((id) => this.d.presence.nameOf(id)).join(', ');
+    if (names) this.toast('info', `${msg.senderName} added ${names}`);
+  }
+
   private onRinging(msg: MessageOf<'call-ringing'>): void {
+    const pending = this.pendingInvites.get(msg.senderId);
+    if (pending && this.call?.callId === msg.callId) pending.acked = true;
     const c = this.call;
     if (!c || c.callId !== msg.callId || c.direction !== 'outgoing') return;
     this.inviteAcked = true;
@@ -420,6 +602,8 @@ export class CallManager {
       return;
     }
     if (c.kind === 'group') {
+      this.clearPendingInvite(msg.senderId);
+      this.mesh?.allow([msg.senderId]);
       this.toast('info', `${msg.senderName} is joining`);
       return;
     }
@@ -440,7 +624,8 @@ export class CallManager {
     const c = this.call;
     if (!c || c.callId !== msg.callId) return;
     if (c.kind === 'group') {
-      this.toast('info', `${msg.senderName} ${msg.payload.reason === 'busy' ? 'is busy' : 'declined'}`);
+      this.clearPendingInvite(msg.senderId);
+      this.toast('info', `${msg.senderName} ${msg.payload.reason === 'busy' ? 'is busy' : 'declined the invitation'}`);
       return;
     }
     if (c.direction !== 'outgoing' || (c.status !== 'calling' && c.status !== 'ringing')) return;
@@ -501,9 +686,30 @@ export class CallManager {
     if (!c) return;
     this.mesh?.leave('replaced');
     this.everConnectedPeer = false;
-    const allowList = c.kind === 'direct' && c.remoteUser ? new Set([this.d.identity.deviceId, c.remoteUser.deviceId]) : undefined;
-    const mesh = new MeshSession(this.d, { callId: c.callId, kind: c.kind, role: c.role, hostId: c.hostId, allowList });
+    const me = this.d.identity.deviceId;
+    // Join allow-lists: 1:1 → exactly the two; group → me, host, known participants/invitees
+    // (grown later by call-participants-added and vouched joins); live → audience callback.
+    const allowList =
+      c.kind === 'direct' && c.remoteUser
+        ? [me, c.remoteUser.deviceId]
+        : c.kind === 'group'
+          ? [me, c.hostId, ...(this.inviteSender ? [this.inviteSender.deviceId] : []), ...this.inviteParticipants, ...(this.rejoinParticipants ?? [])]
+          : undefined;
+    const invitedBy = c.kind === 'group' && c.direction === 'incoming' ? this.inviteSender?.deviceId : undefined;
+    const mesh = new MeshSession(this.d, {
+      callId: c.callId,
+      kind: c.kind,
+      role: c.role,
+      hostId: c.hostId,
+      allowList,
+      invitedBy,
+      authorize: c.kind === 'live' && c.role === 'broadcaster' ? this.liveAuthorize : undefined,
+    });
     this.mesh = mesh;
+    this.rejoinParticipants = null;
+    mesh.events.on('converted', () => {
+      if (this.mesh === mesh) this.convertToGroup('a participant added someone');
+    });
     mesh.events.on('participants', () => {
       if (this.mesh !== mesh || !this.call) return;
       this.call.participants = mesh.participants;
@@ -611,6 +817,8 @@ export class CallManager {
     this.d.presence.setBusy(false);
     this.inviteSender = null;
     this.acceptedSessionId = null;
+    this.inviteParticipants = [];
+    this.clearPendingInvites();
     storage.remove(SAVED_CALL_KEY, 'session');
   }
 
@@ -676,6 +884,14 @@ export class CallManager {
       media: c.media,
       hostId: c.hostId,
       groupName: c.title,
+      roomName: this.d.signaling.currentRoom?.roomName,
+      participants:
+        kind === 'group'
+          ? [
+              { deviceId: this.d.identity.deviceId, name: this.d.identity.displayName },
+              ...[...c.participants.values()].map((p) => ({ deviceId: p.deviceId, name: p.name })),
+            ]
+          : undefined,
       expiresAt: Date.now() + this.d.config.timeouts.ringMs,
     };
     this.d.signaling.send(userId, 'call-invite', payload, { callId: c.callId });
@@ -694,6 +910,7 @@ export class CallManager {
       media: c.media,
       hostId: c.hostId,
       groupName: c.title,
+      roomName: this.d.signaling.currentRoom?.roomName,
       expiresAt: Date.now() + this.d.config.timeouts.ringMs,
     });
     if (!ok) this.pushSent = false;
@@ -702,7 +919,11 @@ export class CallManager {
   private persistActiveCall(): void {
     const c = this.call;
     if (!c || !this.mesh || isTerminal(c.status)) return;
+    const room = this.d.signaling.currentRoom;
+    if (!room) return;
     const saved: SavedCall = {
+      roomId: room.roomId,
+      participantIds: [...c.participants.keys()],
       callId: c.callId,
       kind: c.kind,
       media: c.media,

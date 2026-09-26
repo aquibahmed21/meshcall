@@ -12,6 +12,7 @@ import {
   type SignalingMessage,
 } from '../types/signaling';
 import type { IdentityService } from './IdentityService';
+import type { RoomContext } from './RoomService';
 
 const log = createLogger('Signaling');
 const SCRIPT_URL = 'https://cdn.scaledrone.com/scaledrone.min.js';
@@ -36,6 +37,8 @@ export interface SendOptions {
   callId?: string | null;
   peerId?: string;
   receiverSessionId?: string;
+  /** Reuse a specific messageId (e.g. retrying a chat message – receivers de-duplicate by it). */
+  messageId?: string;
 }
 
 interface RoomEntry {
@@ -53,8 +56,8 @@ const OUTBOX_LIMIT = 300;
 const OUTBOX_MAX_AGE_MS = 20_000;
 const ECHO_TIMEOUT_MS = 20_000;
 
-export const inboxRoom = (deviceId: string) => `inbox-${deviceId}`;
-export const LOBBY_ROOM = 'observable-lobby';
+export const inboxRoom = (roomKey: string, deviceId: string) => `inbox-${roomKey}-${deviceId}`;
+export const lobbyRoom = (roomKey: string) => `observable-room-${roomKey}`;
 export const meshRoom = (callId: string) => `mesh-${callId}`;
 
 /**
@@ -74,6 +77,8 @@ export class SignalingService {
     status: SignalingStatus;
     message: { msg: SignalingMessage; room: string };
     reconnected: void;
+    /** One of OUR publishes came back from ScaleDrone (i.e. the server accepted and fanned it out). */
+    echo: { msg: SignalingMessage; room: string };
   }>();
 
   private _status: SignalingStatus = 'idle';
@@ -89,6 +94,8 @@ export class SignalingService {
   private pendingEchoSince: number | null = null;
   private watchdog: ReturnType<typeof setInterval> | null = null;
   private stopped = false;
+  /** Current room scope: stamped on every outgoing message, required on every incoming one. */
+  private room: RoomContext | null = null;
   private readonly onOnline = () => {
     if (this._status !== 'connected' && !this.stopped) {
       log.info('Browser online – reconnecting signaling immediately');
@@ -108,6 +115,21 @@ export class SignalingService {
 
   get isConnected(): boolean {
     return this._status === 'connected';
+  }
+
+  get currentRoom(): RoomContext | null {
+    return this.room;
+  }
+
+  /**
+   * Switch room scope. Queued messages of the previous room are discarded and incoming
+   * messages of any other room are dropped from now on (stale-room protection).
+   */
+  setRoom(room: RoomContext | null): void {
+    if (this.room?.roomId === room?.roomId) return;
+    this.room = room;
+    this.outbox = [];
+    log.info(room ? `Room scope = "${room.roomName}" (${room.roomId})` : 'Left room scope');
   }
 
   async start(): Promise<void> {
@@ -147,7 +169,11 @@ export class SignalingService {
   /** Directed message to one device (all of its sessions unless receiverSessionId is set). */
   send<T extends MessageType>(receiverId: string, type: T, payload: PayloadOf<T>, opts: SendOptions = {}): string {
     const msg = this.envelope(receiverId, type, payload, opts);
-    this.publish(inboxRoom(receiverId), msg);
+    if (!this.room) {
+      log.warn(`Not in a room – dropping ${type} to ${receiverId.slice(0, 8)}`);
+      return msg.messageId;
+    }
+    this.publish(inboxRoom(this.room.roomKey, receiverId), msg);
     return msg.messageId;
   }
 
@@ -175,13 +201,14 @@ export class SignalingService {
     return {
       v: PROTOCOL_VERSION,
       messageType: type,
-      messageId: uuid(),
+      messageId: opts.messageId ?? uuid(),
       timestamp: Date.now(),
       senderId: this.identity.deviceId,
       senderSessionId: this.identity.sessionId,
       senderName: this.identity.displayName,
       receiverId,
       receiverSessionId: opts.receiverSessionId,
+      roomId: this.room?.roomId ?? '',
       callId: opts.callId ?? null,
       peerId: opts.peerId ?? this.identity.sessionId,
       payload,
@@ -362,6 +389,11 @@ export class SignalingService {
     }
     if (msg.senderSessionId === this.identity.sessionId) {
       this.pendingEchoSince = null; // our own publish came back → socket is alive
+      if (this.room && msg.roomId === this.room.roomId) this.events.emit('echo', { msg, room });
+      return;
+    }
+    if (!this.room || msg.roomId !== this.room.roomId) {
+      log.debug(`Dropping ${msg.messageType} from another room`);
       return;
     }
     if (msg.receiverId !== '*' && msg.receiverId !== this.identity.deviceId) return;

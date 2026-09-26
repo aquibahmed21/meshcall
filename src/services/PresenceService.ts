@@ -5,7 +5,8 @@ import type { AppConfig } from '../config';
 import type { PresenceMessage, SignalingMessage } from '../types/signaling';
 import type { PresenceStatus, UserPresence } from '../types/state';
 import type { IdentityService } from './IdentityService';
-import { LOBBY_ROOM, type Member, type SignalingService } from './SignalingService';
+import type { RoomContext } from './RoomService';
+import { lobbyRoom, type Member, type SignalingService } from './SignalingService';
 
 const log = createLogger('Presence');
 const KNOWN_KEY = 'voip.knownUsers';
@@ -26,7 +27,7 @@ interface UserRecord {
 }
 
 /**
- * Presence built on the ScaleDrone observable lobby room:
+ * Room-scoped presence built on the room's ScaleDrone observable lobby (`observable-room-<key>`):
  *  - member list / join / leave → authoritative "connected to signaling" signal
  *  - periodic heartbeats → names, busy flag, liveness when member events are missed
  *  - leave grace period → a reload/network blip does not flash "Offline"
@@ -41,6 +42,7 @@ export class PresenceService {
   private heartbeat: ReturnType<typeof setInterval> | null = null;
   private unsubscribe: (() => void) | null = null;
   private offSignal: Array<() => void> = [];
+  private room: RoomContext | null = null;
   private readonly onPageHide = () => this.sendLeave();
   private readonly onVisible = () => {
     if (document.visibilityState === 'visible') this.sendHeartbeat();
@@ -50,16 +52,27 @@ export class PresenceService {
     private readonly signaling: SignalingService,
     private readonly identity: IdentityService,
     private readonly config: AppConfig,
-  ) {
-    for (const k of storage.get<Array<{ deviceId: string; name: string; lastSeen: number }>>(KNOWN_KEY, [])) {
-      if (k.deviceId && k.deviceId !== identity.deviceId) this.users.set(k.deviceId, this.blank(k.deviceId, k.name, k.lastSeen));
-    }
-  }
+  ) {}
 
-  start(): void {
-    this.unsubscribe = this.signaling.subscribe(LOBBY_ROOM, {
+  /**
+   * Enter a room's presence. Resolves once the room's member list arrived (the room is
+   * "joined"); callers apply their own timeout.
+   */
+  start(room: RoomContext): Promise<void> {
+    this.stop();
+    this.room = room;
+    this.users.clear();
+    for (const k of storage.get<Array<{ deviceId: string; name: string; lastSeen: number }>>(this.knownKey(), [])) {
+      if (k.deviceId && k.deviceId !== this.identity.deviceId) this.users.set(k.deviceId, this.blank(k.deviceId, k.name, k.lastSeen));
+    }
+    let ready!: () => void;
+    const joined = new Promise<void>((resolve) => (ready = resolve));
+    this.unsubscribe = this.signaling.subscribe(lobbyRoom(room.roomKey), {
       onOpen: () => this.sendHeartbeat(),
-      onMembers: (ms) => this.onMembers(ms),
+      onMembers: (ms) => {
+        this.onMembers(ms);
+        ready();
+      },
       onMemberJoin: (m) => this.onMemberJoin(m),
       onMemberLeave: (m) => this.onMemberLeave(m),
     });
@@ -74,16 +87,32 @@ export class PresenceService {
     }, this.config.presence.heartbeatMs);
     window.addEventListener('pagehide', this.onPageHide);
     document.addEventListener('visibilitychange', this.onVisible);
+    this.events.emit('change', undefined);
+    return joined;
   }
 
+  /** Leave the room's presence: unsubscribe, remove every listener/timer, forget room users. */
   stop(): void {
+    if (!this.room) return;
     this.sendLeave();
     this.unsubscribe?.();
+    this.unsubscribe = null;
     this.offSignal.forEach((f) => f());
+    this.offSignal = [];
     if (this.heartbeat) clearInterval(this.heartbeat);
+    this.heartbeat = null;
     this.timers.forEach(clearTimeout);
+    this.timers.clear();
     window.removeEventListener('pagehide', this.onPageHide);
     document.removeEventListener('visibilitychange', this.onVisible);
+    this.users.clear();
+    this.busy = false;
+    this.room = null;
+    this.events.emit('change', undefined);
+  }
+
+  private knownKey(): string {
+    return `${KNOWN_KEY}.${this.room?.roomId ?? ''}`;
   }
 
   setBusy(busy: boolean): void {
@@ -227,11 +256,12 @@ export class PresenceService {
 
   private sendHeartbeat(): void {
     if (!this.identity.isRegistered) return;
-    this.signaling.broadcast(LOBBY_ROOM, 'presence-heartbeat', { busy: this.busy, pushEnabled: this.pushEnabled });
+    if (!this.room) return;
+    this.signaling.broadcast(lobbyRoom(this.room.roomKey), 'presence-heartbeat', { busy: this.busy, pushEnabled: this.pushEnabled });
   }
 
   private sendLeave(): void {
-    if (this.signaling.isConnected) this.signaling.broadcast(LOBBY_ROOM, 'presence-leave', { busy: false, pushEnabled: this.pushEnabled });
+    if (this.room && this.signaling.isConnected) this.signaling.broadcast(lobbyRoom(this.room.roomKey), 'presence-leave', { busy: false, pushEnabled: this.pushEnabled });
   }
 
   private blank(deviceId: string, name: string, lastSeen: number): UserRecord {
@@ -253,6 +283,6 @@ export class PresenceService {
       .sort((a, b) => b.lastSeen - a.lastSeen)
       .slice(0, MAX_KNOWN)
       .map((u) => ({ deviceId: u.deviceId, name: u.name, lastSeen: u.lastSeen }));
-    storage.set(KNOWN_KEY, known);
+    if (this.room) storage.set(this.knownKey(), known);
   }
 }

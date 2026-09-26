@@ -7,6 +7,15 @@
  */
 import { chromium } from 'playwright-core';
 
+const ROOM = process.env.E2E_ROOM || `e2e-${Date.now().toString(36)}`;
+/** Every page load asks for a room – enter the shared test room. */
+async function enterRoom(page, room = ROOM) {
+  await page.waitForSelector('#room-name', { timeout: 30_000 });
+  await page.fill('#room-name', room);
+  await page.click('.room-screen button[type=submit]');
+  await page.waitForFunction(() => !!window.__voip?.app.rooms.current && window.__voip.app.signaling.status === 'connected', null, { timeout: 30_000 });
+}
+
 const URL = process.env.E2E_URL || 'http://localhost:5173/';
 const CHROME = process.env.CHROME_PATH || '/usr/bin/google-chrome';
 const results = [];
@@ -31,6 +40,7 @@ async function user(name) {
   await page.goto(URL);
   await page.fill('#name', name);
   await page.click('button[type=submit]');
+  await enterRoom(page);
   await page.waitForFunction(() => window.__voip?.app.signaling.status === 'connected', null, { timeout: 30_000 });
   const id = await page.evaluate(() => window.__voip.app.identity.deviceId);
   return { name, ctx, page, id };
@@ -40,16 +50,24 @@ const diag = (u) => u.page.evaluate(() => window.__voip.diagnostics());
 const setTestMode = (u, mode) => u.page.evaluate((m) => window.__voip.app.settings.update({ iceTestMode: m }), mode);
 
 async function waitPeers(u, count, predicate = 'connected', timeout = 40_000) {
-  await u.page.waitForFunction(
-    ([n, pred]) => {
-      const d = window.__voip.diagnostics();
-      const peers = d.call?.peers ?? [];
-      const ok = peers.filter((p) => p.connectionState === 'connected' && (pred === 'connected' || p.connectionType === pred));
-      return ok.length >= n;
-    },
-    [count, predicate],
-    { timeout },
-  );
+  try {
+    await u.page.waitForFunction(
+      ([n, pred]) => {
+        const d = window.__voip.diagnostics();
+        const peers = d.call?.peers ?? [];
+        const ok = peers.filter((p) => p.connectionState === 'connected' && (pred === 'connected' || p.connectionType === pred));
+        return ok.length >= n;
+      },
+      [count, predicate],
+      { timeout },
+    );
+  } catch (err) {
+    const d = await u.page.evaluate(() => {
+      const c = window.__voip.app.calls.state;
+      return { status: c?.status, kind: c?.kind, peers: (window.__voip.diagnostics().call?.peers ?? []).map((p) => `${p.peer}:${p.connectionState ?? 'no-pc'}`) };
+    });
+    throw new Error(`${u.name} expected ${count} ${predicate} peers – ${JSON.stringify(d)}`);
+  }
 }
 
 async function waitOnline(u, other) {
@@ -104,7 +122,7 @@ try {
 
   // Rejoin: Bob reloads → fresh peer connection, P2P again
   await bob.page.reload();
-  await bob.page.waitForFunction(() => window.__voip?.app.signaling.status === 'connected', null, { timeout: 30_000 });
+  await enterRoom(bob.page);
   await bob.page.waitForSelector('.banner button.primary', { timeout: 10_000 });
   await bob.page.click('.banner button.primary');
   await waitPeers(bob, 1);
@@ -182,7 +200,7 @@ try {
   }
   await Promise.all([alice, bob, carol].map((u) => waitPeers(u, 2)));
   check('Group: full mesh (each of 3 has 2 connected peers)', true);
-  const tiles = await alice.page.$$eval('.grid .tile', (t) => t.length);
+  const tiles = await alice.page.$$eval('.video-stage .tile', (t) => t.length);
   check('Group: 3 video tiles rendered', tiles === 3, `${tiles} tiles`);
 
   await carol.page.evaluate(() => window.__voip.app.calls.hangup());
@@ -214,7 +232,7 @@ try {
   await bob.page.waitForFunction(() => ['ended', null].includes(window.__voip.app.calls.state?.status ?? null), null, { timeout: 15_000 });
   check('Live: viewers see stream ended', true);
 } catch (err) {
-  check('E2E run', false, err.message.split('\n')[0]);
+  check('E2E run', false, err.message.split('\n')[0] + ' @ ' + (err.stack.split('\n').find((l) => l.includes('two-peer.mjs')) ?? ''));
 } finally {
   await browser.close();
   const failed = results.filter((r) => !r.ok).length;

@@ -17,6 +17,7 @@ import {
   type SignalingMessage,
 } from '../types/signaling';
 import type { ParticipantState, PeerConnectionState } from '../types/state';
+import { ActiveSpeakerDetector } from '../webrtc/ActiveSpeaker';
 import { AdaptiveQualityManager } from '../webrtc/AdaptiveQualityManager';
 import { ConnectionRecoveryManager } from '../webrtc/ConnectionRecoveryManager';
 import { DataUsageMonitor, type DataUsageSnapshot } from '../webrtc/DataUsageMonitor';
@@ -41,8 +42,12 @@ export interface MeshOptions {
   kind: CallKind;
   role: MeshRole;
   hostId: string;
-  /** Direct calls: only these devices may connect. */
-  allowList?: ReadonlySet<string>;
+  /** Devices allowed to join (1:1: exactly the two; group: participants + invitees). */
+  allowList?: Iterable<string>;
+  /** Group invitee: who invited us (sent along so members can authorise our join). */
+  invitedBy?: string;
+  /** Live broadcaster: application-level audience check, consulted before ANY media link. */
+  authorize?: (deviceId: string) => boolean;
 }
 
 /**
@@ -71,6 +76,9 @@ export class MeshSession {
     removed: void;
     rejected: { reason: string };
     stats: { report: StatsReport; usage: DataUsageSnapshot };
+    activeSpeaker: string | null;
+    /** 1:1 became a group (locally or because a vouched newcomer arrived first). */
+    converted: void;
   }>();
 
   readonly participants = new Map<string, ParticipantState>();
@@ -81,6 +89,8 @@ export class MeshSession {
   private readonly quality: AdaptiveQualityManager;
   private readonly disposer = new Disposer();
   private readonly banned = new Set<string>();
+  private allowList: Set<string> | null;
+  private readonly speaker: ActiveSpeakerDetector;
   private unsubscribeRoom: (() => void) | null = null;
   private signalingUpSince = Date.now();
   private mediaStateTimer: ReturnType<typeof setTimeout> | null = null;
@@ -92,6 +102,11 @@ export class MeshSession {
     private readonly deps: MeshDeps,
     readonly opts: MeshOptions,
   ) {
+    this.allowList = opts.allowList ? new Set(opts.allowList) : null;
+    // Active speaker from receiver audio levels of connected peers (cheap, ~4 Hz).
+    this.speaker = new ActiveSpeakerDetector(() =>
+      this.peers.all().filter((p) => p.isConnected).map((p) => ({ id: p.remoteId, level: () => p.getAudioLevel() })),
+    );
     this.peers = new PeerConnectionManager({
       callId: opts.callId,
       send: opts.role !== 'viewer',
@@ -180,6 +195,51 @@ export class MeshSession {
     this.disposer.interval(() => this.tick(), config.mesh.heartbeatMs);
     this.usage.reset();
     this.stats.start();
+    if (this.opts.role !== 'broadcaster') {
+      this.speaker.events.on('change', (id) => this.events.emit('activeSpeaker', id));
+      this.speaker.start();
+    }
+  }
+
+  get activeSpeaker(): string | null {
+    return this.speaker.active;
+  }
+
+  /** 1:1 → group: metadata + access policy only. Existing peer connections stay untouched. */
+  convertToGroup(addedIds: string[]): void {
+    if (this.opts.kind === 'group') return this.allow(addedIds);
+    if (this.opts.kind !== 'direct') return;
+    logCall.info(`Converting 1:1 call ${this.opts.callId.slice(0, 8)} to a group call`);
+    this.opts.kind = 'group';
+    this.allow(addedIds);
+    this.announce('mesh-heartbeat'); // tell peers our callKind changed
+    this.events.emit('converted', undefined);
+  }
+
+  /** Widen the join allow-list (group invitations). Unbans previously removed devices. */
+  allow(ids: Iterable<string>): void {
+    for (const id of ids) {
+      this.banned.delete(id);
+      this.allowList?.add(id);
+    }
+  }
+
+  /**
+   * Live broadcaster: stop sending to a viewer. Closes only that viewer's RTCPeerConnection
+   * (media stops immediately) and bars reconnection until reinstated.
+   */
+  revoke(deviceId: string, reason: string): void {
+    this.banned.add(deviceId);
+    this.drop(deviceId, reason);
+  }
+
+  /** A participant told us it left (e.g. viewer page unload) – close just that link, no ban. */
+  dropParticipant(deviceId: string, reason: string): void {
+    this.drop(deviceId, reason);
+  }
+
+  reinstate(deviceId: string): void {
+    this.banned.delete(deviceId);
   }
 
   leave(reason: string): void {
@@ -189,6 +249,7 @@ export class MeshSession {
     if (this.joined) this.deps.signaling.broadcast(meshRoom(this.opts.callId), 'mesh-leave', { reason }, { callId: this.opts.callId });
     if (this.mediaStateTimer) clearTimeout(this.mediaStateTimer);
     this.disposer.dispose();
+    this.speaker.stop();
     this.stats.stop();
     this.recovery.dispose();
     this.quality.dispose();
@@ -232,6 +293,14 @@ export class MeshSession {
         this.onRemove(msg);
         break;
       case 'mesh-reject':
+        // Only an authoritative member can refuse us: the streamer (live), the other party (1:1)
+        // or the host (group). A reject from an ordinary group member (e.g. a race where it has
+        // not learned about our inviter yet) must not tear down our whole call – its next
+        // heartbeat exchange re-evaluates and heals the link.
+        if ((this.opts.kind === 'group' || this.opts.kind === 'live') && msg.senderId !== this.opts.hostId) {
+          log.warn(`Ignoring non-authoritative reject from ${msg.senderName} (${msg.payload.reason})`);
+          break;
+        }
         log.warn(`Join rejected by ${msg.senderName}: ${msg.payload.reason}`);
         this.events.emit('rejected', { reason: msg.payload.reason });
         break;
@@ -274,12 +343,16 @@ export class MeshSession {
     const payload = msg.payload;
     const isJoin = msg.messageType === 'mesh-join';
 
-    if (!this.allowed(id)) {
-      if (isJoin) this.reply(msg, 'mesh-reject', { reason: 'not-allowed' });
+    // Live streams: viewers never see or connect to other viewers – ignore them silently
+    // (checked BEFORE access control so viewers never "reject" each other).
+    if (!this.shouldConnect(payload.role)) return;
+    if (!this.allowed(id, payload.invitedBy, msg.messageType === 'mesh-welcome')) {
+      if (isJoin) {
+        log.warn(`Rejecting join from ${msg.senderName}: not allowed`);
+        this.reply(msg, 'mesh-reject', { reason: 'not-allowed' });
+      }
       return;
     }
-    // Live streams: viewers never see or connect to other viewers.
-    if (!this.shouldConnect(payload.role)) return;
     const existing = this.participants.get(id);
     if (
       isJoin &&
@@ -404,7 +477,7 @@ export class MeshSession {
   private memberPayload(): MeshMemberPayload {
     const peers: Record<string, string> = {};
     for (const s of this.peers.all()) peers[s.remoteId] = s.pcId;
-    return { role: this.opts.role, callKind: this.opts.kind, media: this.localMediaState(), peers, hostId: this.opts.hostId };
+    return { role: this.opts.role, callKind: this.opts.kind, media: this.localMediaState(), peers, hostId: this.opts.hostId, invitedBy: this.opts.invitedBy };
   }
 
   localMediaState(): MediaStatePayload {
@@ -452,9 +525,36 @@ export class MeshSession {
     return p ? { deviceId, sessionId: p.sessionId, name: p.name } : undefined;
   }
 
-  private allowed(deviceId: string): boolean {
+  /**
+   * Access policy – enforced on every join AND every negotiation message, so media is only
+   * ever negotiated with authorised peers (hiding a <video> is never the protection).
+   *  - live broadcaster: the streamer's audience decision (authorize callback)
+   *  - live viewer: only the broadcaster
+   *  - 1:1: exactly the two devices
+   *  - group: participants + invitees; a joiner vouched for by a current participant
+   *    (invitedBy) is admitted, and a welcome (reply to OUR join from a member) is trusted
+   */
+  private allowed(deviceId: string, invitedBy?: string, isWelcome = false): boolean {
     if (this.banned.has(deviceId)) return false;
-    return !this.opts.allowList || this.opts.allowList.has(deviceId);
+    if (this.opts.kind === 'live') {
+      if (this.opts.role === 'broadcaster') return this.opts.authorize ? this.opts.authorize(deviceId) : true;
+      return deviceId === this.opts.hostId;
+    }
+    if (!this.allowList || this.allowList.has(deviceId)) return true;
+    // Vouched = invited by someone on our allow-list (participant, host or fellow invitee).
+    // Not requiring them to be *connected* avoids rejecting people when two invitees join at once.
+    const vouched = !!invitedBy && (invitedBy === this.deps.identity.deviceId || this.allowList.has(invitedBy));
+    if (this.opts.kind === 'group' && (vouched || isWelcome)) {
+      this.allowList.add(deviceId);
+      return true;
+    }
+    if (this.opts.kind === 'direct' && vouched) {
+      // The other participant added someone and their join beat the call-participants-added
+      // broadcast here → convert now instead of rejecting a legitimately invited user.
+      this.convertToGroup([deviceId]);
+      return true;
+    }
+    return false;
   }
 
   private defaultRole(deviceId: string): MeshRole {

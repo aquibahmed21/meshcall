@@ -95,7 +95,7 @@ describe('primitives', () => {
     expect(isSignalingMessage({ v: 1 })).toBe(false);
     expect(
       isSignalingMessage({
-        v: 1, messageType: 'offer', messageId: 'm', timestamp: 1, senderId: 'a', senderSessionId: 's', senderName: 'A',
+        v: 2, roomId: 'r', messageType: 'offer', messageId: 'm', timestamp: 1, senderId: 'a', senderSessionId: 's', senderName: 'A',
         receiverId: 'b', peerId: 'p', callId: 'c', payload: {},
       }),
     ).toBe(true);

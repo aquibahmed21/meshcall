@@ -81,7 +81,8 @@ export class NotificationService {
 
   private async show(title: string, options: NotificationOptions): Promise<void> {
     try {
-      const opts = { icon: '/icon.svg', badge: '/icon.svg', ...options };
+      const icon = `${import.meta.env.BASE_URL}icon.svg`;
+      const opts = { icon, badge: icon, ...options };
       if (this.registration) await this.registration.showNotification(title, opts);
       else new Notification(title, opts);
     } catch (err) {

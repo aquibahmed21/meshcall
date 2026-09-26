@@ -150,7 +150,9 @@ export class PushNotificationService {
 export async function registerServiceWorker(): Promise<ServiceWorkerRegistration | null> {
   if (!('serviceWorker' in navigator) || !window.isSecureContext) return null;
   try {
-    const reg = await navigator.serviceWorker.register('/sw.js', { scope: '/' });
+    // BASE_URL keeps this working when the app is served from a sub-path (e.g. GitHub Pages /meshcall/).
+    const base = import.meta.env.BASE_URL;
+    const reg = await navigator.serviceWorker.register(`${base}sw.js`, { scope: base });
     log.info('Service Worker registered');
     return reg;
   } catch (err) {

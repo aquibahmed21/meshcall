@@ -141,3 +141,155 @@ Part A lists the defects that were **found and fixed**. Every one was confirmed 
 - **Offline emulation does not drop WebRTC's UDP traffic.** Browser offline emulation, via both CDP and Playwright, only cuts HTTP and WebSocket traffic. The automated offline test therefore proves the *event-driven* recovery path (the ICE restart on `online`), not recovery from a real media outage. Real outages were covered by the "peer vanishes" scenario and the recovery unit tests.
 - **Real NAT and firewall fallback** (a direct attempt failing, then TURN) cannot be reproduced on a single host. The fallback logic is unit-tested in `CandidateGate`, and the relay path itself is verified by e2e.
 - **No signaling authentication:** ScaleDrone is used without JWT, and the push relay has no authentication. Both are called out in the README as production requirements.
+
+---
+
+## D. Audit of the chat, Picture-in-Picture and fullscreen features
+
+These were verified with `npm test` (47 unit tests) and `npm run test:features` (45 browser checks), plus regression runs of `test:e2e` (20/20), `test:resilience` (7/7) and `test:screens` (no horizontal overflow at 1440, 820 or 390 px).
+
+### Issues found and fixed
+
+#### D1. PiP stayed open after the call ended
+
+- **Found by:** the features e2e.
+- **Root cause:** during teardown, `media.release()` triggers a render *before* the call status becomes terminal. With the remote tile already gone, the main participant switched to the local video, and PiP auto-follow started an *entering* transition. The terminal `exitAll()` then returned early because a transition was in flight. The follow then failed ("video element has no video track"), which left PiP on a detached remote `<video>` the controller no longer recognised.
+- **Impact:** a stale PiP window stayed open showing a frozen frame after hangup.
+- **Fix:**
+  - `exitPip()` and `exitAll()` wait for any in-flight PiP request instead of bailing out.
+  - The controller remembers every video it put into PiP (a `WeakSet`), so detached ones are still exited.
+  - PiP only auto-follows tiles that really have video, and only while the call is active.
+
+#### D2. Fullscreen spotlight squeezed the main video to 200 px
+
+- **Found by:** screenshot review.
+- **Root cause:** `justify-content: center` shrank the grid columns to the filmstrip width.
+- **Fix:** full-width columns, with filmstrip tiles centred and width-capped inside their cells.
+
+#### D3. The toolbar was rebuilt on every stats tick
+
+- **Found by:** code audit.
+- **Root cause:** the controls were recreated every 2 s.
+- **Impact:** keyboard focus was lost, and a click could land between a button's removal and its recreation.
+- **Fix:** the controls and panel tabs are rebuilt only when a signature of their visible state changes, and focus is restored afterwards.
+
+#### D4. Toggle buttons looked like warnings
+
+- **Found by:** screenshot review.
+- **Root cause:** Chat, Fullscreen and PiP used the red "muted" style when active.
+- **Fix:** they now use an accent style; red is kept for mute, camera off and similar states.
+
+#### D5. The PiP follow was requested twice on each tile click
+
+- **Found by:** code audit.
+- **Root cause:** `select()` and `render()` both requested it.
+- **Impact:** harmless, because concurrent enters were already guarded, but it did redundant work.
+- **Fix:** only `render()` requests it. It still runs inside the click handler, so it keeps user activation.
+
+### Checklist
+
+| Check | Result / mechanism |
+|---|---|
+| **No duplicate event listeners** | `ChatService` attaches its signaling listeners once, in `start()`. `ViewModeController` uses one document-level listener per event; PiP events bubble, so there are no per-video listeners. All listeners are removed via `Disposer` when the call view is disposed. |
+| **No memory leaks** | The call view disposes its interval, listeners, grid and view-mode controller. `ChatService.unbind()` clears messages, processed ids and delivery timers. |
+| **No duplicate messages** | `processedMessageIds` plus signaling-level `messageId` de-duplication. The e2e injects duplicates, and verifies each real message renders exactly once. |
+| **No duplicate chat subscriptions** | Chat uses the mesh-room subscription the call already has. It opens no room of its own. |
+| **No stale `callId` messages** | Messages are ignored unless `callId === boundCallId`. The binding is cleared on call end; tested in unit and e2e. |
+| **No broken WebRTC connections** | No WebRTC code changed. The only signaling changes are an additive `chat-message` type, an optional caller-chosen `messageId`, and an `echo` event. The e2e and resilience suites pass unchanged. |
+| **No broken responsive layout / horizontal scrolling** | No overflow at 1440, 820 or 390 px, with or without the chat open. On a 390×430 "keyboard" viewport the input stays visible. |
+| **No PiP or fullscreen state mismatch** | Button labels come from `document.pictureInPictureElement` and `document.fullscreenElement` on every browser event. Tested for closing the window, ESC/exit, Fullscreen → PiP, PiP → Fullscreen, and call end. |
+| **No controls hidden on mobile** | Primary controls stay inline. PiP, Fullscreen, People, Invite and Stats are reachable through **More** (verified by e2e). |
+
+### Remaining limitations
+
+- **PiP availability:** Firefox has no PiP API and iPhone Safari has no element fullscreen, so those controls are hidden there. Auto-following a *new* main participant while PiP is open can be refused by a browser that requires user activation; PiP then keeps showing the previous video.
+- **No chat history:** chat has no persistence or history for someone who joins or reloads later, by design (no backend). Ordering uses sender timestamps, so large clock skew between devices can reorder near-simultaneous messages.
+- **Not automated in headless Chrome:** a real on-screen keyboard and native ESC handling in fullscreen. The keyboard was approximated by shrinking the viewport; the fullscreen test falls back to `exitFullscreen()` if ESC is not delivered.
+
+---
+
+## E. Audit of rooms, call layouts, 1:1 → group conversion and live-stream audience
+
+Verification:
+
+- `npm test`: 67 unit tests (room validation/keys, layout plans for 1/2/3/5+ participants, speaker hysteresis, …).
+- `npm run test:rooms`: 60 browser checks.
+- Regression runs of `test:e2e` (20/20), `test:features` (45/45) and `test:resilience` (7/7), plus `test:screens` (no overflow at desktop, tablet or phone).
+
+### Issues found and fixed
+
+#### E1. The rejoin banner never appeared after a reload
+
+- **Found by:** e2e.
+- **Root cause:** the UI is now created *after* `joinRoom()` resolves, so it missed the `rejoinAvailable` event that `CallManager.start()` had already emitted.
+- **Impact:** a user who reloaded mid-call could not rejoin.
+- **Fix:** the rejoin offer is kept as state (`calls.rejoinOffer`), which the UI reads whenever it attaches.
+
+#### E2. A group call collapsed when two invitees joined at the same time
+
+- **Found by:** e2e.
+- **Root cause:** an invitee's join was only accepted if its inviter was already a *connected* participant of the receiving member. The receiver answered `mesh-reject`, and the joiner treated any reject as fatal.
+- **Impact:** a whole group call could fail during a race.
+- **Fix:**
+  - A vouch now needs only that the inviter is on the allow-list.
+  - In group and live calls, only the host's or streamer's reject is authoritative; others are logged, and the link heals on the next heartbeat.
+
+#### E3. Live viewers rejected each other
+
+- **Found by:** e2e.
+- **Root cause:** after the access-policy refactor, the "should these roles connect at all?" check ran *after* the access check. A viewer therefore answered another viewer's join with `mesh-reject`, which killed that viewer's stream.
+- **Impact:** only the first viewer of a stream could watch.
+- **Fix:** non-connectable roles are ignored silently before any access check, and only the streamer's reject counts.
+
+#### E4. A viewer who reloaded still showed as "Streaming"
+
+- **Found by:** e2e.
+- **Root cause:** nothing told the streamer that the viewer had gone, so the streamer waited for ICE to time out (tens of seconds).
+- **Impact:** the upload slot was held and the audience status was wrong.
+- **Fix:** viewers send `live-viewer-left` on page hide, and the streamer closes that connection immediately. Re-watching is always a fresh join.
+
+#### E5. No active speaker when several people talk equally loud
+
+- **Found by:** e2e with 5 people.
+- **Root cause:** the selector required one specific id to lead for 900 ms. With equal speakers the lead changes every sample, so the timer kept resetting.
+- **Impact:** the Speaker layout never picked anyone.
+- **Fix:** while nobody holds the floor, sustained speech from anyone selects the loudest. The per-person hold still applies when switching away from an existing speaker. Unit-tested.
+
+#### E6. The Everyone-mode audience listed offline and not-watching people as "Invited"
+
+- **Found by:** screenshot review.
+- **Fix:** only online room members are listed, and people who haven't joined show as *Can watch*.
+
+#### E7. `addParticipants()` didn't enforce the mesh cap
+
+- **Found by:** code audit (only the dialog did).
+- **Fix:** over-cap requests are trimmed, with a message.
+
+#### E8. Duplicate-looking streamer controls
+
+- **Found by:** screenshot review.
+- **Root cause:** a "Viewers" panel control and an "Audience" dialog control sat side by side.
+- **Fix:** the dialog control is renamed **Manage**.
+
+### Checklist
+
+| Check | Result / mechanism |
+|---|---|
+| **Duplicate peer connections** | One `PeerSession` per remote device per call. A 1:1 → group conversion creates only the new links; the existing A↔B `pcId` is unchanged (e2e). |
+| **Duplicate ScaleDrone subscriptions** | `start()` of presence, calls and live first disposes any previous state. In a room there are exactly two subscriptions (lobby + inbox), plus one mesh room per active call. After leaving there are zero (e2e). |
+| **Cross-room signaling** | Separate ScaleDrone rooms per room, and a `roomId` filter on every incoming message. A forged invite with a foreign `roomId` published straight into a room inbox is dropped (e2e). |
+| **Cross-call / cross-stream signaling** | `callId` checks in `CallManager`, `MeshSession` and `ChatService`. Participant-adds are accepted only from participants of that call; live-audience messages only from that stream's streamer. |
+| **Stale room/call/stream state** | `leaveRoom()` ends the call (closing peer connections and media), clears presence users, streams, chat, pending invites and the rejoin offer, and drops the signaling scope and outbox. Known users are remembered per room. |
+| **Participant duplication** | Participants are keyed by `deviceId`. Duplicate invites are skipped, and a re-join with a new session replaces the old one. |
+| **Incorrect mesh connections** | Viewers never connect to each other. Group members connect to all others (5-person full mesh verified). |
+| **P2P retry / unnecessary TURN** | Every new link — added participant, rejoin, added viewer, viewer reconnect — is a fresh `PeerSession`, so the candidate gate and ICE priorities apply. All of them selected host → host in the e2e runs. |
+| **Media sent to unauthorised viewers** | The `authorize` callback gates joins *and* negotiation messages. Revoked viewers are closed and banned; forced joins by unselected or removed users get no connection (e2e). |
+| **Memory / listener leaks** | Room services use a `Disposer`; the speaker detector and stats intervals stop on leave; the call view disposes its listeners; the UI manager is a singleton that is re-attached, never re-created. |
+| **Responsive layout** | 5 layouts × desktop, tablet and phone with 5 participants: no horizontal scroll, main video and End control within the viewport, and Sidebar becoming a horizontal strip on phones (e2e). The audience and add-participant pickers are bottom sheets on phones. |
+
+### Remaining limitations
+
+- **Room names are not secrets:** anyone who knows a room name can join it. There is no signaling authentication (ScaleDrone JWT is recommended).
+- **Stream metadata is visible:** live-stream titles and allowed-viewer ids are visible to room members. Media access is what's enforced.
+- **Mesh upload cost:** the streamer's upload grows linearly with viewers, and group upload grows with N−1. The caps are 6 participants and 8 viewers.
+- **Active speaker is signal-based:** detection uses received audio levels, so background noise can win. Pinning overrides it.

@@ -199,6 +199,22 @@ export class PeerSession {
     return this.applyEncoding(kind);
   }
 
+  /**
+   * Current remote audio level 0..1 from RTCRtpReceiver.getSynchronizationSources() – a cheap
+   * read of a value the browser already computes (no WebAudio pipeline). 0 when silent/stale.
+   */
+  getAudioLevel(): number {
+    if (this.closed) return 0;
+    const receiver = this.transceiverFor('audio')?.receiver;
+    const sources = receiver && typeof receiver.getSynchronizationSources === 'function' ? receiver.getSynchronizationSources() : [];
+    let best: RTCRtpSynchronizationSource | undefined;
+    for (const src of sources) if (!best || src.timestamp > best.timestamp) best = src;
+    if (!best) return 0;
+    // timestamp is a DOMHighResTimeStamp; some engines use the wall clock – accept either.
+    const fresh = Math.abs(performance.now() - best.timestamp) < 1500 || Math.abs(Date.now() - best.timestamp) < 1500;
+    return fresh ? (best.audioLevel ?? 0) : 0;
+  }
+
   getSender(kind: MediaKind): RTCRtpSender | null {
     return this.transceiverFor(kind)?.sender ?? null;
   }
