@@ -26,6 +26,11 @@ function toggle(label: string, value: boolean, onChange: (v: boolean) => void): 
 
 export function openSettings(app: AppContext): Modal {
   const m = new Modal('Settings', { className: 'wide' });
+  let version = '';
+  void app.pwa.version().then((v) => {
+    version = v ?? '';
+    if (m.isOpen) render();
+  });
   const render = () => {
     const s = app.settings.get();
     const d = app.devices.devices;
@@ -46,11 +51,19 @@ export function openSettings(app: AppContext): Modal {
     const pushText: Record<string, string> = {
       unsupported: 'Not supported in this browser',
       insecure: 'Requires HTTPS',
-      'not-configured': 'Push relay not configured (VITE_PUSH_SERVER_URL)',
+      'install-required': 'Install MeshCall to your Home Screen first (iOS requirement)',
+      'not-configured': 'No push relay configured for this deployment (VITE_PUSH_SERVER_URL)',
       available: 'Off',
       denied: 'Blocked in browser settings',
       subscribed: 'On – you can be called while the app is closed',
       error: 'Error – see log',
+    };
+    const install = app.pwa.installState;
+    const installText: Record<string, string> = {
+      installed: 'Installed – running as an app',
+      available: 'Can be installed on this device',
+      'ios-manual': 'Install via Share → Add to Home Screen',
+      unavailable: 'Use your browser menu → "Install app" / "Add to Home screen" (if offered)',
     };
     m.setContent(
       h(
@@ -92,9 +105,26 @@ export function openSettings(app: AppContext): Modal {
           h('h3', {}, 'Notifications'),
           h('p', {}, `Offline call alerts: ${pushText[pushStatus] ?? pushStatus}`),
           pushStatus === 'available' ? h('button', { class: 'btn', onclick: () => void app.push.enable().then(render) }, 'Enable push notifications') : null,
+          pushStatus === 'subscribed' ? h('button', { class: 'btn', onclick: () => void app.push.disable().then(render) }, 'Turn off push notifications') : null,
+          pushStatus === 'install-required' ? h('button', { class: 'btn', onclick: () => openInstallHelp(app) }, 'How to install') : null,
           app.notifications.permission === 'default'
             ? h('button', { class: 'btn', onclick: () => void app.notifications.requestPermission().then(render) }, 'Allow notifications while backgrounded')
             : null,
+          app.notifications.permission === 'granted'
+            ? h('button', { class: 'btn', onclick: () => void app.notifications.showTest() }, 'Send a test notification')
+            : null,
+        ),
+        h(
+          'section',
+          {},
+          h('h3', {}, 'App'),
+          h('p', {}, installText[install]),
+          install === 'available' ? h('button', { class: 'btn primary', onclick: () => void app.pwa.promptInstall().then(render) }, h('span', { html: icons.download }), 'Install MeshCall') : null,
+          install === 'ios-manual' ? h('button', { class: 'btn', onclick: () => openInstallHelp(app) }, 'Show me how') : null,
+          h('p', { class: 'hint' }, `Offline app shell: ${app.pwa.registration ? 'on' : 'unavailable'}${version ? ` · version ${version}` : ''}`),
+          app.pwa.updateReady
+            ? h('button', { class: 'btn primary', onclick: () => app.pwa.applyUpdate() }, 'Reload to update')
+            : h('button', { class: 'btn small', onclick: () => void app.pwa.checkForUpdate().then(() => setTimeout(render, 1500)) }, 'Check for updates'),
         ),
         h(
           'section',
@@ -329,6 +359,34 @@ export function openLiveInvite(app: AppContext, invite: LiveInvite): Modal {
         },
         'Watch',
       ),
+    ),
+  );
+  return m.open();
+}
+
+/** Install instructions – iOS has no install prompt API; elsewhere this explains the browser menu. */
+export function openInstallHelp(app: AppContext): Modal {
+  const m = new Modal('Install MeshCall');
+  const ios = app.pwa.installState === 'ios-manual';
+  m.setContent(
+    ...nodes(
+    h('div', { class: 'install-hero' }, h('img', { src: `${import.meta.env.BASE_URL}icons/icon-192.png`, alt: '', width: 72, height: 72 }), h('p', {}, 'Install MeshCall for a full-screen app with its own icon, faster start-up, and call notifications while it is closed.')),
+    ios
+      ? h(
+          'ol',
+          { class: 'install-steps' },
+          h('li', {}, 'Tap the ', h('span', { class: 'inline-icon', html: icons.share }), ' Share button in Safari'),
+          h('li', {}, 'Choose ', h('strong', {}, 'Add to Home Screen')),
+          h('li', {}, 'Open MeshCall from your Home Screen and enable notifications in Settings'),
+        )
+      : h(
+          'ol',
+          { class: 'install-steps' },
+          h('li', {}, 'Open your browser menu (⋮ or ⋯)'),
+          h('li', {}, 'Choose ', h('strong', {}, 'Install app'), ' or ', h('strong', {}, 'Add to Home screen')),
+        ),
+    ios ? h('p', { class: 'hint' }, 'On iPhone and iPad, web push notifications only work for apps added to the Home Screen (iOS 16.4+).') : null,
+    h('div', { class: 'modal-actions' }, h('button', { class: 'btn primary', onclick: () => m.close() }, 'Got it')),
     ),
   );
   return m.open();

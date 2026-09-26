@@ -7,6 +7,7 @@ const log = createLogger('Notify');
 export interface NotificationActionEvent {
   action: 'answer' | 'dismiss' | 'open';
   callId?: string;
+  roomName?: string;
 }
 
 /**
@@ -29,10 +30,10 @@ export class NotificationService {
   attach(registration: ServiceWorkerRegistration | null): void {
     this.registration = registration;
     navigator.serviceWorker?.addEventListener('message', (e: MessageEvent) => {
-      const d = e.data as { type?: string; action?: NotificationActionEvent['action']; callId?: string } | undefined;
+      const d = e.data as { type?: string; action?: NotificationActionEvent['action']; callId?: string; roomName?: string } | undefined;
       if (d?.type === 'notification-action' && d.action) {
         log.info(`Notification action "${d.action}"`);
-        this.events.emit('action', { action: d.action, callId: d.callId });
+        this.events.emit('action', { action: d.action, callId: d.callId, roomName: d.roomName });
       }
     });
   }
@@ -70,6 +71,12 @@ export class NotificationService {
     await this.show('Missed call', { body: `You missed a call from ${callerName}`, tag: `missed-${callId}` });
   }
 
+  /** Settings → "Send a test notification" (verifies permission + Service Worker display). */
+  async showTest(): Promise<void> {
+    if (this.permission !== 'granted') return;
+    await this.show('MeshCall notifications work', { body: 'Incoming calls will look like this while MeshCall is in the background.', tag: 'test' });
+  }
+
   async close(tag: string): Promise<void> {
     try {
       const list = (await this.registration?.getNotifications({ tag })) ?? [];
@@ -81,8 +88,8 @@ export class NotificationService {
 
   private async show(title: string, options: NotificationOptions): Promise<void> {
     try {
-      const icon = `${import.meta.env.BASE_URL}icon.svg`;
-      const opts = { icon, badge: icon, ...options };
+      const base = import.meta.env.BASE_URL;
+      const opts = { icon: `${base}icons/icon-192.png`, badge: `${base}icons/badge-96.png`, ...options };
       if (this.registration) await this.registration.showNotification(title, opts);
       else new Notification(title, opts);
     } catch (err) {

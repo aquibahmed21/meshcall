@@ -1,0 +1,15 @@
+{
+  "name": "meshcall-push-relay",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Web Push relay for MeshCall incoming-call notifications",
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node push-server.mjs",
+    "vapid": "web-push generate-vapid-keys"
+  },
+  "dependencies": {
+    "web-push": "^3.6.7"
+  }
+}

@@ -440,6 +440,25 @@ flowchart TD
 - **Candidate queueing:** candidates that arrive before their SDP are queued per remote `pcId`. The same applies to a future ICE generation, detected when its `usernameFragment` differs. Queued candidates are applied after `setRemoteDescription`. Duplicates are de-duplicated by (ufrag, mid, candidate). A failing `addIceCandidate` is caught and never breaks the connection.
 - **Lost messages:** a lost offer or answer is re-sent by a watchdog, and then escalated to re-creation.
 
+## Install as an app, offline shell and updates
+
+- **Installable app (PWA):** a web app manifest provides the name, `standalone` display, theme colours, 192/512 px PNG icons, a maskable icon and an Apple touch icon. Together with the Service Worker this meets Chrome's install criteria; the e2e test asserts zero installability errors.
+  - **Chromium desktop and Android:** the app captures `beforeinstallprompt` and shows its own **Install** button (sidebar, idle screen, Settings → App).
+  - **iOS/iPadOS:** there is no install API, so **Install** opens a *Share → Add to Home Screen* guide.
+  - Installed state is detected (`display-mode: standalone`), and the button disappears.
+- **Service Worker (`public/sw.js`):**
+  - It is registered at boot, before the name screen, and scoped to the app's base path (works under `/meshcall/` on GitHub Pages).
+  - At build time a small Vite plugin stamps `sw.js` with a unique `BUILD_ID` and the exact list of emitted files, so each release precaches its own hashed JS/CSS, HTML, icons and manifest.
+  - Pages are network-first (4 s), falling back to the cached shell, then to an offline page.
+  - Hashed assets are cache-first.
+  - Cross-origin requests (ScaleDrone, the push relay) are never intercepted.
+  - In `vite dev` it runs in pass-through mode, so HMR is unaffected.
+- **Offline:** the installed app still opens without a network (you get the room screen, with signaling "unavailable"). When the network returns, signaling reconnects by itself.
+- **Updates never interrupt a call:**
+  - A new release installs in the background and **waits**.
+  - The app shows *"A new version of MeshCall is available [Reload]"*, and asks for confirmation during a call.
+  - It checks for updates every 30 min and whenever the app returns to the foreground.
+
 ## Push notifications and Service Worker
 
 ```mermaid
@@ -464,7 +483,15 @@ sequenceDiagram
 - **A Service Worker cannot hold a WebRTC call.** It has no `RTCPeerConnection`, and the browser kills it when it is idle. It can only show a notification. The call is negotiated after the user opens or focuses the app.
 - **A relay server is required.** Browsers cannot send Web Push themselves: the VAPID private key must stay secret, and push services do not allow browser CORS requests. `npm run push-server` starts a small relay. Set `VITE_PUSH_SERVER_URL` to point at it. Without a relay, push is disabled and the UI says so.
 - **Backgrounded tabs:** while the app is open but hidden, incoming calls use `registration.showNotification()`. A visible tab rings in-page.
-- **iOS/iPadOS:** Web Push only works when the site is installed to the Home Screen (iOS 16.4 and later).
+- **iOS/iPadOS:** Web Push only works when the site is installed to the Home Screen (iOS 16.4 and later). The app shows *install required* and the install guide.
+- **Controls:** Settings → Notifications can turn push on and off (turning it off also unregisters at the relay) and send a **test notification**.
+- **Rotated subscriptions:** when the browser rotates a subscription (`pushsubscriptionchange`), the app re-registers it.
+- **Room of the call:** notifications name the room. If the app is open in *another* room, a push is routed to the page instead, which offers **Switch room**. A notification **Answer** opens the room screen prefilled with the call's room, and the call is answered automatically after Join.
+- **Deploying the relay:** `server/` is self-contained (`server/package.json`, `server/Dockerfile`, `GET /health`) and can run on Render, Fly.io, Railway, Cloud Run and similar hosts. Set:
+  - `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT`
+  - `ALLOWED_ORIGIN=https://<you>.github.io`
+  - optionally `SUBSCRIPTIONS_FILE`, on a persistent volume
+- **Enabling push on the Pages deployment:** add repository variables (Settings → Secrets and variables → Actions → Variables) named `VITE_PUSH_SERVER_URL` (and optionally `VITE_VAPID_PUBLIC_KEY`), then push. The Pages workflow passes every `VITE_*` variable into the build (`VITE_TURN_*` works the same way). Without a relay, push stays off and the UI says so.
 - **Offline callee without push:** if the callee is offline and push is unavailable, the call fails after 8 s with "User appears to be offline".
 
 ## Data usage and bandwidth monitoring
@@ -663,6 +690,10 @@ npm run test:resilience        # glare, offline→online, signaling reconnect, p
 npm run test:screens           # responsive screenshots → tests/e2e/artifacts/
 npm run test:features          # PiP, fullscreen, chat (1:1 + group), combined states, mobile layout
 npm run test:rooms             # rooms & isolation, 5 layouts × 3 viewports, 1:1→group, live audience control
+npm run test:pwa               # SW, installability, offline shell, update flow, REAL push via relay → FCM
+                               #  (needs: base build on :4173 is served by the test itself; push build on :4174
+                               #   `VITE_PUSH_SERVER_URL=http://localhost:8787 npx vite build --base=/meshcall/ --outDir dist-push`
+                               #   + `npx vite preview --base=/meshcall/ --outDir dist-push --port 4174`; relay: `cd server && npm i && npm start`)
 ```
 
 The e2e suite checks:

@@ -43,6 +43,16 @@ jobs:
 
       - name: Build Vite application for GitHub Pages
         run: npm run build -- --base=/meshcall/
+        # Optional runtime config from repository Settings → Variables (Actions).
+        # NOTE: VITE_* values are compiled into the public bundle – never put long-lived secrets here.
+        env:
+          VITE_SCALEDRONE_CHANNEL_ID: ${{ vars.VITE_SCALEDRONE_CHANNEL_ID }}
+          VITE_STUN_SERVER: ${{ vars.VITE_STUN_SERVER }}
+          VITE_TURN_SERVER: ${{ vars.VITE_TURN_SERVER }}
+          VITE_TURN_USERNAME: ${{ vars.VITE_TURN_USERNAME }}
+          VITE_TURN_CREDENTIAL: ${{ vars.VITE_TURN_CREDENTIAL }}
+          VITE_PUSH_SERVER_URL: ${{ vars.VITE_PUSH_SERVER_URL }}
+          VITE_VAPID_PUBLIC_KEY: ${{ vars.VITE_VAPID_PUBLIC_KEY }}
 
       - name: Ensure SPA fallback exists
         shell: bash

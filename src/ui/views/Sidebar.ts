@@ -1,7 +1,7 @@
 import type { AppContext } from '../../app';
 import { formatDuration } from '../../core/format';
 import type { PresenceStatus } from '../../types/state';
-import { colorFor, h, initials } from '../dom';
+import { colorFor, h, initials, nodes } from '../dom';
 import { icons } from '../icons';
 
 const STATUS_TEXT: Record<PresenceStatus, string> = { online: 'Online', offline: 'Offline', connecting: 'Connecting', unknown: 'Unknown' };
@@ -9,6 +9,7 @@ const STATUS_TEXT: Record<PresenceStatus, string> = { online: 'Online', offline:
 export interface SidebarCallbacks {
   onGroup: () => void;
   onGoLive: () => void;
+  onInstall: () => void;
 }
 
 /** Contacts with presence + live streams. */
@@ -21,7 +22,7 @@ export class Sidebar {
 
   constructor(
     private readonly app: AppContext,
-    cb: SidebarCallbacks,
+    private readonly cb: SidebarCallbacks,
   ) {
     this.filter.addEventListener('input', () => this.renderUsers());
     this.el = h(
@@ -43,8 +44,13 @@ export class Sidebar {
   render(): void {
     const { identity, signaling } = this.app;
     this.me.replaceChildren(
+      ...nodes(
       h('span', { class: 'avatar', style: `--avatar:${colorFor(identity.deviceId)}` }, initials(identity.displayName)),
       h('div', { class: 'grow' }, h('strong', {}, identity.displayName), h('small', { class: `sig ${signaling.status}` }, signaling.status === 'connected' ? '● Online' : `○ ${signaling.status}`)),
+      this.app.pwa.installState === 'available' || this.app.pwa.installState === 'ios-manual'
+        ? h('button', { class: 'btn small install-btn', title: 'Install MeshCall as an app', onclick: () => this.cb.onInstall() }, h('span', { html: icons.download }), 'Install')
+        : null,
+      ),
     );
     this.renderUsers();
     this.renderStreams();

@@ -6,7 +6,7 @@ import { h } from './dom';
 import { icons } from './icons';
 import { CallView } from './views/CallView';
 import { DiagnosticsPanel } from './views/DiagnosticsPanel';
-import { openAddParticipants, openGoLive, openGroupCall, openIncomingCall, openLiveInvite, openManageAudience, openSettings } from './views/Dialogs';
+import { openAddParticipants, openGoLive, openGroupCall, openIncomingCall, openInstallHelp, openLiveInvite, openManageAudience, openSettings } from './views/Dialogs';
 import type { Modal } from './views/Modal';
 import { Sidebar } from './views/Sidebar';
 import { Toasts } from './views/Toasts';
@@ -46,7 +46,7 @@ export class UIManager {
     mount: HTMLElement,
     private readonly opts: UIManagerOptions,
   ) {
-    this.sidebar = new Sidebar(app, { onGroup: () => openGroupCall(app), onGoLive: () => openGoLive(app) });
+    this.sidebar = new Sidebar(app, { onGroup: () => openGroupCall(app), onGoLive: () => openGoLive(app), onInstall: () => this.install() });
     this.diagnostics = new DiagnosticsPanel(app, () => this.toggleDiagnostics(false));
     this.idle = this.renderIdle();
     this.nav = h(
@@ -79,6 +79,16 @@ export class UIManager {
     this.wire();
     this.rejoin = app.calls.rejoinOffer;
     this.renderAll();
+  }
+
+  /** Public toast (used for cross-room call offers etc.). */
+  toast(level: 'info' | 'warn' | 'error', text: string, action?: { label: string; run: () => void }): void {
+    this.toasts.show(level, text, 6000, action);
+  }
+
+  private install(): void {
+    if (this.app.pwa.installState === 'available') void this.app.pwa.promptInstall();
+    else openInstallHelp(this.app);
   }
 
   /** Re-mount after returning from the room screen. */
@@ -119,6 +129,11 @@ export class UIManager {
   private wire(): void {
     const { app } = this;
     app.rooms.events.on('change', () => this.renderRoomChip());
+    app.pwa.events.on('install', () => {
+      this.sidebar.render();
+      this.renderIdleHints();
+    });
+    app.pwa.events.on('updateReady', () => this.renderBanner());
     // Toasts live in the top layer of whatever is fullscreen (the call view), else in the app.
     document.addEventListener('fullscreenchange', () => {
       const host = document.fullscreenElement ?? this.root;
@@ -261,6 +276,22 @@ export class UIManager {
         h('button', { class: 'btn small', onclick: () => this.app.calls.dismissRejoin() }, 'Dismiss'),
       );
     }
+    if (!nodes.length && this.app.pwa.updateReady) {
+      nodes.push(
+        h('span', {}, 'A new version of MeshCall is available.'),
+        h(
+          'button',
+          {
+            class: 'btn small primary',
+            onclick: () => {
+              if (this.app.calls.inCall && !confirm('Reloading ends your current call. Reload now?')) return;
+              this.app.pwa.applyUpdate();
+            },
+          },
+          'Reload',
+        ),
+      );
+    }
     this.banner.hidden = nodes.length === 0;
     this.banner.replaceChildren(...nodes);
   }
@@ -284,6 +315,10 @@ export class UIManager {
       h('li', {}, 'Media flows directly between browsers (mesh). Direct P2P is always tried first; TURN relay is only a fallback.'),
     ];
     if (!config.hasTurn) hints.push(h('li', { class: 'warn' }, 'No TURN server configured – calls between restrictive networks may fail.'));
+    const inst = this.app.pwa.installState;
+    if (inst === 'available' || inst === 'ios-manual')
+      hints.push(h('li', {}, h('button', { class: 'btn small', onclick: () => this.install() }, h('span', { html: icons.download }), 'Install MeshCall as an app')));
+    if (push.status === 'install-required') hints.push(h('li', {}, 'On iPhone/iPad, install MeshCall to your Home Screen to receive call notifications while it is closed.'));
     if (push.status === 'available') hints.push(h('li', {}, h('button', { class: 'btn small', onclick: () => void push.enable() }, h('span', { html: icons.bell }), 'Enable offline call notifications')));
     if (!window.isSecureContext) hints.push(h('li', { class: 'warn' }, 'This page is not a secure context – camera, microphone and notifications need HTTPS.'));
     this.idleHints.replaceChildren(h('ul', {}, ...hints));

@@ -1890,3 +1890,54 @@ input[aria-invalid='true'] {
     padding-bottom: var(--safe-bottom);
   }
 }
+
+/* ───────────────────────── app install / updates ───────────────────────── */
+.toast.has-action {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.toast.has-action > span {
+  flex: 1;
+}
+.install-btn {
+  flex: none;
+}
+.install-btn svg {
+  width: 16px;
+  height: 16px;
+}
+.install-hero {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.install-hero img {
+  flex: none;
+  border-radius: 16px;
+}
+.install-hero p {
+  margin: 0;
+}
+.install-steps {
+  margin: 0;
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.inline-icon {
+  display: inline-grid;
+  vertical-align: middle;
+}
+.inline-icon svg {
+  width: 18px;
+  height: 18px;
+  color: var(--accent);
+}
+/* Installed app: respect the notch/status bar area in standalone mode */
+@media (display-mode: standalone) {
+  .topbar {
+    padding-top: max(var(--safe-top), 0px);
+  }
+}

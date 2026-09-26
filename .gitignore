@@ -9,3 +9,4 @@ server/vapid.json
 node_modules/
 dist/
 .env.*.local
+dist-push

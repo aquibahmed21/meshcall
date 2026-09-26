@@ -291,6 +291,7 @@ export class SignalingService {
     }
     this.drone = drone;
     const current = () => gen === this.generation && !this.stopped;
+    let opened = false;
 
     const openTimer = new Timer();
     openTimer.start(20_000, () => {
@@ -308,8 +309,8 @@ export class SignalingService {
         this.retryAfterFailure(gen);
         return;
       }
-      for (const [name, entry] of this.rooms) this.attachRoom(name, entry);
-      this.onConnected();
+      opened = true;
+      this.onConnected(); // attaches every room to this fresh client
     });
     drone.on('error', (error) => {
       if (current()) log.throttled('error', 10_000, 'WARN', 'ScaleDrone error', errorMessage(error));
@@ -321,6 +322,15 @@ export class SignalingService {
     });
     drone.on('reconnect', () => {
       if (!current()) return;
+      // ScaleDrone's internal reconnect only restores rooms it already knew, and a client whose
+      // FIRST handshake never completed (e.g. the app started offline) cannot subscribe/publish
+      // afterwards. In those cases use a brand-new client so every room is attached on 'open'.
+      const pending = [...this.rooms.values()].some((e) => !e.room);
+      if (!opened || pending) {
+        log.info('Reconnected – switching to a fresh client to (re)attach rooms');
+        this.reconnectNow(opened ? 'rooms pending after reconnect' : 'first handshake never completed');
+        return;
+      }
       log.info('Reconnected (ScaleDrone auto-reconnect)');
       this.onConnected();
     });
@@ -349,6 +359,11 @@ export class SignalingService {
   }
 
   private onConnected(): void {
+    // Rooms subscribed while we were disconnected/reconnecting were never attached to a ScaleDrone
+    // client (ScaleDrone's auto-reconnect only re-subscribes rooms it already knew). Attach them
+    // now – otherwise joining a room or starting a call during a network blip would silently
+    // never receive anything.
+    for (const [name, entry] of this.rooms) if (!entry.room) this.attachRoom(name, entry);
     const wasConnected = this.everConnected;
     this.everConnected = true;
     this.backoff.reset();

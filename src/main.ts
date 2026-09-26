@@ -4,6 +4,7 @@ import { CONFIG } from './config';
 import { createLogger, logHub } from './core/logger';
 import { renderOnboarding } from './ui/views/Onboarding';
 import { renderRoomScreen } from './ui/views/RoomScreen';
+import { validateRoomName } from './services/RoomService';
 import { UIManager } from './ui/UIManager';
 import { collectDiagnostics } from './ui/views/DiagnosticsPanel';
 import { probeIceServers } from './webrtc/IceServerProbe';
@@ -22,6 +23,9 @@ async function boot(): Promise<void> {
     return;
   }
   const app = createApp();
+  // Register the Service Worker immediately (offline shell + installability), even before the
+  // user has entered a name.
+  void app.pwa.register();
   // Debug handle: window.__voip.diagnostics() → selected candidate pair / path per peer.
   (window as unknown as { __voip: unknown }).__voip = {
     app,
@@ -33,6 +37,7 @@ async function boot(): Promise<void> {
   // A notification click may carry the room of the call (?room=…) → prefill, never auto-join.
   const params = new URLSearchParams(location.search);
   let prefill = params.get('room') ?? undefined;
+  let answerAfterJoin: string | undefined;
 
   const showRoomScreen = (error?: string) => {
     document.title = 'MeshCall – Join a room';
@@ -44,6 +49,8 @@ async function boot(): Promise<void> {
       onJoin: async (room) => {
         await joinRoom(app, room);
         prefill = undefined;
+        if (answerAfterJoin) app.calls.autoAnswer(answerAfterJoin); // user already pressed "Answer"
+        answerAfterJoin = undefined;
         document.title = `${room.roomName} – MeshCall`;
         if (!ui) {
           ui = new UIManager(app, mount, {
@@ -58,6 +65,41 @@ async function boot(): Promise<void> {
       },
     });
   };
+
+  /**
+   * A call notification/push for ANOTHER room than the one we are in (or while on the room
+   * screen): rooms are isolated, so offer to switch – never switch silently.
+   */
+  const offerRoomSwitch = (roomName: string | undefined, callId: string | undefined, callerName: string | undefined, answer: boolean) => {
+    if (!roomName) return;
+    const v = validateRoomName(roomName);
+    if (!v.ok) return;
+    const current = app.rooms.current;
+    if (current?.roomId === v.room.roomId) return; // same room → the normal in-app ringing handles it
+    const who = callerName ?? 'Someone';
+    const go = () => {
+      if (current) leaveRoom(app);
+      prefill = v.room.roomName;
+      answerAfterJoin = answer ? callId : undefined;
+      showRoomScreen(`${who} is calling you in “${v.room.roomName}”. Join the room to ${answer ? 'answer' : 'see the call'}.`);
+    };
+    if (!current || !ui) return go();
+    ui.toast('info', `${who} is calling you in room “${v.room.roomName}”`, {
+      label: 'Switch room',
+      run: () => {
+        if (app.calls.inCall && !confirm('Switching rooms ends your current call. Switch anyway?')) return;
+        go();
+      },
+    });
+  };
+  app.pwa.events.on('message', (m) => {
+    if (m.type !== 'push-call' || !m.data || typeof m.data !== 'object') return;
+    const d = m.data as { roomName?: string; callId?: string; callerName?: string };
+    offerRoomSwitch(d.roomName, d.callId, d.callerName, false);
+  });
+  app.notifications.events.on('action', (a) => {
+    if (a.action !== 'dismiss') offerRoomSwitch(a.roomName, a.callId, undefined, a.action === 'answer');
+  });
 
   const launch = async () => {
     await startApp(app);

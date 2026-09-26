@@ -7,9 +7,9 @@
   "scripts": {
     "dev": "vite",
     "dev:lan": "vite --mode lan",
-    "build": "tsc --noEmit && vite build",
+    "build": "tsc --noEmit && tsc -p tsconfig.node.json && vite build",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.node.json",
     "test": "vitest run",
     "test:e2e": "node tests/e2e/two-peer.mjs",
     "push-server": "node server/push-server.mjs",
@@ -17,9 +17,11 @@
     "test:resilience": "node tests/e2e/resilience.mjs",
     "test:screens": "node tests/e2e/screens.mjs",
     "test:features": "node tests/e2e/features.mjs",
-    "test:rooms": "node tests/e2e/rooms.mjs"
+    "test:rooms": "node tests/e2e/rooms.mjs",
+    "test:pwa": "node tests/e2e/pwa.mjs"
   },
   "devDependencies": {
+    "@types/node": "^26.6.3",
     "@vitejs/plugin-basic-ssl": "^2.3.0",
     "node-turn": "^0.0.6",
     "playwright-core": "^1.63.0",

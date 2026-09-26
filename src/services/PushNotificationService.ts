@@ -4,10 +4,20 @@ import { createLogger, errorMessage } from '../core/logger';
 import type { AppConfig } from '../config';
 import type { InvitePayload } from '../types/signaling';
 import type { IdentityService } from './IdentityService';
+import { PwaService } from './PwaService';
 
 const log = createLogger('Push');
 
-export type PushStatus = 'unsupported' | 'insecure' | 'not-configured' | 'available' | 'denied' | 'subscribed' | 'error';
+export type PushStatus =
+  | 'unsupported'
+  | 'insecure'
+  /** iOS/iPadOS: Web Push only exists inside the Home Screen app. */
+  | 'install-required'
+  | 'not-configured'
+  | 'available'
+  | 'denied'
+  | 'subscribed'
+  | 'error';
 
 export interface CallPushPayload extends InvitePayload {
   type: 'call-invite';
@@ -59,6 +69,7 @@ export class PushNotificationService {
   async init(registration: ServiceWorkerRegistration | null): Promise<void> {
     this.registration = registration;
     if (!window.isSecureContext) return this.setStatus('insecure');
+    if (!('PushManager' in window) && PwaService.isIos() && !PwaService.isStandalone()) return this.setStatus('install-required');
     if (!registration || !('PushManager' in window)) return this.setStatus('unsupported');
     if (!this.config.push.serverUrl) return this.setStatus('not-configured');
     if (Notification.permission === 'denied') return this.setStatus('denied');
@@ -96,6 +107,45 @@ export class PushNotificationService {
       this.setStatus('error');
       return false;
     }
+  }
+
+  /** Browser rotated/expired the subscription (pushsubscriptionchange) → subscribe again. */
+  async resubscribe(): Promise<void> {
+    if (this._status !== 'subscribed' || !this.registration) return;
+    try {
+      const key = await this.getVapidKey();
+      const sub =
+        (await this.registration.pushManager.getSubscription()) ??
+        (await this.registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(key) }));
+      await this.register(sub);
+      log.info('Push subscription renewed');
+    } catch (err) {
+      log.warn('Renewing push subscription failed', errorMessage(err));
+      this.setStatus('error');
+    }
+  }
+
+  /** Turn off offline call notifications (browser + relay). */
+  async disable(): Promise<void> {
+    try {
+      const sub = await this.registration?.pushManager.getSubscription();
+      await sub?.unsubscribe();
+      if (this.config.push.serverUrl) {
+        await withTimeout(
+          fetch(`${this.config.push.serverUrl}/unsubscribe`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ deviceId: this.identity.deviceId }),
+          }),
+          6_000,
+          'push unsubscribe',
+        );
+      }
+      log.info('Push notifications disabled');
+    } catch (err) {
+      log.warn('Disabling push failed', errorMessage(err));
+    }
+    this.setStatus('available');
   }
 
   /** Ask the relay to wake the callee. Resolves false when the callee has no subscription. */
@@ -144,19 +194,5 @@ export class PushNotificationService {
   private setStatus(s: PushStatus): void {
     this._status = s;
     this.events.emit('status', s);
-  }
-}
-
-export async function registerServiceWorker(): Promise<ServiceWorkerRegistration | null> {
-  if (!('serviceWorker' in navigator) || !window.isSecureContext) return null;
-  try {
-    // BASE_URL keeps this working when the app is served from a sub-path (e.g. GitHub Pages /meshcall/).
-    const base = import.meta.env.BASE_URL;
-    const reg = await navigator.serviceWorker.register(`${base}sw.js`, { scope: base });
-    log.info('Service Worker registered');
-    return reg;
-  } catch (err) {
-    log.warn('Service Worker registration failed', errorMessage(err));
-    return null;
   }
 }

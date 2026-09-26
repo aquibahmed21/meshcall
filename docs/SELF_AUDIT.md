@@ -293,3 +293,52 @@ Verification:
 - **Stream metadata is visible:** live-stream titles and allowed-viewer ids are visible to room members. Media access is what's enforced.
 - **Mesh upload cost:** the streamer's upload grows linearly with viewers, and group upload grows with N−1. The caps are 6 participants and 8 viewers.
 - **Active speaker is signal-based:** detection uses received audio levels, so background noise can win. Pinning overrides it.
+
+---
+
+## F. Service Worker, install-as-app and push
+
+Verification: `npm run test:pwa`, 21 checks, including a **real** push delivered app → relay → Google FCM → Service Worker to a closed app. Every other suite was re-run with no regressions: 67 unit tests, `test:e2e` 20/20, `test:rooms` 60/60, `test:features` 45/45, `test:resilience` 7/7, and `test:screens` with no overflow.
+
+### Issues found and fixed
+
+#### F1. Rooms subscribed during a signaling reconnect were never attached
+
+- **Found by:** the PWA e2e. This bug predates this work.
+- **Root cause:** ScaleDrone's auto-reconnect only re-subscribes rooms it already knew. A client whose first handshake never completed (for example, the app started offline) cannot subscribe or publish at all afterwards.
+- **Impact:** joining a room, or starting a call (its mesh room), during a network blip silently received nothing. The room join timed out.
+- **Fix:**
+  - Unattached rooms are attached on every (re)connect.
+  - A never-opened client, or pending rooms at reconnect, trigger a brand-new client.
+
+#### F2. The Service Worker registered only after the name screen
+
+- **Found by:** the probe run.
+- **Impact:** first-time visitors had no offline shell and no install prompt.
+- **Fix:** registration happens at boot and is idempotent.
+
+#### F3. Offline start disabled updates and push
+
+- **Found by:** e2e.
+- **Root cause:** `register()` rejects without a network.
+- **Impact:** the app never noticed a new release or a push registration for that session.
+- **Fix:** fall back to the existing registration, and re-check for updates on `online`.
+
+#### F4. The offline shell served "504 Offline" for its own JS/CSS
+
+- **Found by:** e2e.
+- **Root cause:** module scripts are CORS requests, and the server's `Vary: Origin` made `caches.match` miss the precached copies.
+- **Fix:** match with `ignoreVary` (precached files are content-hashed).
+
+#### F5. Runtime root paths broke the GitHub Pages sub-path
+
+- **Found by:** review before the first publish.
+- **Root cause:** `/sw.js`, `/icon.svg` and the Service Worker's `openWindow('/')` were hard-coded.
+- **Fix:** paths use `import.meta.env.BASE_URL` in the page, and the Service Worker's scope.
+
+### Remaining limitations
+
+- **Push needs a hosted relay:** browsers cannot send Web Push themselves. Until `VITE_PUSH_SERVER_URL` is configured for a deployment, push is off and the UI says so.
+- **The relay's `/notify` has no authentication:** add auth before production use.
+- **iOS:** push works only for the Home Screen app. There is no install prompt API, so the app shows guidance instead.
+- **A Service Worker cannot run a call:** a notification only wakes the user; the call is negotiated after the app opens.

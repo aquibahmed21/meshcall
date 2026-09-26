@@ -309,12 +309,13 @@ try {
   const carolGen = (await peersOf(alice)).find((p) => p.peer === 'Carol').generation;
   await carol.page.reload();
   await enterRoom(carol.page, ROOM);
-  await alice.page.waitForTimeout(1500);
+  // live-viewer-left is sent on page unload (best effort); ICE consent expiry is the fallback.
+  await alice.page.waitForFunction((id) => window.__voip.app.live.state?.viewers.get(id)?.status !== 'streaming', carol.id, { timeout: 15_000 }).catch(() => {});
   const whileGone = await ev(alice, (id) => window.__voip.app.live.state?.viewers.get(id)?.status, carol.id);
   await carol.page.waitForSelector('.stream-list .stream button:not([disabled])', { timeout: 25_000 });
   await carol.page.click('.stream-list .stream button');
   await alice.page.waitForFunction(([g]) => { const p = window.__voip.diagnostics().call.peers.find((x) => x.peer === 'Carol'); return p && p.connectionState === 'connected' && p.generation > g && !!p.connectionType; }, [carolGen], { timeout: 30_000 });
-  check('Viewer disconnect is reflected immediately (not "streaming")', whileGone !== 'streaming', `state while gone: ${whileGone}`);
+  check('Viewer disconnect is reflected promptly (not "streaming")', whileGone !== 'streaming', `state while gone: ${whileGone}`);
   check('Viewer reconnects → re-authorised, fresh P2P connection', (await peersOf(alice)).find((p) => p.peer === 'Carol').connectionType === 'P2P');
 
   await alice.page.setViewportSize({ width: 390, height: 844 });

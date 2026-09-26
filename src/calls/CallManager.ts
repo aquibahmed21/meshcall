@@ -371,6 +371,11 @@ export class CallManager {
     if (c?.kind === 'live' && c.role === 'broadcaster') this.mesh?.reinstate(deviceId);
   }
 
+  /** Answer this call automatically when its invite arrives (user already chose "Answer"). */
+  autoAnswer(callId: string): void {
+    this.pendingAutoAnswer = { callId, until: Date.now() + 30_000 };
+  }
+
   /** End the current call/stream locally with a reason (e.g. removed from a stream audience). */
   terminate(detail: string): void {
     this.finish('ended', detail);

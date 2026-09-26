@@ -11,7 +11,8 @@ import { IdentityService } from './services/IdentityService';
 import { NetworkMonitor } from './services/NetworkMonitor';
 import { NotificationService } from './services/NotificationService';
 import { PresenceService } from './services/PresenceService';
-import { PushNotificationService, registerServiceWorker } from './services/PushNotificationService';
+import { PushNotificationService } from './services/PushNotificationService';
+import { PwaService } from './services/PwaService';
 import { SettingsService } from './services/SettingsService';
 import { SignalingService } from './services/SignalingService';
 import { withTimeout } from './core/async';
@@ -36,6 +37,7 @@ export interface AppContext {
   live: LiveStreamManager;
   chat: ChatService;
   rooms: RoomService;
+  pwa: PwaService;
 }
 
 const log = createLogger('Room');
@@ -58,7 +60,9 @@ export function createApp(): AppContext {
   const live = new LiveStreamManager(calls, signaling, identity, presence, config);
   const chat = new ChatService(signaling, identity);
   const rooms = new RoomService();
-  return { config, identity, settings, signaling, presence, network, media, devices, webrtc, notifications, push, calls, groups, live, chat, rooms };
+  const pwa = new PwaService();
+  pwa.listenForInstall(); // as early as possible – beforeinstallprompt can fire right after load
+  return { pwa, config, identity, settings, signaling, presence, network, media, devices, webrtc, notifications, push, calls, groups, live, chat, rooms };
 }
 
 /**
@@ -75,9 +79,14 @@ export async function startApp(app: AppContext): Promise<void> {
     else if (!s || isTerminal(s.status)) app.chat.unbind();
   });
   app.push.events.on('status', (s) => app.presence.setPushEnabled(s === 'subscribed'));
-  const registration = await registerServiceWorker();
+  const registration = await app.pwa.register();
   app.notifications.attach(registration);
   void app.push.init(registration);
+  app.pwa.events.on('message', (m) => {
+    if (m.type === 'push-subscription-change') void app.push.resubscribe();
+  });
+  // Installing on iOS unlocks Web Push – re-evaluate when that happens.
+  app.pwa.events.on('install', (s) => s === 'installed' && void app.push.init(app.pwa.registration));
   void app.devices.start();
   void app.signaling.start();
 }

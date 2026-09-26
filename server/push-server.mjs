@@ -25,9 +25,10 @@ import { fileURLToPath } from 'node:url';
 import webpush from 'web-push';
 
 const dir = path.dirname(fileURLToPath(import.meta.url));
-const SUBS_FILE = path.join(dir, 'subscriptions.json');
+const SUBS_FILE = process.env.SUBSCRIPTIONS_FILE || path.join(dir, 'subscriptions.json');
 const VAPID_FILE = path.join(dir, 'vapid.json');
 const PORT = Number(process.env.PORT || 8787);
+// Set ALLOWED_ORIGIN to your app's origin in production, e.g. https://aquibahmed21.github.io
 const ORIGIN = process.env.ALLOWED_ORIGIN || '*';
 
 function loadJson(file, fallback) {
@@ -81,6 +82,7 @@ const server = http.createServer(async (req, res) => {
   if (limited(req.socket.remoteAddress || '?')) return send(res, 429, { error: 'rate limited' });
   try {
     if (req.method === 'GET' && req.url === '/vapid-public-key') return send(res, 200, { publicKey: vapid.publicKey });
+    if (req.method === 'GET' && req.url === '/health') return send(res, 200, { ok: true, subscriptions: subs.size });
     if (req.method !== 'POST') return send(res, 404, { error: 'not found' });
     const body = await readBody(req);
     if (req.url === '/subscribe') {
