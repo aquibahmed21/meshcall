@@ -2206,3 +2206,38 @@ input[aria-invalid='true'] {
     padding-top: var(--safe-top);
   }
 }
+
+/* Push state of THIS device (Settings → Notifications, top-bar pill) */
+.push-device {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+.push-device small {
+  display: block;
+  color: var(--muted);
+}
+.push-device-icon {
+  display: inline-flex;
+  flex: none;
+}
+.push-device.on {
+  border-color: rgba(46, 204, 113, 0.45);
+}
+.push-device.on .push-device-icon {
+  color: var(--ok);
+}
+.push-device.off .push-device-icon {
+  color: var(--muted);
+}
+.pill-btn {
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: 0.78rem;
+  cursor: pointer;
+}

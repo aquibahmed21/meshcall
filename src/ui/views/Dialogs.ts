@@ -123,7 +123,11 @@ export function openSettings(app: AppContext): Modal {
   };
   render();
   const off = app.devices.events.on('devices', render);
-  m.onClose = off;
+  const offPush = app.push.events.on('status', () => m.isOpen && render()); // e.g. Connecting… → Enabled
+  m.onClose = () => {
+    off();
+    offPush();
+  };
   return m.open();
 }
 

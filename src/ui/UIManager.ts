@@ -1,3 +1,4 @@
+import { PUSH_STATUS_LABEL } from '../services/PushNotificationService';
 import type { AppContext } from '../app';
 import { isTerminal } from '../calls/CallStateMachine';
 import type { SavedCall } from '../calls/CallManager';
@@ -33,6 +34,7 @@ export class UIManager {
   private toasts = new Toasts();
   private sigPill = h('span', { class: 'pill', title: 'Signaling (ScaleDrone)' });
   private netPill = h('span', { class: 'pill', title: 'Network' });
+  private pushPill = h('button', { class: 'pill pill-btn', type: 'button', onclick: () => openSettings(this.app) });
   private banner = h('div', { class: 'banner', hidden: true });
   private nav: HTMLElement;
   private incoming: Modal | null = null;
@@ -74,7 +76,7 @@ export class UIManager {
         { class: 'topbar' },
         h('div', { class: 'brand' }, h('span', { class: 'brand-mark', html: logo }), h('span', { class: 'brand-text' }, 'Mesh', h('b', {}, 'Call'))),
         this.roomChip,
-        h('div', { class: 'pills' }, this.sigPill, this.netPill),
+        h('div', { class: 'pills' }, this.pushPill, this.sigPill, this.netPill),
         h('button', { class: 'icon-btn', 'aria-label': 'Diagnostics', title: 'Diagnostics', html: icons.stats, onclick: () => this.toggleDiagnostics() }),
         h('button', { class: 'icon-btn', 'aria-label': 'Settings', title: 'Settings', html: icons.settings, onclick: () => openSettings(app) }),
       ),
@@ -239,7 +241,10 @@ export class UIManager {
     });
     app.media.events.on('state', () => this.callView?.render());
     app.settings.events.on('change', () => this.callView?.render());
-    app.push.events.on('status', () => this.renderIdleHints());
+    app.push.events.on('status', () => {
+      this.renderIdleHints();
+      this.renderPills();
+    });
   }
 
   // ── call lifecycle ───────────────────────────────────────────────────────
@@ -325,6 +330,12 @@ export class UIManager {
     const q = this.worstQuality;
     this.netPill.textContent = !online ? 'Offline' : this.app.calls.inCall && q !== 'unknown' ? `Network: ${q}` : 'Online';
     this.netPill.dataset.state = !online || q === 'critical' ? 'bad' : q === 'poor' ? 'warn' : 'ok';
+    const push = this.app.push.status;
+    const on = push === 'enabled';
+    this.pushPill.textContent = on ? '🔔 Push on' : push === 'connecting' ? '🔔 Push…' : '🔕 Push off';
+    this.pushPill.dataset.state = on ? 'ok' : push === 'connecting' ? 'warn' : 'bad';
+    this.pushPill.title = `Push notifications on this device: ${PUSH_STATUS_LABEL[push]} – open Settings`;
+    this.pushPill.setAttribute('aria-label', this.pushPill.title);
   }
 
   private renderBanner(): void {

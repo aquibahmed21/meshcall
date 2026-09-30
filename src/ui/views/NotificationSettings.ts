@@ -39,10 +39,49 @@ export function renderNotificationSettings(app: AppContext, rerender: () => void
     h('span', { class: 'switch-knob' }),
   );
   const permLabel: Record<string, string> = { granted: 'Enabled', denied: 'Blocked by browser', default: 'Not enabled yet', unsupported: 'Unavailable' };
+  // Re-subscribing needs a working push setup (not blocked / unsupported / not installed on iOS).
+  const canResubscribe = canToggle && perm !== 'denied';
+  const resubscribe = h(
+    'button',
+    {
+      class: 'btn small',
+      disabled: busy || !canResubscribe,
+      title: 'Remove this device’s push subscription and create a fresh one',
+      onclick: async (e: Event) => {
+        const b = e.currentTarget as HTMLButtonElement;
+        b.disabled = true;
+        b.textContent = on ? 'Re-subscribing…' : 'Subscribing…';
+        await (on ? push.resubscribe() : push.subscribe());
+        rerender();
+      },
+    },
+    on ? 'Re-subscribe (fresh)' : 'Subscribe',
+  );
+  const device = h(
+    'div',
+    { class: `push-device ${on ? 'on' : 'off'}`, role: 'status', 'data-state': status },
+    h('span', { class: 'push-device-icon', html: icons.bell, 'aria-hidden': 'true' }),
+    h(
+      'div',
+      { class: 'grow' },
+      h('strong', {}, on ? 'Push is enabled on this device' : busy ? 'Setting up push on this device…' : 'Push is not enabled on this device'),
+      h(
+        'small',
+        {},
+        on
+          ? 'Calls and messages reach this device even when MeshCall is closed.'
+          : status === 'disabled'
+            ? 'You will not be notified while MeshCall is closed.'
+            : PUSH_STATUS_LABEL[status],
+      ),
+    ),
+    resubscribe,
+  );
   return h(
     'section',
     { class: 'notif-settings' },
     h('h3', {}, 'Notifications'),
+    device,
     h('div', { class: 'setting-row' }, h('div', { class: 'grow' }, h('strong', {}, 'Incoming calls'), h('small', {}, PUSH_STATUS_LABEL[status])), toggle),
     h('div', { class: 'setting-row' }, h('div', { class: 'grow' }, h('strong', {}, 'Browser notifications'), h('small', {}, permLabel[perm] ?? perm))),
     ...nodes(
@@ -55,7 +94,7 @@ export function renderNotificationSettings(app: AppContext, rerender: () => void
         'p',
         { class: 'hint' },
         on
-          ? 'While MeshCall is in the background you get a system notification for incoming calls. Note: the current push server cannot target a single person, so MeshCall cannot yet wake a closed app for a call (see Diagnostics → Push).'
+          ? 'Not receiving notifications? Use “Re-subscribe (fresh)” – it replaces this device’s subscription with a new one.'
           : 'Allow MeshCall to notify you about incoming calls even when the app is not focused.',
       ),
       perm === 'granted' ? h('button', { class: 'btn small', onclick: () => void app.notifications.showTest() }, 'Show a test notification') : null,

@@ -281,6 +281,17 @@ export class PushNotificationService {
     });
   }
 
+  /**
+   * "Re-subscribe": drop this device's subscription (server + browser) and create a brand-new one,
+   * registered with this device's id. Fixes a subscription the server lost, a stale endpoint or
+   * a subscription made for an old VAPID key.
+   */
+  async resubscribe(): Promise<PushSubscription | null> {
+    log.info('Re-subscribing to push (fresh subscription)');
+    await this.unsubscribe();
+    return this.subscribe();
+  }
+
   /** Browser subscription exists AND the server confirms it. */
   async isSubscribed(): Promise<boolean> {
     const sub = await this.getSubscription();
