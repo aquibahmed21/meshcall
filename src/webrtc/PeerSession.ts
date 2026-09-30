@@ -5,7 +5,7 @@ import { createLogger, errorMessage } from '../core/logger';
 import type { AppConfig } from '../config';
 import type { MediaKind, NegotiationMessage, PayloadOf } from '../types/signaling';
 import type { IceCandidateType, PeerConnectionState, SelectedPathInfo } from '../types/state';
-import { CandidateGate, candidateKey, emptyCounts, parseCandidateType } from './IceStrategy';
+import { CandidateGate, candidateKey, emptyCounts, gatheredKey, identifyServer, parseCandidateType } from './IceStrategy';
 import type { WebRTCManager } from './WebRTCManager';
 
 const logRtc = createLogger('WebRTC');
@@ -89,6 +89,8 @@ export class PeerSession {
   private loggedTypes = new Set<string>();
   private addedTrackIds = new Set<string>();
   private desiredEncoding: Partial<Record<MediaKind, EncodingPatch>> = {};
+  /** Local candidate → URL of the STUN/TURN server that produced it (from the gathering event). */
+  private gatheredUrls = new Map<string, string>();
   private _state: PeerConnectionState;
 
   constructor(private readonly opts: PeerSessionOptions) {
@@ -220,10 +222,13 @@ export class PeerSession {
   }
 
   updateSelectedPath(path: SelectedPathInfo | undefined): void {
+    if (path) path = { ...path, server: identifyServer(path, (k) => this.gatheredUrls.get(k)) };
     const prev = this._state.selectedPath;
-    if (path && prev?.pairLabel === path.pairLabel && prev.transport === path.transport) return;
+    if (path && prev?.pairLabel === path.pairLabel && prev.transport === path.transport && prev.server?.url === path.server?.url) return;
+    if (!path && !prev) return;
     if (path) {
-      logIce.info(`${this.name}: Selected candidate pair = ${path.pairLabel} (${path.connectionType}, ${path.transport})`);
+      const via = path.server?.url ? ` via ${path.server.url}` : '';
+      logIce.info(`${this.name}: Selected candidate pair = ${path.pairLabel} (${path.connectionType}, ${path.transport}${via})`);
     }
     this.patchState({ selectedPath: path, selectedCandidateType: path?.localType });
   }
@@ -260,7 +265,8 @@ export class PeerSession {
     const pc = this.pc;
     pc.onnegotiationneeded = () => void this.negotiate({});
 
-    pc.onicecandidate = ({ candidate }) => {
+    pc.onicecandidate = (event) => {
+      const { candidate } = event;
       if (this.closed) return;
       if (!candidate) {
         const c = this._state.localCandidates;
@@ -272,6 +278,13 @@ export class PeerSession {
         return;
       }
       if (!candidate.candidate) return; // empty end-of-candidates marker
+      // Remember which server produced srflx/relay candidates (RTCPeerConnectionIceEvent.url).
+      const serverUrl = (event as RTCPeerConnectionIceEvent & { url?: string | null }).url ?? (candidate as RTCIceCandidate & { url?: string | null }).url;
+      if (serverUrl) {
+        const t = candidate.type ?? parseCandidateType(candidate.candidate);
+        this.gatheredUrls.set(gatheredKey(t, candidate.address, candidate.port, candidate.protocol), serverUrl);
+        if (this.gatheredUrls.size > 200) this.gatheredUrls.clear();
+      }
       const type = (candidate.type as IceCandidateType | null) ?? parseCandidateType(candidate.candidate);
       if (type) {
         this.patchState({ localCandidates: { ...this._state.localCandidates, [type]: this._state.localCandidates[type] + 1 } }, false);

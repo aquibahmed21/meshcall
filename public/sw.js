@@ -140,6 +140,13 @@ function parsePush(event) {
     if (json.type === 'incoming-call' && typeof json.callId === 'string' && typeof json.callerName === 'string') {
       return { kind: 'incoming-call', ...json };
     }
+    // Targeted-push envelope { title, body, data: { type: … } } → unwrap typed data
+    const typed = json.data && typeof json.data === 'object' ? json.data : null;
+    if (typed && typed.type === 'incoming-call' && typeof typed.callId === 'string') return { kind: 'incoming-call', ...typed };
+    const chat = json.type === 'chat-message' ? json : typed && typed.type === 'chat-message' ? typed : null;
+    if (chat && typeof chat.senderId === 'string' && typeof chat.senderName === 'string') {
+      return { kind: 'chat-message', ...chat, text: typeof chat.text === 'string' ? chat.text.slice(0, 200) : '' };
+    }
     const n = json.notification && typeof json.notification === 'object' ? json.notification : json;
     return {
       kind: 'system',
@@ -159,6 +166,7 @@ function safeText(event) {
 }
 
 async function handlePush(p) {
+  if (p.kind === 'chat-message') return handleChatPush(p);
   if (p.kind !== 'incoming-call') {
     return self.registration.showNotification(p.title || 'MeshCall', { body: p.body || '', icon: ICON, badge: BADGE, data: { kind: 'system' } });
   }
@@ -197,7 +205,28 @@ async function handlePush(p) {
   });
 }
 
+async function handleChatPush(p) {
+  const context = { kind: 'chat-message', action: 'open', senderId: p.senderId, senderName: p.senderName, messageId: p.messageId, roomId: p.roomId, roomName: p.roomName, at: Date.now() };
+  const visible = (await appWindows()).filter((c) => c.visibilityState === 'visible');
+  if (visible.length) {
+    visible.forEach((c) => c.postMessage({ type: 'push-chat', context })); // in-app UI shows it
+    return;
+  }
+  return self.registration.showNotification(`New message from ${p.senderName}`, {
+    body: p.text || '',
+    tag: `dm-${p.senderId}`,
+    renotify: true,
+    icon: ICON,
+    badge: BADGE,
+    timestamp: typeof p.timestamp === 'number' ? p.timestamp : Date.now(),
+    data: { kind: 'chat-message', senderId: p.senderId, senderName: p.senderName, messageId: p.messageId, roomId: p.roomId, roomName: p.roomName },
+  });
+}
+
 function toContext(d, action) {
+  if (d.kind === 'chat-message') {
+    return { kind: 'chat-message', action: 'open', senderId: d.senderId, senderName: d.senderName, messageId: d.messageId, roomId: d.roomId, roomName: d.roomName, at: Date.now() };
+  }
   return {
     kind: 'incoming-call',
     action,
@@ -236,7 +265,12 @@ self.addEventListener('notificationclick', (event) => {
 
 async function onClick(data, action) {
   const windows = await appWindows();
-  const context = data.kind === 'incoming-call' && typeof data.callId === 'string' ? toContext(data, action) : null;
+  const context =
+    data.kind === 'incoming-call' && typeof data.callId === 'string'
+      ? toContext(data, action)
+      : data.kind === 'chat-message' && typeof data.senderId === 'string'
+        ? toContext(data, 'open')
+        : null;
   if (windows.length) {
     const target = windows.find((c) => c.focused) || windows.find((c) => c.visibilityState === 'visible') || windows[0];
     if (action !== 'decline') {

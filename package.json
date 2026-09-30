@@ -17,7 +17,8 @@
     "test:features": "node tests/e2e/features.mjs",
     "test:rooms": "node tests/e2e/rooms.mjs",
     "test:pwa": "node tests/e2e/pwa.mjs",
-    "test:push": "node tests/e2e/push.mjs"
+    "test:push": "node tests/e2e/push.mjs",
+    "test:diagnostics": "node tests/e2e/diagnostics.mjs"
   },
   "devDependencies": {
     "@types/node": "^26.6.3",

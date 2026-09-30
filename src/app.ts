@@ -6,6 +6,7 @@ import { CONFIG, type AppConfig } from './config';
 import { DeviceManager } from './media/DeviceManager';
 import { MediaManager } from './media/MediaManager';
 import { ChatService } from './services/ChatService';
+import { DirectMessageService } from './services/DirectMessageService';
 import { RoomService, type RoomContext } from './services/RoomService';
 import { IdentityService } from './services/IdentityService';
 import { NetworkMonitor } from './services/NetworkMonitor';
@@ -38,6 +39,7 @@ export interface AppContext {
   chat: ChatService;
   rooms: RoomService;
   pwa: PwaService;
+  dms: DirectMessageService;
 }
 
 const log = createLogger('Room');
@@ -62,7 +64,8 @@ export function createApp(): AppContext {
   const rooms = new RoomService();
   const pwa = new PwaService();
   pwa.listenForInstall(); // as early as possible – beforeinstallprompt can fire right after load
-  return { pwa, config, identity, settings, signaling, presence, network, media, devices, webrtc, notifications, push, calls, groups, live, chat, rooms };
+  const dms = new DirectMessageService(signaling, identity, presence, push);
+  return { dms, pwa, config, identity, settings, signaling, presence, network, media, devices, webrtc, notifications, push, calls, groups, live, chat, rooms };
 }
 
 /**
@@ -108,6 +111,7 @@ export async function joinRoom(app: AppContext, room: RoomContext): Promise<void
   const joined = app.presence.start(room);
   app.calls.start();
   app.live.start();
+  app.dms.start(room);
   app.rooms.set(room);
   try {
     await withTimeout(joined, JOIN_TIMEOUT_MS, 'room join');
@@ -132,6 +136,7 @@ export function leaveRoom(app: AppContext): void {
   log.info(`Leaving room "${room.roomName}"`);
   app.calls.stop();
   app.live.stop();
+  app.dms.stop();
   app.chat.unbind();
   app.presence.stop();
   app.media.release();

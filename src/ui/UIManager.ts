@@ -6,7 +6,8 @@ import { h } from './dom';
 import { icons } from './icons';
 import { CallView } from './views/CallView';
 import { DiagnosticsPanel } from './views/DiagnosticsPanel';
-import { openAddParticipants, openGoLive, openGroupCall, openIncomingCall, openInstallHelp, openLiveInvite, openManageAudience, openSettings } from './views/Dialogs';
+import { openAddParticipants, openGoLive, openGroupCall, openIncomingCall, openInstallHelp, openLiveInvite, openManageAudience, openOfflineCallDialog, openSettings } from './views/Dialogs';
+import { ConversationDrawer } from './views/ConversationDrawer';
 import type { Modal } from './views/Modal';
 import { Sidebar } from './views/Sidebar';
 import { Toasts } from './views/Toasts';
@@ -41,13 +42,21 @@ export class UIManager {
   private worstQuality: NetworkQuality = 'unknown';
   private rejoin: SavedCall | null = null;
   private roomChip = h('div', { class: 'room-chip' });
+  private drawer!: ConversationDrawer;
 
   constructor(
     private readonly app: AppContext,
     mount: HTMLElement,
     private readonly opts: UIManagerOptions,
   ) {
-    this.sidebar = new Sidebar(app, { onGroup: () => openGroupCall(app), onGoLive: () => openGoLive(app), onInstall: () => this.install() });
+    this.sidebar = new Sidebar(app, {
+      onGroup: () => openGroupCall(app),
+      onGoLive: () => openGoLive(app),
+      onInstall: () => this.install(),
+      onCall: (id, media) => this.callUser(id, media),
+      onMessage: (id) => this.openConversation(id),
+    });
+    this.drawer = new ConversationDrawer(app, (id) => this.callUser(id, 'audio'));
     this.diagnostics = new DiagnosticsPanel(app, () => this.toggleDiagnostics(false));
     this.idle = this.renderIdle();
     this.nav = h(
@@ -72,6 +81,7 @@ export class UIManager {
       this.banner,
       h('div', { class: 'layout' }, this.sidebar.el, this.stage, this.diagnostics.el),
       this.nav,
+      this.drawer.el,
       this.toasts.el,
     );
     mount.replaceChildren(this.root);
@@ -85,6 +95,24 @@ export class UIManager {
   /** Public toast (used for cross-room call offers etc.). */
   toast(level: 'info' | 'warn' | 'error', text: string, action?: { label: string; run: () => void }): void {
     this.toasts.show(level, text, 6000, action);
+  }
+
+  /**
+   * Call button: online → normal WebRTC call; offline/unknown → explanation dialog (never a blind
+   * WebRTC attempt, never a disabled button).
+   */
+  callUser(userId: string, media: 'audio' | 'video'): void {
+    if (this.app.calls.inCall) {
+      this.toasts.show('info', 'You are already in a call');
+      return;
+    }
+    if (this.app.presence.status(userId) === 'online') void this.app.calls.startDirectCall(userId, media);
+    else openOfflineCallDialog(this.app, userId, media, () => this.openConversation(userId));
+  }
+
+  /** Open the 1:1 conversation (optionally highlighting a message from a notification). */
+  openConversation(userId: string, highlightMessageId?: string): void {
+    this.drawer.open(userId, highlightMessageId);
   }
 
   private install(): void {
@@ -129,7 +157,17 @@ export class UIManager {
 
   private wire(): void {
     const { app } = this;
-    app.rooms.events.on('change', () => this.renderRoomChip());
+    app.rooms.events.on('change', (room) => {
+      this.renderRoomChip();
+      if (!room) this.drawer.close();
+    });
+    app.dms.events.on('change', () => this.sidebar.renderUsers());
+    app.dms.events.on('incoming', (m) => {
+      if (this.drawer.openPeer === m.senderId && document.visibilityState === 'visible') return;
+      const room = app.rooms.current;
+      void app.notifications.showDirectMessage({ messageId: m.messageId, senderId: m.senderId, senderName: m.senderName, text: m.text, roomId: m.roomId, roomName: room?.roomName ?? '' });
+      this.toasts.show('info', `${m.senderName}: ${m.text.slice(0, 80)}`, 6000, { label: 'Open', run: () => this.openConversation(m.senderId, m.messageId) });
+    });
     app.pwa.events.on('install', () => {
       this.sidebar.render();
       this.renderIdleHints();

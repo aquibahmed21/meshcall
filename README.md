@@ -37,12 +37,13 @@ To test on phones or other PCs on your LAN, use `npm run dev:lan`. It serves ove
 12. [Push notifications and Service Worker](#push-notifications--service-worker)
 13. [Data usage and bandwidth monitoring](#data-usage--bandwidth-monitoring)
 14. [Weak network handling](#weak-network-handling)
-15. [In-call chat, Picture-in-Picture and fullscreen](#in-call-chat-picture-in-picture-and-fullscreen)
-16. [Diagnostics: TURN, STUN and WebRTC debugging](#diagnostics--turn--stun--webrtc-debugging)
-17. [Configuration and security](#configuration--security)
-18. [Browser limitations](#browser-limitations)
-19. [Mesh scalability limitations](#mesh-scalability-limitations)
-20. [Testing](#testing)
+15. [Direct messages and offline users](#direct-messages-and-offline-users)
+16. [In-call chat, Picture-in-Picture and fullscreen](#in-call-chat-picture-in-picture-and-fullscreen)
+17. [Diagnostics: TURN, STUN and WebRTC debugging](#diagnostics--turn--stun--webrtc-debugging)
+18. [Configuration and security](#configuration--security)
+19. [Browser limitations](#browser-limitations)
+20. [Mesh scalability limitations](#mesh-scalability-limitations)
+21. [Testing](#testing)
 
 More detail:
 
@@ -378,7 +379,7 @@ The chosen path is **never inferred from configuration**. `StatsMonitor` reads `
 
 "TURN is required" is **never cached**. Every new connection, rejoin or ICE restart starts over at "direct first".
 
-STUN uses `stun:dev.aahlaad.in:3401` plus Google's public STUN servers. Google's servers are STUN only, never TURN. The TURN relay fallback is `turn:dev.aahlaad.in:3401`. All of these are configurable.
+STUN always tries Google's public STUN servers first, then `stun:aahlaad.in:3478` (see `orderStunUrls` in `src/config.ts`). Google's servers are STUN only; Google offers no public TURN. The TURN relay fallback is `turn:aahlaad.in:3478`. All of these are configurable.
 
 ## Join and rejoin behaviour
 
@@ -526,6 +527,57 @@ payload = { type:'incoming-call', callId, roomId, roomName, callerId, callerName
 
 **CORS:** the backend allows `https://aquibahmed21.github.io` and `http://localhost:5173` (verified). Any other deployment origin must be added to the backend's CORS configuration. The frontend never tries to bypass CORS.
 
+## Direct messages and offline users
+
+**Buttons are never disabled because someone is offline.** Every person in the room keeps **Audio call**, **Video call** and **Message**.
+
+**Calling a user who is not online** (offline, or presence unknown) never starts a blind WebRTC attempt. Instead a dialog says *"John is currently offline"* (or that the status is unknown):
+
+- **Send Call Notification** appears only when targeted push is actually available and the recipient is known to have push enabled. That is not the case with the current backend.
+- Otherwise the dialog explains why no notification can be sent and offers **Message instead** or **Cancel**.
+
+**Direct messages** (`src/services/DirectMessageService.ts`, `ConversationDrawer`) are 1:1 conversations, available in and outside calls:
+
+| Recipient presence | Delivery |
+|---|---|
+| **online** | ScaleDrone, to the recipient's room inbox → the recipient's app sends `direct-message-ack` → **Delivered** |
+| offline / **unknown** (unknown is never treated as online) | `PushNotificationService.sendToUser()`, a **targeted** push; never `/notifyAll` |
+| … with the current backend (`'unsupported'`) | **Waiting for recipient**: queued on this device with an explanation, and sent through ScaleDrone automatically when the recipient comes online |
+
+- **Message states:**
+  - Sending / Sent (published, no ack yet) / **Delivered** (the recipient's app acknowledged it);
+  - Waiting for recipient;
+  - **Push request accepted**: the push server accepted the request, which is *not* shown as Delivered;
+  - Failed.
+- **No duplicates:** a sent message with no ack within 15 s goes back to *Waiting*. Retries reuse the `messageId`; the recipient de-duplicates but always acks, so a lost ack never creates a duplicate.
+- **Acks** are only accepted from the recipient.
+- **Unread counts** appear as a badge on the Message button. An in-app toast offers **Open**. A system notification (tag `dm-<sender>`) is shown only when the tab is hidden or unfocused.
+- **Room isolation:** conversations are stored per `roomId` (`voip.dm.<roomId>`). Signaling already drops other rooms' messages, and persisted entries are filtered by `roomId` again when loaded.
+- **Security:** text is always rendered with `textContent` and limited to 2,000 characters.
+
+**Chat notification click:** the Service Worker handles `chat-message` pushes. If the app is visible it posts to the page and shows no system notification. Otherwise it shows *"New message from Alice"*. A click focuses or opens MeshCall and hands the context over by `postMessage`, or by a one-time Cache entry. **The URL never carries message data.** The app then:
+
+1. enters or offers the correct room;
+2. opens the conversation and highlights the message;
+3. closes the notification.
+
+### Backend changes required for targeted push (not implemented – the backend is not modified here)
+
+The current backend stores bare subscriptions and can only broadcast. Delivering calls and messages to *one* offline user needs:
+
+```text
+POST /subscribe   { subscription, deviceId }         associate a subscription with a MeshCall device (+ auth)
+POST /notify      { targetDeviceId, title, body, data }   deliver to that device's subscriptions only
+      data = { type:'incoming-call', callId, roomId, roomName, callerId, callerName, callType, timestamp, expiresAt }
+           | { type:'chat-message', messageId, senderId, senderName, text, roomId, roomName, timestamp }
+      → 202 {accepted:true} | 404 {error:'no subscription for device'} | 401/403
+```
+
+- **Authentication:** the sender must be authenticated, for example with the same JWT as ScaleDrone, and rate-limited, so nobody can push to arbitrary devices.
+- **Response:** `/notify` should also return whether the device has a subscription, so the UI can show *push enabled* reliably.
+- **Frontend change:** a `PushBackend` adapter with `capabilities.targetedDelivery = true`. `sendToUser`, the call dialog and messaging then work without other changes.
+- **Current frontend behaviour:** because the backend does not have this, the frontend shows no "push enabled" badge (it is not reliably known) and returns `'unsupported'` from `sendToUser`.
+
 ## Data usage and bandwidth monitoring
 
 The scope is the **current call**. It resets when a call starts and survives reconnects.
@@ -648,19 +700,57 @@ Open the **Diagnostics** panel with the chart icon in the top bar.
 
 A **Retry direct P2P** button forces an ICE restart for that peer.
 
-**STUN / TURN health check:** the **Test STUN / TURN servers** button checks each configured URL in isolation:
+### Exact connection path per participant
 
-- a STUN server passes if it yields an srflx candidate;
-- a TURN server passes if it allocates a relay candidate (tested with `iceTransportPolicy: relay`).
+The path is read from `RTCPeerConnection.getStats()` of each peer connection, **never inferred from the configured ICE servers**:
 
-This answers "is STUN reachable?" and "do TURN credentials work?" without making a call.
+1. The selected pair is `transport.selectedCandidatePairId`. Firefox falls back to `selected`, and other browsers to the busiest `nominated` + `succeeded` pair.
+2. Its `local-candidate` and `remote-candidate` give the candidate types, addresses, protocol, `relayProtocol` and `url`.
+3. The pair is classified as `ConnectionPath = 'p2p' | 'stun' | 'turn' | 'unknown'`:
+
+| Selected pair | Path | Meaning |
+|---|---|---|
+| `host → host` (or `prflx` between private addresses) | **P2P** | direct, same network |
+| `srflx`/`prflx` on either side, no relay | **STUN** | direct P2P through NAT; STUN only discovered the address, media does not pass through it |
+| `relay` on either side | **TURN** | media relayed through a TURN server |
+| not connected / no selected pair yet | **Unknown** | never guessed |
+
+The actual pair is always shown, for example `relay → srflx`.
+
+**Which STUN/TURN server?** It is only shown when WebRTC reports it:
+
+- the `url` of the *local* candidate in `getStats()`, which Chrome exposes for srflx and relay candidates (verified in e2e: `turn:<host>:3479?transport=udp via stats`);
+- otherwise, the `url` of the `icecandidate` event that gathered that exact candidate (matched by type, address, port and protocol).
+
+If neither is available, the UI says *"Relay/Server-reflexive candidate detected – the browser did not say which server"* and lists the configured servers, without picking one. When only the **remote** side is relayed or reflexive, the peer's own server is not visible from this side, and the UI says so.
+
+**Tiles:** the compact line shows `● Connected · P2P` (or Connecting / Reconnecting / Failed · Unknown). The ⓘ button expands the details: Connection, ICE, Protocol, RTT, Packet Loss, Upload, Download and the TURN/STUN server.
+
+**Network Diagnostics** (in the Diagnostics panel) lists every peer connection with the same data. It reuses the single stats poll: one `getStats()` per peer connection every `stats.intervalMs` (2 s). The panel and tiles add no extra calls, as the e2e test verifies. The interval stays at 2 s because the adaptive-quality hysteresis is tuned to it.
+
+### Network / ICE diagnostics: STUN and TURN tests
+
+Each configured URL is listed under **STUN Tests** or **TURN Tests**, with its own **Test** or **Test TURN** button and a **Test all** button. Each test:
+
+- creates a **temporary** `RTCPeerConnection` configured with that one server;
+- adds a data channel and calls `setLocalDescription()` to gather candidates;
+- **STUN** succeeds only if an **srflx** candidate is gathered, and shows the public address;
+- **TURN** uses `iceTransportPolicy: 'relay'` **for this test connection only**. It succeeds only if a **relay** candidate is allocated, and shows the relay address, candidate protocol, relay protocol (UDP/TCP/TLS) and, when exposed, the reported URL. "Gathering completed" alone never counts as success;
+- on failure, maps `icecandidateerror` codes to a cause: 401/403 → invalid credentials; 7xx → unreachable or DNS; 486/508; otherwise the list of possible causes (server unreachable, invalid credentials, incorrect port, server configuration, firewall, TLS/UDP/TCP issue);
+- always closes the connection (freeing sockets and the TURN allocation) and times out after 8 s.
+
+Results use `IceServerTestResult` (`src/webrtc/IceServerProbe.ts`). Normal calls always keep `iceTransportPolicy: 'all'`.
 
 **ICE test modes** (Settings → Advanced) apply only to new connections and reset on reload:
 
 - *Force TURN relay* uses `iceTransportPolicy: "relay"` and proves the relay path works.
 - *Disable TURN* proves direct connectivity on its own.
 
-**Console:** `window.__voip.diagnostics()` returns every peer's selected candidate pair, connection type, transport and counters as JSON. `window.__voip.probeIceServers()` runs the health check. Set Settings → Log level to `DEBUG` for detailed structured logs, such as `[ICE] Selected candidate pair = host → host`.
+**Console:**
+
+- `window.__voip.diagnostics()` returns every peer's selected pair, `connectionPath`, identified `server`, transport and counters as JSON.
+- `window.__voip.probeIceServers()` tests every configured server.
+- `window.__voip.testIceServer({ urls, username, credential })` tests any single server. Set Settings → Log level to `DEBUG` for detailed structured logs, such as `[ICE] Selected candidate pair = host → host`.
 
 **Browser tools:** use `chrome://webrtc-internals` in Chrome or `about:webrtc` in Firefox for a raw view.
 
@@ -696,6 +786,9 @@ Other security notes:
 - **Background throttling:** mobile browsers throttle or kill background tabs. The call recovers through ICE restart when the tab returns, but may drop if the OS kills the tab.
 - **Picture-in-Picture:** available in Chromium (desktop and Android) and Safari. Firefox exposes no PiP API, so the control is hidden there.
 - **Element fullscreen:** not available on iPhone Safari (`document.fullscreenEnabled` is false), so the control is hidden there. iPad Safari supports it.
+- **Which STUN/TURN server was used:** the candidate `url` is non-standard in older specs. Chrome reports it for local srflx and relay candidates; Firefox and Safari may not. The UI then says so instead of guessing. The peer's server is never visible from this side.
+- **Relay protocol** (`relayProtocol`) and `RTCPeerConnectionIceEvent.url` are not available in every browser; TURN tests fall back to the transport requested by the URL.
+- **`icecandidateerror`** codes vary: Chrome reports 401 for bad TURN credentials and 701 for unreachable servers. Other browsers may report nothing, so the test only says "no relay candidate" with the possible causes.
 - **Web Push on iOS** requires the app to be installed to the Home Screen. A Service Worker can never run a call.
 - **`navigator.connection`** (the Network Information API) exists only in Chromium, so network-change detection falls back to online/offline events, sleep detection and signaling liveness elsewhere.
 
@@ -723,6 +816,9 @@ npm run test:screens           # responsive screenshots → tests/e2e/artifacts/
 npm run test:features          # PiP, fullscreen, chat (1:1 + group), combined states, mobile layout
 npm run test:rooms             # rooms & isolation, 5 layouts × 3 viewports, 1:1→group, live audience control
 npm run test:pwa               # SW, installability, offline shell, update flow (run `npx vite build --base=/meshcall/` first)
+npm run test:diagnostics       # connection path/server on tiles + panel, STUN/TURN tests, offline users,
+                               #   DMs (online → Delivered, offline → queued, never /notifyAll), notification click
+                               #   (needs the local TURN setup below; TURN_HOST=<LAN-IP>)
 npm run test:push              # Web Push against the real backend – needs `npx vite --base=/meshcall/ --port 5173`
                                #  (never calls /notifyAll; removes every test subscription afterwards)
 ```

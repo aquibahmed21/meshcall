@@ -27,6 +27,23 @@ export type CallType = 'audio' | 'video' | 'group' | 'live';
 
 export type IceCandidateType = 'host' | 'srflx' | 'prflx' | 'relay';
 
+/** Active path of a peer connection – from the SELECTED candidate pair in getStats(). */
+export type ConnectionPath = 'p2p' | 'stun' | 'turn' | 'unknown';
+
+/**
+ * Which STUN/TURN server a selected candidate came from. `url` is only set when WebRTC itself
+ * reported it (stats `url` or the gathering event's `url`); otherwise `source` is 'unknown' and
+ * the UI lists the configured servers instead of guessing.
+ */
+export interface ServerIdentification {
+  role: 'stun' | 'turn' | 'none';
+  /** Whose candidate involves the server: ours (identifiable) or the peer's (not visible here). */
+  side: 'local' | 'remote' | 'none';
+  url?: string;
+  source: 'stats' | 'gathering' | 'unknown' | 'n/a';
+  note: string;
+}
+
 /** Network path of the selected ICE candidate pair – derived ONLY from getStats(). */
 export type PathCategory = 'direct-host' | 'direct-stun' | 'relay';
 
@@ -37,6 +54,7 @@ export interface SelectedPathInfo {
   pairLabel: string;
   /** P2P / STUN / TURN */
   connectionType: 'P2P' | 'STUN' | 'TURN';
+  connectionPath: Exclude<ConnectionPath, 'unknown'>;
   path: PathCategory;
   /** Human description, e.g. "Direct P2P (LAN)". */
   pathLabel: string;
@@ -45,8 +63,13 @@ export interface SelectedPathInfo {
   /** For relay: protocol between us and the TURN server (udp/tcp/tls). */
   relayProtocol?: string;
   localAddress?: string;
+  localPort?: number;
   remoteAddress?: string;
+  /** Raw `url` of the local candidate from getStats (Chromium: set for srflx/relay). */
+  localUrl?: string;
   turnUrl?: string;
+  /** Filled in by PeerSession (stats url → gathering-event url → unknown). */
+  server?: ServerIdentification;
 }
 
 export type GateState = 'holding' | 'released-connected' | 'released-timeout' | 'released-failure' | 'released-gathering' | 'native';

@@ -1,5 +1,5 @@
 import { withTimeout } from '../core/async';
-import type { IncomingCallPush } from './payloads';
+import type { TargetedPushPayload } from './payloads';
 
 /**
  * Adapter for the push server's HTTP API. MeshCall talks to the backend ONLY through this
@@ -18,8 +18,11 @@ export interface PushBackend {
   register(subscription: PushSubscriptionJSON): Promise<'created' | 'exists'>;
   unregister(endpoint: string): Promise<'removed' | 'not-found'>;
   isRegistered(endpoint: string): Promise<boolean>;
-  /** Targeted incoming-call delivery. Throws PushUnsupportedError when the backend can't target. */
-  notifyDevice(targetDeviceId: string, payload: IncomingCallPush): Promise<void>;
+  /**
+   * Targeted delivery to ONE device (calls, private messages). Resolves when the backend ACCEPTED
+   * the request – that is not proof of delivery. Throws PushUnsupportedError if unsupported.
+   */
+  notifyDevice(targetDeviceId: string, notification: { title: string; body: string; data: TargetedPushPayload }): Promise<void>;
   /** Broadcast to EVERY subscriber – never used for calls; development test only. */
   notifyAll(title: string, body: string): Promise<{ successes: number; failures: number }>;
 }

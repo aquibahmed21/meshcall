@@ -17,6 +17,20 @@ export interface IncomingCallPush {
   expiresAt: number;
 }
 
+export interface ChatMessagePush {
+  type: 'chat-message';
+  messageId: string;
+  senderId: string;
+  senderName: string;
+  text: string;
+  roomId: string;
+  roomName: string;
+  timestamp: number;
+}
+
+/** What a targeted push carries (title/body for display + typed data for the app). */
+export type TargetedPushPayload = IncomingCallPush | ChatMessagePush;
+
 /** Context handed from a notification click to the app (never contains credentials). */
 export interface CallLaunchContext {
   kind: 'incoming-call';
@@ -40,6 +54,29 @@ export function isIncomingCallPush(v: unknown): v is IncomingCallPush {
     typeof p.callerName === 'string' &&
     (p.callType === 'audio' || p.callType === 'video' || p.callType === 'group')
   );
+}
+
+/** A chat notification was clicked → open that conversation. */
+export interface ChatLaunchContext {
+  kind: 'chat-message';
+  action: 'open';
+  senderId: string;
+  senderName?: string;
+  messageId?: string;
+  roomId?: string;
+  roomName?: string;
+  at: number;
+}
+
+export type LaunchContext = CallLaunchContext | ChatLaunchContext;
+
+export function isChatLaunchContext(v: unknown): v is ChatLaunchContext {
+  const c = v as Partial<ChatLaunchContext> | null;
+  return !!c && c.kind === 'chat-message' && typeof c.senderId === 'string';
+}
+
+export function isLaunchContext(v: unknown): v is LaunchContext {
+  return isCallLaunchContext(v) || isChatLaunchContext(v);
 }
 
 export function isCallLaunchContext(v: unknown): v is CallLaunchContext {

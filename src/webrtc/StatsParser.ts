@@ -109,6 +109,7 @@ export function parseStats(report: StatsReportLike, prev: RawCounters | undefine
           protocol: str(local, 'protocol'),
           relayProtocol: str(local, 'relayProtocol'),
           address: str(local, 'address') ?? str(local, 'ip'),
+          port: n(local, 'port'),
           url: str(local, 'url'),
         },
         { candidateType: str(remote, 'candidateType'), protocol: str(remote, 'protocol'), address: str(remote, 'address') ?? str(remote, 'ip') },

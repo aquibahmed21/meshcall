@@ -2,6 +2,7 @@ import type { NetworkQuality } from '../../types/state';
 import { colorFor, h, initials } from '../dom';
 import { icons } from '../icons';
 import type { LayoutPlan } from '../layout/CallLayoutManager';
+import { netRows, type PeerNetInfo } from '../netInfo';
 
 export interface TileModel {
   id: string;
@@ -15,6 +16,8 @@ export interface TileModel {
   connection?: string;
   pathType?: 'P2P' | 'STUN' | 'TURN';
   quality?: NetworkQuality;
+  /** How this peer is connected (remote tiles only) – from getStats. */
+  net?: PeerNetInfo;
 }
 
 export interface GridViewState {
@@ -49,9 +52,13 @@ interface Tile {
   quality: HTMLSpanElement;
   pipBtn: HTMLButtonElement;
   fsBtn: HTMLButtonElement;
+  infoBtn: HTMLButtonElement;
+  netLine: HTMLDivElement;
+  details: HTMLDivElement;
   stream: MediaStream | null;
   sinkId: string | null;
   hasVideo: boolean;
+  lastNet: PeerNetInfo | undefined;
 }
 
 /**
@@ -69,6 +76,8 @@ export class VideoGrid {
   private strip = h('div', { class: 'lay-strip', role: 'group', 'aria-label': 'Other participants' });
   readonly el = h('div', { class: 'video-stage', 'data-layout': 'grid' }, this.main, this.strip);
   private tiles = new Map<string, Tile>();
+  /** Tiles whose connection details are expanded (UI-only state). */
+  private expanded = new Set<string>();
 
   constructor(private readonly cb: GridCallbacks) {}
 
@@ -84,6 +93,7 @@ export class VideoGrid {
     }
     for (const [id, t] of this.tiles) {
       if (byId.has(id)) continue;
+      this.expanded.delete(id);
       t.video.srcObject = null;
       t.root.remove();
       this.tiles.delete(id);
@@ -135,6 +145,27 @@ export class VideoGrid {
     this.strip.replaceChildren();
   }
 
+  /** Compact "● Connected · P2P" line + expandable details (remote tiles only). */
+  private renderNet(t: Tile, net: PeerNetInfo | undefined): void {
+    t.lastNet = net;
+    const id = t.root.dataset.id!;
+    t.infoBtn.hidden = !net;
+    t.netLine.hidden = !net;
+    if (!net) {
+      t.details.hidden = true;
+      return;
+    }
+    t.netLine.dataset.status = net.status;
+    t.netLine.dataset.path = net.path;
+    t.netLine.textContent = `● ${net.statusLabel}${net.status === 'connected' ? ` · ${net.pathLabel}` : ''}`;
+    const open = this.expanded.has(id);
+    t.infoBtn.setAttribute('aria-expanded', String(open));
+    t.details.hidden = !open;
+    if (open) {
+      t.details.replaceChildren(h('dl', {}, ...netRows(net).flatMap(([k, v]) => [h('dt', {}, k), h('dd', {}, v)])));
+    }
+  }
+
   private create(m: TileModel): Tile {
     const video = h('video', { autoplay: true, playsinline: true });
     video.muted = m.local; // never play our own microphone back
@@ -151,6 +182,22 @@ export class VideoGrid {
     };
     const pipBtn = h('button', { class: 'tile-btn', type: 'button', html: icons.pip, onclick: stop(() => this.cb.onTileAction(m.id, 'pip')) });
     const fsBtn = h('button', { class: 'tile-btn', type: 'button', html: icons.fullscreen, onclick: stop(() => this.cb.onTileAction(m.id, 'fullscreen')) });
+    const netLine = h('div', { class: 'tile-net', role: 'status' });
+    const details = h('div', { class: 'tile-details', hidden: true, onclick: (e: Event) => e.stopPropagation() });
+    const infoBtn = h('button', {
+      class: 'tile-btn tile-info',
+      type: 'button',
+      html: icons.info,
+      'aria-label': `Connection details: ${m.name}`,
+      title: 'Connection details',
+      'aria-expanded': 'false',
+      onclick: stop(() => {
+        if (this.expanded.has(m.id)) this.expanded.delete(m.id);
+        else this.expanded.add(m.id);
+        const t = this.tiles.get(m.id);
+        if (t) this.renderNet(t, t.lastNet);
+      }),
+    });
     const root = h(
       'div',
       {
@@ -169,11 +216,12 @@ export class VideoGrid {
       video,
       avatar,
       h('div', { class: 'tile-pip-note' }, 'Playing in picture-in-picture'),
-      h('div', { class: 'tile-top' }, path, quality, h('span', { class: 'grow' }), pipBtn, fsBtn),
+      h('div', { class: 'tile-top' }, path, quality, h('span', { class: 'grow' }), infoBtn, pipBtn, fsBtn),
       state,
-      h('div', { class: 'tile-footer' }, label, mic, cam),
+      details,
+      h('div', { class: 'tile-footer' }, h('div', { class: 'tile-id' }, label, netLine), mic, cam),
     );
-    return { root, video, avatar, label, mic, cam, state, path, quality, pipBtn, fsBtn, stream: null, sinkId: null, hasVideo: false };
+    return { root, video, avatar, label, mic, cam, state, path, quality, pipBtn, fsBtn, infoBtn, netLine, details, stream: null, sinkId: null, hasVideo: false, lastNet: undefined };
   }
 
   private render(t: Tile, m: TileModel, view: GridViewState, plan: LayoutPlan): void {
@@ -219,6 +267,7 @@ export class VideoGrid {
     t.quality.dataset.q = m.quality ?? 'unknown';
     t.quality.hidden = !m.quality || m.quality === 'unknown';
 
+    this.renderNet(t, m.net);
     const pipLabel = inPip ? 'Exit picture-in-picture' : `Picture-in-picture: ${m.local ? 'your video' : m.name}`;
     t.pipBtn.hidden = !view.pipAvailable || (!t.hasVideo && !inPip);
     t.pipBtn.innerHTML = inPip ? icons.pipExit : icons.pip;

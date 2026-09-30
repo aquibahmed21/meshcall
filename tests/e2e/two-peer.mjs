@@ -152,9 +152,9 @@ try {
 
   // STUN/TURN health of the configured servers
   const probe = await alice.page.evaluate(() => window.__voip.probeIceServers());
-  for (const r of probe) console.log(`   probe ${r.ok ? 'OK  ' : 'FAIL'} ${r.url} ${r.ok ? r.candidates.join(',') : r.errors.join('; ')}`);
-  const turnUsable = probe.some((r) => r.kind === 'turn' && r.ok);
-  check('At least one STUN server reachable (srflx discovered)', probe.some((r) => r.kind === 'stun' && r.ok));
+  for (const r of probe) console.log(`   probe ${r.status === 'success' ? 'OK  ' : 'FAIL'} ${r.url} ${r.status === 'success' ? `${r.candidateType} ${r.address ?? ''}` : `${r.error} ${r.errors.join('; ')}`}`);
+  const turnUsable = probe.some((r) => r.type === 'turn' && r.status === 'success');
+  check('At least one STUN server reachable (srflx discovered)', probe.some((r) => r.type === 'stun' && r.status === 'success'));
 
   // TURN relay (test mode) – proves the relay fallback works
   if (!turnUsable) {
@@ -168,6 +168,9 @@ try {
     await waitPeers(alice, 1, 'TURN', 30_000);
     d = await diag(alice);
     check('TURN relay works (forced relay test mode)', true, `${d.call.peers[0].selectedCandidate} ${d.call.peers[0].transport}/${d.call.peers[0].relayProtocol ?? ''}`);
+    const srv = d.call.peers[0].server;
+    check('Connection path reported as "turn" from the selected pair', d.call.peers[0].connectionPath === 'turn');
+    check('TURN server identified (or honestly reported unknown)', srv?.role === 'turn' && (srv.url ? d.iceServers.some((u) => srv.url.split('?')[0] === u.split('?')[0]) : srv.source === 'unknown'), `${srv?.url ?? '(not exposed)'} via ${srv?.source}`);
     check('Media flows through TURN', await mediaFlowing(bob));
   } catch {
     d = await diag(alice);

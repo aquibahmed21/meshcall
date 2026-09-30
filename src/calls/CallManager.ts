@@ -930,7 +930,7 @@ export class CallManager {
       timestamp: Date.now(),
       expiresAt: Date.now() + this.d.config.timeouts.ringMs,
     });
-    if (result !== 'sent') this.pushSent = false;
+    if (result !== 'accepted') this.pushSent = false;
   }
 
 

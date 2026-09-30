@@ -10,6 +10,9 @@ export interface SidebarCallbacks {
   onGroup: () => void;
   onGoLive: () => void;
   onInstall: () => void;
+  /** Call a user – decides between WebRTC (online) and the offline dialog. */
+  onCall: (userId: string, media: 'audio' | 'video') => void;
+  onMessage: (userId: string) => void;
 }
 
 /** Contacts with presence + live streams. */
@@ -58,32 +61,42 @@ export class Sidebar {
 
   renderUsers(): void {
     const q = this.filter.value.trim().toLowerCase();
-    const inCall = this.app.calls.inCall;
     const users = this.app.presence.list().filter((u) => !q || u.name.toLowerCase().includes(q));
     if (!users.length) {
       this.users.replaceChildren(h('li', { class: 'empty' }, q ? 'No match' : 'No one yet – open this app on another device or browser.'));
       return;
     }
+    // Buttons are NEVER disabled because someone is offline – the action adapts instead
+    // (offline call → explanation dialog, offline message → queued/push delivery).
     this.users.replaceChildren(
       ...users.map((u) => {
-        const reachable = u.status === 'online' || u.pushEnabled;
-        const call = (media: 'audio' | 'video') => () => void this.app.calls.startDirectCall(u.deviceId, media);
+        const unread = this.app.dms.unreadFor(u.deviceId);
+        // Push status only when it is actually known (presence advertises it only if the push
+        // backend can target this user); otherwise say nothing rather than guess.
+        const pushNote = u.status !== 'online' && u.pushEnabled ? h('span', { class: 'push-note' }, ' · 🔔 Push enabled') : null;
         return h(
           'li',
-          { class: `user ${u.status}` },
+          { class: `user ${u.status}`, 'data-user': u.deviceId },
           h('span', { class: 'avatar', style: `--avatar:${colorFor(u.deviceId)}` }, initials(u.name)),
           h(
             'div',
             { class: 'grow user-info' },
             h('span', { class: 'user-name' }, u.name),
-            h('small', { class: `presence ${u.status}` }, `${u.status === 'online' ? '●' : '○'} ${u.busy ? 'In a call' : STATUS_TEXT[u.status]}`, u.status === 'offline' && u.pushEnabled ? ' · push' : ''),
+            h('small', { class: `presence ${u.status}` }, `${u.status === 'online' ? '●' : '○'} ${u.busy ? 'In a call' : STATUS_TEXT[u.status]}`, pushNote),
           ),
-          h('button', { class: 'icon-btn', title: `Audio call ${u.name}`, 'aria-label': `Audio call ${u.name}`, html: icons.phone, disabled: inCall || !reachable, onclick: call('audio') }),
-          h('button', { class: 'icon-btn', title: `Video call ${u.name}`, 'aria-label': `Video call ${u.name}`, html: icons.cam, disabled: inCall || !reachable, onclick: call('video') }),
+          h('button', { class: 'icon-btn', title: `Audio call ${u.name}`, 'aria-label': `Audio call ${u.name}`, html: icons.phone, onclick: () => this.cb.onCall(u.deviceId, 'audio') }),
+          h('button', { class: 'icon-btn', title: `Video call ${u.name}`, 'aria-label': `Video call ${u.name}`, html: icons.cam, onclick: () => this.cb.onCall(u.deviceId, 'video') }),
+          h(
+            'button',
+            { class: 'icon-btn msg-btn', title: `Message ${u.name}`, 'aria-label': `Message ${u.name}${unread ? ` (${unread} unread)` : ''}`, onclick: () => this.cb.onMessage(u.deviceId) },
+            h('span', { html: icons.chat }),
+            unread ? h('span', { class: 'badge' }, unread > 9 ? '9+' : String(unread)) : null,
+          ),
         );
       }),
     );
   }
+
 
   renderStreams(): void {
     const streams = this.app.live.list().filter((s) => s.hostId !== this.app.identity.deviceId);

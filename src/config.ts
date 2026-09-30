@@ -16,8 +16,15 @@ export const SCALEDRONE_CHANNEL_ID = 'EoIG3R1I4JdyS4L1';
 /** Existing Web Push backend (see src/push/PushBackend.ts). Override with VITE_PUSH_SERVER_URL. */
 export const PUSH_SERVER_URL = 'https://web-push-3zaz.onrender.com';
 
-/** Public Google STUN servers – used for STUN only (they are NOT TURN servers). */
-const FALLBACK_STUN = ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'];
+/** Public Google STUN servers – used for STUN only (Google runs no public TURN servers). */
+export const GOOGLE_STUN = ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'];
+
+/** STUN order: Google's servers always first, then the configured ones (de-duplicated). */
+export function orderStunUrls(configured: string[]): string[] {
+  const norm = (u: string) => u.trim().toLowerCase();
+  const google = new Set(GOOGLE_STUN.map(norm));
+  return [...GOOGLE_STUN, ...configured.filter((u, i) => !google.has(norm(u)) && configured.findIndex((x) => norm(x) === norm(u)) === i)];
+}
 
 export type IceFallbackMode = 'gated' | 'native';
 
@@ -69,8 +76,8 @@ function list(value: string | undefined): string[] {
 
 function buildIceServers(): { servers: RTCIceServer[]; hasTurn: boolean; hasStun: boolean } {
   const servers: RTCIceServer[] = [];
-  const stun = list(env.VITE_STUN_SERVER);
-  const stunUrls = stun.length ? stun : FALLBACK_STUN;
+  // Google STUN first, then configured STUN, then TURN (the fallback relay).
+  const stunUrls = orderStunUrls(list(env.VITE_STUN_SERVER));
   servers.push({ urls: stunUrls });
 
   const turnUrls = list(env.VITE_TURN_SERVER);

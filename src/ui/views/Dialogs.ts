@@ -367,3 +367,41 @@ export function openInstallHelp(app: AppContext): Modal {
   );
   return m.open();
 }
+
+/**
+ * Calling someone who is not online: never attempt WebRTC blindly. Offer a call notification
+ * only when push can actually reach THIS user (targeted push); otherwise explain and offer a
+ * message instead.
+ */
+export function openOfflineCallDialog(app: AppContext, userId: string, media: MediaKind, onMessage: () => void): Modal {
+  const user = app.presence.get(userId);
+  const name = user?.name ?? app.presence.nameOf(userId);
+  const status = user?.status ?? 'unknown';
+  const canPush = app.push.canSendToUsers && !!user?.pushEnabled;
+  const m = new Modal(`Call ${name}`);
+  const what = status === 'unknown' || status === 'connecting' ? `${name}'s status is unknown right now` : `${name} is currently offline`;
+  m.setContent(
+    ...nodes(
+      h('div', { class: 'avatar big', style: `--avatar:${colorFor(userId)}` }, initials(name)),
+      h('p', { class: 'incoming-text' }, `${what}.`),
+      canPush
+        ? h('p', {}, 'They may receive a push notification for this call if their notifications are enabled.')
+        : h(
+            'p',
+            { class: 'notice' },
+            `${name} cannot receive a call notification: the push server cannot notify one specific person yet. `,
+            'You can send a message instead – it will be delivered when they come online.',
+          ),
+      h(
+        'div',
+        { class: 'modal-actions' },
+        h('button', { class: 'btn', onclick: () => m.close() }, 'Cancel'),
+        h('button', { class: 'btn', onclick: () => { m.close(); onMessage(); } }, h('span', { html: icons.chat }), 'Message instead'),
+        canPush
+          ? h('button', { class: 'btn primary', onclick: () => { m.close(); void app.calls.startDirectCall(userId, media); } }, 'Send Call Notification')
+          : null,
+      ),
+    ),
+  );
+  return m.open();
+}

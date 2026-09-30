@@ -18,7 +18,7 @@
  * available to the remote agent. It is re-armed on every fresh connection and every ICE
  * restart, so each join / rejoin / network change gives direct P2P a fresh head start.
  */
-import type { CandidateCounts, GateState, IceCandidateType, PathCategory, SelectedPathInfo } from '../types/state';
+import type { CandidateCounts, GateState, IceCandidateType, PathCategory, SelectedPathInfo, ServerIdentification } from '../types/state';
 
 export function parseCandidateType(candidate: string | undefined | null): IceCandidateType | null {
   if (!candidate) return null;
@@ -62,6 +62,57 @@ export interface CandidateLike {
   url?: string;
 }
 
+/** Key under which a gathered local candidate's server URL is remembered. */
+export function gatheredKey(type: string | null | undefined, address: string | null | undefined, port: number | null | undefined, protocol: string | null | undefined): string {
+  return `${type ?? ''}|${address ?? ''}|${port ?? ''}|${(protocol ?? '').toLowerCase()}`;
+}
+
+/**
+ * Which STUN/TURN server produced the selected pair's candidates – never guessed:
+ *   1. the local candidate's `url` in getStats()            (source 'stats')
+ *   2. the `url` of the icecandidate event that gathered it  (source 'gathering')
+ *   3. otherwise 'unknown' – the UI then lists the configured servers
+ * Only OUR candidates can be attributed; a remote srflx/relay was obtained by the peer from
+ * ITS servers, which are not visible from this side.
+ */
+export function identifyServer(path: SelectedPathInfo, gatheredUrl: (key: string) => string | undefined): ServerIdentification {
+  const lookup = (): { url?: string; source: ServerIdentification['source'] } => {
+    if (path.localUrl) return { url: path.localUrl, source: 'stats' };
+    const g = gatheredUrl(gatheredKey(path.localType, path.localAddress, path.localPort, path.transport));
+    return g ? { url: g, source: 'gathering' } : { source: 'unknown' };
+  };
+  if (path.localType === 'relay') {
+    const r = lookup();
+    return {
+      role: 'turn',
+      side: 'local',
+      ...r,
+      note: r.url ? 'TURN server allocating our relay candidate' : 'Relay candidate in use, but the browser did not report which TURN URL allocated it',
+    };
+  }
+  if (path.remoteType === 'relay') {
+    return { role: 'turn', side: 'remote', source: 'n/a', note: "The peer relays through its own TURN server – its URL is not visible from this side" };
+  }
+  if (path.localType === 'srflx') {
+    const r = lookup();
+    return {
+      role: 'stun',
+      side: 'local',
+      ...r,
+      note: r.url
+        ? 'STUN server that discovered our public address (browsers merge identical addresses from several STUN servers – this is the one whose candidate was kept)'
+        : 'Server-reflexive candidate detected, but the browser did not report which STUN server discovered it',
+    };
+  }
+  if (path.remoteType === 'srflx') {
+    return { role: 'stun', side: 'remote', source: 'n/a', note: "The peer's public address was discovered by the peer's STUN server – not identifiable from this side" };
+  }
+  if (path.localType === 'prflx' || path.remoteType === 'prflx') {
+    return { role: 'none', side: 'none', source: 'n/a', note: 'Peer-reflexive candidate learned during connectivity checks – no STUN/TURN server involved in this pair' };
+  }
+  return { role: 'none', side: 'none', source: 'n/a', note: 'Direct host candidates – no STUN/TURN server involved' };
+}
+
 /**
  * Classify the *selected* candidate pair (from getStats) into a network path.
  *  - either side relay           → TURN (media relayed through the TURN server)
@@ -102,13 +153,16 @@ export function classifyPath(local: CandidateLike, remote: CandidateLike): Selec
     remoteType: rt,
     pairLabel: `${lt} → ${rt}`,
     connectionType,
+    connectionPath: path === 'relay' ? 'turn' : path === 'direct-host' ? 'p2p' : 'stun',
     path,
     pathLabel,
     transport: (local.protocol ?? 'udp').toUpperCase(),
     relayProtocol: lt === 'relay' ? local.relayProtocol?.toUpperCase() : undefined,
     localAddress,
+    localPort: local.port,
     remoteAddress,
-    turnUrl: lt === 'relay' ? local.url : undefined,
+    localUrl: local.url || undefined,
+    turnUrl: lt === 'relay' ? local.url || undefined : undefined,
   };
 }
 

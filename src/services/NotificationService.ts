@@ -1,6 +1,6 @@
 import { Emitter } from '../core/emitter';
 import { createLogger, errorMessage } from '../core/logger';
-import { isCallLaunchContext, type CallLaunchContext } from '../push/payloads';
+import { isLaunchContext, type LaunchContext } from '../push/payloads';
 import type { CallKind, MediaKind } from '../types/signaling';
 
 const log = createLogger('Notify');
@@ -16,7 +16,7 @@ export class NotificationService {
    * `click`: a call notification was clicked (from the Service Worker, or the launch context left
    * by it when it had to open the app). `pushCall`: a call push arrived while the app was visible.
    */
-  readonly events = new Emitter<{ click: CallLaunchContext; pushCall: CallLaunchContext }>();
+  readonly events = new Emitter<{ click: LaunchContext; pushCall: LaunchContext; pushChat: LaunchContext }>();
   private registration: ServiceWorkerRegistration | null = null;
 
   static supported(): boolean {
@@ -31,12 +31,14 @@ export class NotificationService {
     this.registration = registration;
     navigator.serviceWorker?.addEventListener('message', (e: MessageEvent) => {
       const d = e.data as { type?: string; context?: unknown } | undefined;
-      if (!d || !isCallLaunchContext(d.context)) return;
+      if (!d || !isLaunchContext(d.context)) return;
       if (d.type === 'notification-click') {
-        log.info(`Call notification clicked (${d.context.action})`);
+        log.info(`${d.context.kind} notification clicked (${d.context.action})`);
         this.events.emit('click', d.context);
       } else if (d.type === 'push-call') {
         this.events.emit('pushCall', d.context);
+      } else if (d.type === 'push-chat') {
+        this.events.emit('pushChat', d.context);
       }
     });
   }
@@ -78,6 +80,17 @@ export class NotificationService {
     await this.close(`call-${callId}`);
     if (this.permission !== 'granted' || document.visibilityState === 'visible') return;
     await this.show('Missed call', { body: `You missed a call from ${callerName}`, tag: `missed-${callId}` });
+  }
+
+  /** New direct message while the tab is hidden/unfocused (local – no push server needed). */
+  async showDirectMessage(info: { messageId: string; senderId: string; senderName: string; text: string; roomId: string; roomName: string }): Promise<void> {
+    if (this.permission !== 'granted' || (document.visibilityState === 'visible' && document.hasFocus())) return;
+    await this.show(`New message from ${info.senderName}`, {
+      body: info.text.slice(0, 200),
+      tag: `dm-${info.senderId}`,
+      renotify: true,
+      data: { kind: 'chat-message', senderId: info.senderId, senderName: info.senderName, messageId: info.messageId, roomId: info.roomId, roomName: info.roomName },
+    } as NotificationOptions);
   }
 
   /** Settings → "Send a test notification" (verifies permission + Service Worker display). */

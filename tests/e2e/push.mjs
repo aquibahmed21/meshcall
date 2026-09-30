@@ -250,6 +250,37 @@ try {
     await bob.page.waitForFunction(() => window.__voip.app.calls.state === null, null, { timeout: 20_000 });
   }
 
+  // ═══════════════════════ PRIVATE MESSAGE → OFFLINE USER ═══════════════════
+  section('Private message to an offline user + chat notification click');
+  await bob.page.goto('about:blank'); // Bob's app closed
+  await alice.page.waitForFunction((id) => window.__voip.app.presence.status(id) !== 'online', bobDevice, { timeout: 30_000 }).catch(() => {});
+  aliceBackendCalls.length = 0;
+  await alice.page.evaluate((id) => window.__voip.app.dms.send(id, 'See you at 5'), bobDevice);
+  await alice.page.waitForTimeout(1500);
+  const queued = await alice.page.evaluate((id) => window.__voip.app.dms.conversation(id).messages.at(-1), bobDevice);
+  check('Offline recipient: message queued, not "Delivered"', queued.status === 'queued', `${queued.status} – ${queued.statusDetail}`);
+  check('Private message never uses /notifyAll', !aliceBackendCalls.includes('/notifyAll'), aliceBackendCalls.join(',') || 'no backend calls');
+  // What a backend with targeted delivery would send to Bob's device only:
+  await deliver(cdp, regId, { title: 'New message', body: 'x', data: { type: 'chat-message', messageId: queued.messageId, senderId: queued.senderId, senderName: 'Alice', text: 'See you at 5', roomId: queued.roomId, roomName: ROOM, timestamp: queued.timestamp } });
+  await bob.page.waitForTimeout(800);
+  const chatN = (await notifications(bob.ctx)).find((n) => n.tag === `dm-${queued.senderId}`);
+  check('chat-message push → "New message from Alice" (tag per sender)', chatN?.title === 'New message from Alice', chatN ? `${chatN.title} | ${chatN.body}` : 'none');
+  check('Chat notification click (app closed) → context stored', (await clickNotification(bob.ctx, `dm-${queued.senderId}`)) === 'clicked');
+  await bob.page.goto(APP);
+  await bob.page.waitForSelector('#room-name');
+  check('Launched: room prefilled, URL carries no message data', (await bob.page.inputValue('#room-name')) === ROOM && !/See|messageId|room=/.test(bob.page.url()), bob.page.url());
+  await bob.page.click('.room-screen button[type=submit]');
+  const opened = await bob.page.waitForSelector(`.dm-drawer:not([hidden]) .msg.highlight[data-id="${queued.messageId}"]`, { timeout: 30_000 }).then(() => true, () => false);
+  check('After joining: queued message delivered via ScaleDrone, conversation open + highlighted', opened);
+  const delivered = await alice.page.waitForFunction((id) => window.__voip.app.dms.conversation(id).messages.at(-1).status === 'delivered', bobDevice, { timeout: 20_000 }).then(() => true, () => false);
+  check('Sender sees "Delivered" only after the recipient app acknowledged it', delivered);
+  check('Chat notification cleared when the conversation opened', !(await notifications(bob.ctx)).some((n) => n.tag === `dm-${queued.senderId}`));
+  // App visible → chat push is handed to the page (no system notification)
+  await deliver(cdp, regId, { data: { type: 'chat-message', messageId: 'm-vis', senderId: queued.senderId, senderName: 'Alice', text: 'hi', roomId: queued.roomId, roomName: ROOM, timestamp: Date.now() } });
+  await bob.page.waitForTimeout(800);
+  check('App visible → no system notification for a chat push', !(await notifications(bob.ctx)).some((n) => n.tag === `dm-${queued.senderId}`));
+  await bob.page.evaluate(() => document.querySelector('.dm-drawer button[aria-label="Close conversation"]')?.click());
+
   // App open (visible, same room): an incoming-call push must NOT create a duplicate notification.
   await deliver(cdp, regId, callPush('dup-1'));
   await bob.page.waitForTimeout(800);

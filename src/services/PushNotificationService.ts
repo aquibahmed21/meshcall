@@ -3,7 +3,7 @@ import { createLogger, errorMessage } from '../core/logger';
 import { storage } from '../core/storage';
 import type { AppConfig } from '../config';
 import { uint8ArrayToUrlBase64, urlBase64ToUint8Array } from '../push/base64url';
-import type { IncomingCallPush } from '../push/payloads';
+import type { ChatMessagePush, IncomingCallPush, TargetedPushPayload } from '../push/payloads';
 import { PushUnsupportedError, WebPushServerBackend, type PushBackend } from '../push/PushBackend';
 import { PwaService } from './PwaService';
 
@@ -45,7 +45,12 @@ export const PUSH_STATUS_LABEL: Record<PushStatus, string> = {
   error: 'Error – see log',
 };
 
-export type NotifyResult = 'sent' | 'unsupported' | 'failed';
+/**
+ * 'accepted'    – the push server accepted the request (NOT a delivery confirmation)
+ * 'unsupported' – the backend cannot target a single device → nothing was sent
+ * 'failed'      – the request failed
+ */
+export type NotifyResult = 'accepted' | 'unsupported' | 'failed';
 
 export interface PushDiagnostics {
   browserSupport: boolean;
@@ -279,19 +284,33 @@ export class PushNotificationService {
   }
 
   /**
-   * Wake a specific callee. Requires targeted delivery – with the current backend this returns
-   * 'unsupported' and nothing is sent (broadcasting a call to everyone would be wrong).
+   * Send a notification to ONE user/device. This is the only path for calls and private messages;
+   * it never falls back to /notifyAll. With the current backend it returns 'unsupported'.
    */
-  async notifyIncomingCall(targetDeviceId: string, payload: IncomingCallPush): Promise<NotifyResult> {
+  async sendToUser(targetDeviceId: string, notification: { title: string; body: string; data: TargetedPushPayload }): Promise<NotifyResult> {
     if (!this.backend?.capabilities.targetedDelivery) return 'unsupported';
     try {
-      await this.backend.notifyDevice(targetDeviceId, payload);
-      return 'sent';
+      await this.backend.notifyDevice(targetDeviceId, notification);
+      return 'accepted';
     } catch (err) {
       if (err instanceof PushUnsupportedError) return 'unsupported';
       log.warn('Targeted push failed', errorMessage(err));
       return 'failed';
     }
+  }
+
+  notifyIncomingCall(targetDeviceId: string, payload: IncomingCallPush): Promise<NotifyResult> {
+    const what = payload.callType === 'group' ? 'invites you to a group call' : `is calling you (${payload.callType})`;
+    return this.sendToUser(targetDeviceId, { title: `${payload.callerName} ${what}`, body: `Room: ${payload.roomName}`, data: payload });
+  }
+
+  notifyChatMessage(targetDeviceId: string, payload: ChatMessagePush): Promise<NotifyResult> {
+    return this.sendToUser(targetDeviceId, { title: `New message from ${payload.senderName}`, body: payload.text.slice(0, 200), data: payload });
+  }
+
+  /** Whether push can deliver to a SPECIFIC user at all (backend capability + our own setup). */
+  get canSendToUsers(): boolean {
+    return !!this.backend?.capabilities.targetedDelivery;
   }
 
   /** DEVELOPMENT ONLY: POST /notifyAll – reaches EVERY subscriber of the push server. */

@@ -153,6 +153,12 @@ export interface ChatPayload {
 }
 export type ChatSignalMessage = Envelope<'chat-message', ChatPayload>;
 
+// ── Direct (1:1) messages – room-scoped, outside calls ────────────────────────
+/** Sent to the recipient's room inbox; messageId (envelope) is stable across retries. */
+export type DirectMessageSignal = Envelope<'direct-message', { text: string; sentAt: number }>;
+/** Recipient → sender: the message reached the recipient's app (= "Delivered"). */
+export type DirectMessageAckSignal = Envelope<'direct-message-ack', { messageId: string }>;
+
 export type SignalingMessage =
   | PresenceHeartbeatMessage
   | PresenceLeaveMessage
@@ -175,7 +181,9 @@ export type SignalingMessage =
   | PeerReconnectMessage
   | CallParticipantsAddedMessage
   | LiveStreamMessage
-  | ChatSignalMessage;
+  | ChatSignalMessage
+  | DirectMessageSignal
+  | DirectMessageAckSignal;
 
 export type MessageType = SignalingMessage['messageType'];
 export type MessageOf<T extends MessageType> = Extract<SignalingMessage, { messageType: T }>;
@@ -188,7 +196,7 @@ const TYPES: ReadonlySet<string> = new Set<MessageType>([
   'call-cancel', 'call-hangup', 'mesh-join', 'mesh-welcome', 'mesh-heartbeat', 'mesh-leave', 'mesh-remove',
   'mesh-reject', 'media-state', 'offer', 'answer', 'ice-candidate', 'peer-reconnect', 'call-participants-added', 'chat-message',
   'live-started', 'live-stopped', 'live-audience-updated', 'live-viewer-added', 'live-viewer-removed',
-  'live-viewer-joined', 'live-viewer-left',
+  'live-viewer-joined', 'live-viewer-left', 'direct-message', 'direct-message-ack',
 ]);
 
 /** Structural validation of untrusted wire data. */

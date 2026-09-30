@@ -5,10 +5,10 @@ import { createLogger, logHub } from './core/logger';
 import { renderOnboarding } from './ui/views/Onboarding';
 import { renderRoomScreen } from './ui/views/RoomScreen';
 import { validateRoomName } from './services/RoomService';
-import type { CallLaunchContext } from './push/payloads';
+import type { LaunchContext } from './push/payloads';
 import { UIManager } from './ui/UIManager';
 import { collectDiagnostics } from './ui/views/DiagnosticsPanel';
-import { probeIceServers } from './webrtc/IceServerProbe';
+import { listIceServers, probeIceServers, testIceServer } from './webrtc/IceServerProbe';
 import { WebRTCManager } from './webrtc/WebRTCManager';
 
 logHub.setLevel(localStorage.getItem('voip.logLevel') ?? CONFIG.logLevel);
@@ -32,14 +32,16 @@ async function boot(): Promise<void> {
     app,
     diagnostics: () => collectDiagnostics(app),
     probeIceServers: () => probeIceServers(app.config.iceServers),
+    /** Test any single server, e.g. __voip.testIceServer({ urls: 'turn:host:3478', username, credential }). */
+    testIceServer: (server: RTCIceServer, timeoutMs?: number) => testIceServer(listIceServers([server])[0]!, timeoutMs),
   };
 
   let ui: UIManager | null = null;
   // A notification click may carry the room of the call (?room=…) → prefill, never auto-join.
   const params = new URLSearchParams(location.search);
   let prefill = params.get('room') ?? undefined;
-  /** Call we were told about by a notification but can only receive after joining its room. */
-  let expectAfterJoin: CallLaunchContext | undefined;
+  /** Notification context that can only be acted on after joining its room. */
+  let pendingContext: LaunchContext | undefined;
 
   const showRoomScreen = (error?: string, info?: string) => {
     document.title = 'MeshCall – Join a room';
@@ -52,8 +54,8 @@ async function boot(): Promise<void> {
       onJoin: async (room) => {
         await joinRoom(app, room);
         prefill = undefined;
-        if (expectAfterJoin) app.calls.expectCall(expectAfterJoin.callId, expectAfterJoin.callerName);
-        expectAfterJoin = undefined;
+        const ctx = pendingContext;
+        pendingContext = undefined;
         document.title = `${room.roomName} – MeshCall`;
         if (!ui) {
           ui = new UIManager(app, mount, {
@@ -65,35 +67,41 @@ async function boot(): Promise<void> {
         } else {
           ui.attach(mount);
         }
+        if (ctx?.kind === 'incoming-call') app.calls.expectCall(ctx.callId, ctx.callerName);
+        else if (ctx?.kind === 'chat-message') ui.openConversation(ctx.senderId, ctx.messageId);
       },
     });
   };
 
   /**
-   * A call notification was clicked (or a call push arrived while the app was visible).
-   * Recover the call WITHOUT auto-accepting it:
-   *   same room          → the call rings (or will ring when the caller re-sends the invite)
-   *   other room / none  → rooms are isolated: offer to switch (never silently), prefill the
-   *                        room screen, and expect the call after joining
+   * A notification was clicked (or a push arrived while the app was visible). Rooms are
+   * isolated, so another room is only ever entered with the user's consent (switch offer or
+   * prefilled room screen).
+   *   incoming-call → the call rings with Accept/Reject (never auto-accepted)
+   *   chat-message  → that conversation opens with the message highlighted
    */
-  const handleCallContext = (ctx: CallLaunchContext) => {
-    if (ctx.action === 'decline') return app.calls.declineFromNotification(ctx.callId);
+  const handleLaunchContext = (ctx: LaunchContext, source: 'click' | 'push') => {
+    if (ctx.kind === 'incoming-call' && ctx.action === 'decline') return app.calls.declineFromNotification(ctx.callId);
     const target = ctx.roomName ? validateRoomName(ctx.roomName) : null;
     const current = app.rooms.current;
-    if (current && (!target?.ok || target.room.roomId === current.roomId)) {
-      app.calls.expectCall(ctx.callId, ctx.callerName);
-      return;
-    }
+    const sameRoom = !!current && (!target?.ok || target.room.roomId === current.roomId);
+    const apply = () => {
+      if (ctx.kind === 'incoming-call') app.calls.expectCall(ctx.callId, ctx.callerName);
+      else if (source === 'click') ui?.openConversation(ctx.senderId, ctx.messageId);
+      else ui?.toast('info', `New message from ${ctx.senderName ?? 'someone'}`, { label: 'Open', run: () => ui?.openConversation(ctx.senderId, ctx.messageId) });
+    };
+    if (sameRoom) return apply();
     if (!target?.ok) return;
-    const who = ctx.callerName ?? 'Someone';
+    const who = (ctx.kind === 'incoming-call' ? ctx.callerName : ctx.senderName) ?? 'Someone';
+    const info = ctx.kind === 'incoming-call' ? `${who} is calling you in “${target.room.roomName}”. Join the room to answer.` : `${who} sent you a message in “${target.room.roomName}”. Join the room to read it.`;
     const go = () => {
       if (current) leaveRoom(app);
       prefill = target.room.roomName;
-      expectAfterJoin = ctx;
-      showRoomScreen(undefined, `${who} is calling you in “${target.room.roomName}”. Join the room to answer.`);
+      pendingContext = ctx;
+      showRoomScreen(undefined, info);
     };
     if (!current || !ui) return go();
-    ui.toast('info', `${who} is calling you in room “${target.room.roomName}”`, {
+    ui.toast('info', ctx.kind === 'incoming-call' ? `${who} is calling you in room “${target.room.roomName}”` : `New message from ${who} in room “${target.room.roomName}”`, {
       label: 'Switch room',
       run: () => {
         if (app.calls.inCall && !confirm('Switching rooms ends your current call. Switch anyway?')) return;
@@ -101,14 +109,15 @@ async function boot(): Promise<void> {
       },
     });
   };
-  app.notifications.events.on('click', (ctx) => handleCallContext(ctx));
-  app.notifications.events.on('pushCall', (ctx) => handleCallContext(ctx));
+  app.notifications.events.on('click', (ctx) => handleLaunchContext(ctx, 'click'));
+  app.notifications.events.on('pushCall', (ctx) => handleLaunchContext(ctx, 'push'));
+  app.notifications.events.on('pushChat', (ctx) => handleLaunchContext(ctx, 'push'));
 
   const launch = async () => {
     await startApp(app);
     const launchCtx = await app.pwa.consumeLaunchContext();
     log.info(`Started as ${app.identity.displayName} (${app.identity.deviceId.slice(0, 8)})`);
-    if (launchCtx) handleCallContext(launchCtx);
+    if (launchCtx) handleLaunchContext(launchCtx, 'click');
     else showRoomScreen();
   };
 

@@ -408,3 +408,71 @@ Verification:
 | Push errors affecting WebRTC | Every push method catches its own errors; signaling and calls are unaffected (e2e). |
 | Sensitive data | Only the VAPID *public* key reaches the frontend; endpoints are redacted in diagnostics; keys are never logged. |
 | CORS | The backend allows `https://aquibahmed21.github.io` and `http://localhost:5173`. Foreign origins are blocked by the browser, which the e2e verifies, and the frontend never bypasses this. |
+
+## H. Connection diagnostics, ICE server tests, offline users and direct messages
+
+Scope:
+
+- the exact connection path per participant, from `getStats()`;
+- STUN/TURN server identification;
+- tile and panel network info;
+- per-server STUN/TURN tests;
+- offline-actionable users;
+- 1:1 direct messages over ScaleDrone, with targeted push as the offline path;
+- chat notification routing.
+
+### Issues found and fixed
+
+#### H1. The old ICE probe counted "gathering finished" and any candidate as a pass
+- **Before:** the old health check tested every server together and reported loose `ok` / `candidates`.
+- **Fix:** it was replaced by `testIceServer()`. There is one temporary `RTCPeerConnection` per URL. STUN passes only on an **srflx** candidate, and TURN only on a **relay** candidate (with `iceTransportPolicy: 'relay'`, used by that test connection only). The connection is always closed.
+- **Failures** are mapped from `icecandidateerror` codes. The e2e run confirms: invalid credentials → 401, wrong port → failed with causes, and a dead STUN server → failed.
+
+#### H2. The server that carried a relayed call could only be guessed from the configuration
+- **Fix:** `identifyServer()` uses the local candidate's `url` from `getStats()`. It falls back to the `url` of the `icecandidate` event that gathered that same candidate (matched by type, address, port and protocol). Otherwise it reports *unknown* and lists the configured servers.
+- **Remote side:** a relay or srflx candidate on the remote side is explicitly marked as not identifiable.
+- **Verified:** in Chrome the URL comes from stats: `turn:<host>:3479?transport=udp via stats`.
+
+#### H3. Offline users had disabled call buttons, and calling them started a doomed WebRTC attempt
+- **Fix:** Call, Video and Message are always enabled. A call to a user whose presence is not *online* (offline **or unknown**) opens an explanatory dialog.
+- **Send Call Notification** appears only when targeted push really exists.
+
+#### H4. A private message must never be broadcast
+- **Fix:** `PushNotificationService.sendToUser()` only uses `PushBackend.notifyDevice()`. The current backend has no targeting, so it returns `'unsupported'`, and **no request is made**.
+- **Result:** the message is queued on the sender's device and delivered through ScaleDrone when the recipient comes online.
+- **Verified:** the e2e tests assert that no `/notifyAll` request is made. That is checked both in the diagnostics suite and in the push suite against the real backend.
+
+#### H5. "Sent" was not "Delivered"
+- **Fix:** Delivered is set only by a `direct-message-ack` from the **recipient** (acks from anyone else are ignored).
+- **Push states:** *Push request accepted* is a separate state and never shown as Delivered.
+
+#### H6. A lost ack left a message waiting while the recipient stayed online
+- **Before:** after the 15 s ack timeout the message went back to *Waiting*. It was re-sent only on the next presence change.
+- **Fix:** it is now re-sent automatically, up to 3 times, with the **same messageId**. The recipient de-duplicates but always acks, so the conversation never shows a duplicate. This is covered by a unit test.
+
+### Checklist
+
+| Check | Result |
+|---|---|
+| Path decided from config? | No. Only the selected pair from `getStats()`; `Unknown` until connected (e2e records every tile state during connect). |
+| TURN shown as P2P, or STUN as TURN? | No. Any relay → TURN; srflx/prflx without relay → STUN; host↔host → P2P (unit table, e2e P2P and relay-only). |
+| Server guessed? | No. Stats `url` → gathering `url` → honest "not reported" + configured list. |
+| Extra `getStats` load from the panel and tiles | None. One poll per PC every 2 s is reused (e2e: 3 calls in 6 s for one PC). |
+| TURN test leaks | The PC is closed in `finally`, and the timer is cleared. |
+| `iceTransportPolicy: 'relay'` in calls | Only in the TURN test and the explicit "Force TURN relay" diagnostic mode; normal calls use `'all'`. |
+| Buttons disabled for offline users | Never (e2e). |
+| Unknown presence treated as online | No: `status === 'online'` is required for ScaleDrone delivery and for calls. |
+| Private message via `/notifyAll` | Never (unit + 2 e2e suites). |
+| "Delivered" without the recipient's app | Impossible: only an ack from the recipient sets it. |
+| Duplicates on retry | Same messageId; the recipient de-duplicates and re-acks (unit + e2e). |
+| Room isolation | Per-room storage key, `roomId` filter on load, and signaling drops other rooms (unit + e2e). |
+| Message content in URLs | None; the launch context goes by `postMessage` or a one-time cache entry (e2e checks the URL). |
+| XSS through messages | Text is rendered with `textContent` (e2e: `<img onerror>` payload inert). |
+| Notification cleanup | Opening a conversation closes its `dm-<sender>` notification (e2e). |
+
+### Remaining limitations
+
+- **Closed-app messages and calls:** a *closed* app cannot receive a message or a call until the backend offers `POST /notify {targetDeviceId,…}` (see README → *Backend changes required*). Until then, messages wait on the **sender's** device. If the sender closes the app, they are sent the next time the sender opens that room and the recipient is online.
+- **Server URL in other browsers:** Firefox and Safari may not expose candidate `url`; the UI then says the server is unknown.
+- **Stats-related flake:** in one of five e2e runs, a freshly connected P2P tile stayed "Connected · Unknown" for more than 10 s (no selected pair in the stats yet). It was not reproduced in later runs. It is reported rather than hidden: the UI correctly shows Unknown instead of guessing.
+- **No profile page:** the app has none (the display name is edited in Settings → Profile), so there is no Profile button to keep enabled.

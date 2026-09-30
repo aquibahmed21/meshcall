@@ -2014,3 +2014,193 @@ input[aria-invalid='true'] {
   border: 1px solid rgba(59, 158, 255, 0.4);
   text-align: left;
 }
+
+/* ───────────────────────── connection diagnostics ───────────────────────── */
+.tile-id {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-width: 0;
+  max-width: 100%;
+}
+.tile-net {
+  padding: 1px 8px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.55);
+  font-size: 0.7rem;
+  font-weight: 600;
+  white-space: nowrap;
+  color: var(--warn);
+}
+.tile-net[data-status='connected'] {
+  color: var(--ok);
+}
+.tile-net[data-status='connected'][data-path='stun'] {
+  color: var(--stun);
+}
+.tile-net[data-status='connected'][data-path='turn'] {
+  color: var(--turn);
+}
+.tile-net[data-status='failed'] {
+  color: var(--bad);
+}
+.tile-details {
+  position: absolute;
+  z-index: 4;
+  top: 44px;
+  left: 8px;
+  right: 8px;
+  max-height: calc(100% - 96px);
+  overflow-y: auto;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(15, 20, 25, 0.9);
+  font-size: 0.78rem;
+  cursor: default;
+}
+.tile-details dl {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 3px 10px;
+  margin: 0;
+}
+.tile-details dt {
+  color: var(--muted);
+}
+.tile-details dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-line;
+}
+.lay-strip .tile-net,
+.lay-strip .tile-info {
+  display: none;
+}
+.net-card {
+  padding: 8px 10px;
+  margin: 6px 0;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+}
+.net-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+.net-card dl {
+  margin: 0;
+}
+.ice-group h4 {
+  margin: 8px 0 4px;
+  flex: 1;
+}
+.ice-tests {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.ice-test {
+  padding: 6px 0;
+  border-bottom: 1px dashed var(--line);
+}
+.ice-test-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ice-test-head code {
+  overflow-wrap: anywhere;
+  font-size: 0.76rem;
+}
+.ice-icon {
+  width: 16px;
+  text-align: center;
+  font-weight: 800;
+}
+.ice-test.success .ice-icon {
+  color: var(--ok);
+}
+.ice-test.failed .ice-icon {
+  color: var(--bad);
+}
+.ice-test-body {
+  margin: 4px 0 0 24px;
+  white-space: pre-line;
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+.ice-test.failed .ice-test-body {
+  color: #ffb4b4;
+}
+
+/* ───────────────────────── direct messages ───────────────────────── */
+.dm-drawer {
+  position: fixed;
+  top: calc(var(--topbar) + var(--safe-top));
+  right: 0;
+  bottom: 0;
+  z-index: 32;
+  display: flex;
+  flex-direction: column;
+  width: min(400px, 100vw);
+  background: var(--bg-2);
+  border-left: 1px solid var(--line);
+  box-shadow: -12px 0 32px rgba(0, 0, 0, 0.45);
+  padding-bottom: var(--safe-bottom);
+}
+.dm-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+}
+.dm-head small {
+  display: block;
+}
+.dm-banner {
+  margin: 8px 12px 0;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(245, 165, 36, 0.12);
+  border: 1px solid rgba(245, 165, 36, 0.35);
+  font-size: 0.82rem;
+}
+.dm-list {
+  flex: 1;
+}
+.msg.highlight {
+  box-shadow: 0 0 0 2px var(--accent);
+}
+.msg-delivery.delivered {
+  color: var(--ok);
+}
+.msg-delivery.queued,
+.msg-delivery.push-accepted {
+  color: var(--warn);
+}
+.msg-delivery.failed {
+  color: var(--bad);
+}
+.msg-btn {
+  position: relative;
+}
+.msg-btn .badge {
+  position: absolute;
+  top: 0;
+  right: 0;
+}
+.push-note {
+  color: var(--accent);
+}
+@media (max-width: 767px) {
+  .dm-drawer {
+    top: 0;
+    width: 100vw;
+    z-index: 45;
+    padding-top: var(--safe-top);
+  }
+}

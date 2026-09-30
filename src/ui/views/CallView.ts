@@ -12,6 +12,7 @@ import { CALL_LAYOUTS, CallLayoutManager, type LayoutPlan } from '../layout/Call
 import { ViewModeController, type ViewModeSnapshot } from '../ViewModeController';
 import type { MeshSession } from '../../calls/MeshSession';
 import { ChatPanel } from './ChatPanel';
+import { peerNetInfo } from '../netInfo';
 import { VideoGrid, type TileModel } from './VideoGrid';
 
 const STATUS_LABEL: Record<CallStatus, string> = {
@@ -512,7 +513,7 @@ export class CallView {
           disabled: busyPip || (!pipOn && !this.grid.hasVideo(this.mainId)),
           secondary: true,
         });
-      specs.push({ key: 'stats', label: 'Stats', icon: icons.stats, on: () => this.cb.onToggleDiagnostics(), secondary: true });
+      specs.push({ key: 'stats', label: 'Network', icon: icons.stats, on: () => this.cb.onToggleDiagnostics(), secondary: true });
     }
     specs.push({
       key: 'end',
@@ -607,6 +608,7 @@ export class CallView {
         connection: peerProblem(p),
         pathType: p.peer?.connectionState === 'connected' ? p.peer.selectedPath?.connectionType : undefined,
         quality: snap?.quality,
+        net: peerNetInfo(p, snap),
       });
     }
     if (c.role !== 'viewer') {

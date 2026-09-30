@@ -5,7 +5,8 @@ import { logHub, type LogEntry, type LogLevel } from '../../core/logger';
 import type { PeerConnectionState } from '../../types/state';
 import type { DataUsageSnapshot } from '../../webrtc/DataUsageMonitor';
 import type { PeerStatsSnapshot, StatsReport } from '../../webrtc/StatsMonitor';
-import { probeIceServers, type ProbeResult } from '../../webrtc/IceServerProbe';
+import { listIceServers, testIceServer, type IceServerEntry, type IceServerTestResult } from '../../webrtc/IceServerProbe';
+import { netRows, peerNetInfo } from '../netInfo';
 import { PUSH_STATUS_LABEL, type PushDiagnostics } from '../../services/PushNotificationService';
 import { h } from '../dom';
 import { icons } from '../icons';
@@ -24,7 +25,8 @@ export class DiagnosticsPanel {
   private usage: DataUsageSnapshot | null = null;
   private logLevel: LogLevel = 'INFO';
   private pending = false;
-  private probe: ProbeResult[] | 'running' | null = null;
+  /** url → latest test result (per-server state; 'testing' while running). */
+  private iceTests = new Map<string, IceServerTestResult>();
   private pushDiag: PushDiagnostics | null = null;
   private pushDiagKey = '';
 
@@ -90,15 +92,8 @@ export class DiagnosticsPanel {
 
     sections.push(this.pushSection());
 
-    const probe = h('section', { class: 'diag-section' }, h('h3', {}, 'STUN / TURN health check'));
-    if (this.probe === 'running') probe.append(h('p', { class: 'hint' }, 'Probing servers…'));
-    else if (this.probe) {
-      probe.append(
-        h('dl', {}, ...this.probe.flatMap((r) => [h('dt', {}, `${r.ok ? '✅' : '❌'} ${r.kind.toUpperCase()}`), h('dd', {}, `${r.url}\n${r.ok ? `${r.candidates.join(', ')} in ${r.ms} ms` : r.errors.join('; ')}`)])),
-      );
-    }
-    probe.append(h('button', { class: 'btn small', disabled: this.probe === 'running', onclick: () => void this.runProbe() }, 'Test STUN / TURN servers'));
-    sections.push(probe);
+    if (call) sections.push(this.networkSummary());
+    sections.push(this.iceTestSection());
 
     if (this.usage && call) {
       const u = this.usage;
@@ -211,10 +206,77 @@ export class DiagnosticsPanel {
     return this.section('Push Notifications', rows);
   }
 
-  private async runProbe(): Promise<void> {
-    this.probe = 'running';
+  /** "Network Diagnostics": how every participant is connected right now (from getStats). */
+  private networkSummary(): HTMLElement {
+    const call = this.app.calls.state!;
+    const el = h('section', { class: 'diag-section net-summary' }, h('h3', {}, 'Network Diagnostics'));
+    const people = [...call.participants.values()].filter((p) => p.peer || call.role !== 'viewer');
+    if (!people.length) el.append(h('p', { class: 'hint' }, 'No peer connections yet.'));
+    for (const p of people) {
+      const info = peerNetInfo(p, this.report?.peers.get(p.deviceId));
+      el.append(
+        h(
+          'div',
+          { class: `net-card ${info.status}`, 'data-peer': p.deviceId, 'data-path': info.path },
+          h('div', { class: 'net-card-head' }, h('strong', {}, p.name), h('span', { class: 'path-badge', 'data-type': info.pathLabel }, info.pathLabel)),
+          h('dl', {}, ...netRows(info).flatMap(([k, v]) => [h('dt', {}, k), h('dd', {}, v)])),
+        ),
+      );
+    }
+    return el;
+  }
+
+  /** "Network / ICE Diagnostics": test each configured STUN / TURN URL independently. */
+  private iceTestSection(): HTMLElement {
+    const entries = listIceServers(this.app.config.iceServers);
+    const group = (type: 'stun' | 'turn', title: string) => {
+      const list = entries.filter((e) => e.type === type);
+      const busy = list.some((e) => this.iceTests.get(e.url)?.status === 'testing');
+      return h(
+        'div',
+        { class: 'ice-group', 'data-type': type },
+        h(
+          'div',
+          { class: 'diag-row-head' },
+          h('h4', {}, title),
+          list.length ? h('button', { class: 'btn small', disabled: busy, onclick: () => void Promise.all(list.map((e) => this.runIceTest(e))) }, `Test all ${type.toUpperCase()}`) : null,
+        ),
+        list.length ? h('ul', { class: 'ice-tests' }, ...list.map((e) => this.iceTestRow(e))) : h('p', { class: 'hint' }, `No ${type.toUpperCase()} server configured.`),
+      );
+    };
+    return h(
+      'section',
+      { class: 'diag-section ice-diag' },
+      h('h3', {}, 'Network / ICE Diagnostics'),
+      h('p', { class: 'hint' }, 'Each server is tested alone with a temporary connection. TURN tests force relay-only gathering (calls keep using "all").'),
+      group('stun', 'STUN Tests'),
+      group('turn', 'TURN Tests'),
+    );
+  }
+
+  private iceTestRow(e: IceServerEntry): HTMLElement {
+    const r = this.iceTests.get(e.url);
+    const status = r?.status;
+    const icon = status === 'success' ? '✓' : status === 'failed' ? '✕' : status === 'testing' ? '…' : '○';
+    const lines: string[] = [];
+    if (status === 'testing') lines.push('Testing…');
+    else if (status === 'success' && e.type === 'stun') lines.push('Reachable', 'srflx candidate discovered', `Public address: ${r!.address ?? 'n/a'}`, `${r!.durationMs} ms`);
+    else if (status === 'success') lines.push('TURN working', 'relay candidate discovered', `Relay address: ${r!.address ?? 'n/a'}`, `Protocol: ${r!.relayProtocol ?? r!.protocol ?? 'n/a'}`, `${r!.durationMs} ms`);
+    else if (status === 'failed') lines.push(r!.error ?? 'Failed', ...(r!.causes?.length ? ['Possible causes:', ...r!.causes.map((c) => `- ${c}`)] : []), ...(r!.errors.length ? [`Errors: ${r!.errors.join('; ')}`] : []));
+    else lines.push('Not tested yet');
+    return h(
+      'li',
+      { class: `ice-test ${status ?? 'idle'}`, 'data-url': e.url },
+      h('div', { class: 'ice-test-head' }, h('span', { class: 'ice-icon' }, icon), h('code', { class: 'grow' }, e.url), h('button', { class: 'btn small', disabled: status === 'testing', onclick: () => void this.runIceTest(e) }, e.type === 'turn' ? 'Test TURN' : 'Test')),
+      h('div', { class: 'ice-test-body' }, lines.join('\n')),
+    );
+  }
+
+  private async runIceTest(e: IceServerEntry): Promise<void> {
+    if (this.iceTests.get(e.url)?.status === 'testing') return;
+    this.iceTests.set(e.url, { url: e.url, type: e.type, status: 'testing', errors: [], testedAt: Date.now(), durationMs: 0 });
     this.render();
-    this.probe = await probeIceServers(this.app.config.iceServers);
+    this.iceTests.set(e.url, await testIceServer(e));
     this.render();
   }
 
@@ -266,6 +328,8 @@ export function collectDiagnostics(app: AppContext) {
           iceConnectionState: p.peer?.iceConnectionState,
           selectedCandidate: p.peer?.selectedPath?.pairLabel,
           connectionType: p.peer?.selectedPath?.connectionType,
+          connectionPath: p.peer?.connectionState === 'connected' ? (p.peer?.selectedPath?.connectionPath ?? 'unknown') : 'unknown',
+          server: p.peer?.selectedPath?.server,
           path: p.peer?.selectedPath?.pathLabel,
           transport: p.peer?.selectedPath?.transport,
           relayProtocol: p.peer?.selectedPath?.relayProtocol,
