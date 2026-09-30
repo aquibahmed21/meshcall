@@ -59,20 +59,28 @@ export class NotificationService {
     roomName?: string;
   }): Promise<void> {
     if (this.permission !== 'granted' || (document.visibilityState === 'visible' && document.hasFocus())) return;
-    const callType = info.callKind === 'group' ? 'group' : info.media;
+    const callType = info.callKind === 'group' || info.callKind === 'live' ? info.callKind : info.media;
     const where = info.roomName ? ` in ${info.roomName}` : '';
-    const title = callType === 'group' ? 'Group Call Invitation' : callType === 'video' ? 'Incoming Video Call' : 'Incoming Audio Call';
-    const body = callType === 'group' ? `${info.callerName} invites you${info.groupName ? ` to “${info.groupName}”` : ''}${where}` : `${info.callerName} is calling you${where}`;
+    const title = callType === 'live' ? 'Live Stream Invitation' : callType === 'group' ? 'Group Call Invitation' : callType === 'video' ? 'Incoming Video Call' : 'Incoming Audio Call';
+    const body =
+      callType === 'live'
+        ? `${info.callerName} invites you to watch${info.groupName ? ` “${info.groupName}”` : ' a live stream'}${where}`
+        : callType === 'group'
+          ? `${info.callerName} invites you${info.groupName ? ` to “${info.groupName}”` : ''}${where}`
+          : `${info.callerName} is calling you${where}`;
     await this.show(title, {
       body,
       tag: `call-${info.callId}`,
       requireInteraction: true,
       data: { kind: 'incoming-call', callId: info.callId, roomId: info.roomId, roomName: info.roomName, callerId: info.callerId, callerName: info.callerName, callType },
       // The app is running, so it can decline over signaling. "Open" never auto-accepts.
-      actions: [
-        { action: 'open', title: 'Open MeshCall' },
-        { action: 'decline', title: 'Decline' },
-      ],
+      actions:
+        callType === 'live'
+          ? [{ action: 'open', title: 'Open MeshCall' }]
+          : [
+              { action: 'open', title: 'Open MeshCall' },
+              { action: 'decline', title: 'Decline' },
+            ],
     } as NotificationOptions);
   }
 

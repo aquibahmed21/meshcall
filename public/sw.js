@@ -188,8 +188,13 @@ async function handlePush(p) {
       data: { kind: 'system' },
     });
   }
-  const title = p.callType === 'group' ? 'Group Call Invitation' : p.callType === 'video' ? 'Incoming Video Call' : 'Incoming Audio Call';
-  const body = p.callType === 'group' ? `${p.callerName} invites you to a group call${where}` : `${p.callerName} is calling you${where}`;
+  const title = p.callType === 'live' ? 'Live Stream Invitation' : p.callType === 'group' ? 'Group Call Invitation' : p.callType === 'video' ? 'Incoming Video Call' : 'Incoming Audio Call';
+  const body =
+    p.callType === 'live'
+      ? `${p.callerName} invites you to watch${p.title ? ` “${p.title}”` : ' a live stream'}${where}`
+      : p.callType === 'group'
+        ? `${p.callerName} invites you to a group call${where}`
+        : `${p.callerName} is calling you${where}`;
   return self.registration.showNotification(title, {
     body,
     tag: `call-${p.callId}`,

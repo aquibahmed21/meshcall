@@ -18,7 +18,9 @@
     "test:rooms": "node tests/e2e/rooms.mjs",
     "test:pwa": "node tests/e2e/pwa.mjs",
     "test:push": "node tests/e2e/push.mjs",
-    "test:diagnostics": "node tests/e2e/diagnostics.mjs"
+    "test:diagnostics": "node tests/e2e/diagnostics.mjs",
+    "test:live-call": "node tests/e2e/live-call.mjs",
+    "test:room-persistence": "node tests/e2e/room-persistence.mjs"
   },
   "devDependencies": {
     "@types/node": "^26.6.3",

@@ -223,12 +223,14 @@ select {
   color: var(--accent);
 }
 .brand-mark {
+  display: inline-flex;
   color: var(--accent);
-  font-size: 1.3rem;
+  font-size: 1.5rem;
 }
 .brand-mark.big {
-  font-size: 3rem;
+  font-size: 3.5rem;
   line-height: 1;
+  justify-content: center;
 }
 .pills {
   display: flex;

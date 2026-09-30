@@ -59,7 +59,7 @@ export function createApp(): AppContext {
   const push = new PushNotificationService(config);
   const calls = new CallManager({ identity, signaling, presence, media, settings, webrtc, network, notifications, push, config });
   const groups = new GroupCallManager(calls, identity);
-  const live = new LiveStreamManager(calls, signaling, identity, presence, config);
+  const live = new LiveStreamManager(calls, signaling, identity, presence, config, push);
   const chat = new ChatService(signaling, identity);
   const rooms = new RoomService();
   const pwa = new PwaService();
@@ -116,6 +116,7 @@ export async function joinRoom(app: AppContext, room: RoomContext): Promise<void
   try {
     await withTimeout(joined, JOIN_TIMEOUT_MS, 'room join');
     log.info(`Joined room "${room.roomName}"`);
+    app.rooms.saveActive(room); // reopened automatically on the next launch
   } catch {
     const sig = app.signaling.status;
     leaveRoom(app);

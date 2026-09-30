@@ -3,7 +3,7 @@ import { isTerminal } from '../calls/CallStateMachine';
 import type { SavedCall } from '../calls/CallManager';
 import type { NetworkQuality } from '../types/state';
 import { h } from './dom';
-import { icons } from './icons';
+import { icons, logo } from './icons';
 import { CallView } from './views/CallView';
 import { DiagnosticsPanel } from './views/DiagnosticsPanel';
 import { openAddParticipants, openGoLive, openGroupCall, openIncomingCall, openInstallHelp, openLiveInvite, openManageAudience, openOfflineCallDialog, openSettings } from './views/Dialogs';
@@ -72,7 +72,7 @@ export class UIManager {
       h(
         'header',
         { class: 'topbar' },
-        h('div', { class: 'brand' }, h('span', { class: 'brand-mark' }, '◉'), h('span', { class: 'brand-text' }, 'Mesh', h('b', {}, 'Call'))),
+        h('div', { class: 'brand' }, h('span', { class: 'brand-mark', html: logo }), h('span', { class: 'brand-text' }, 'Mesh', h('b', {}, 'Call'))),
         this.roomChip,
         h('div', { class: 'pills' }, this.sigPill, this.netPill),
         h('button', { class: 'icon-btn', 'aria-label': 'Diagnostics', title: 'Diagnostics', html: icons.stats, onclick: () => this.toggleDiagnostics() }),
@@ -102,12 +102,28 @@ export class UIManager {
    * WebRTC attempt, never a disabled button).
    */
   callUser(userId: string, media: 'audio' | 'video'): void {
+    const c = this.app.calls.state;
+    if (c?.kind === 'live' && c.role === 'broadcaster' && this.app.live.state?.streamId) {
+      void this.callIntoStream(userId);
+      return;
+    }
     if (this.app.calls.inCall) {
       this.toasts.show('info', 'You are already in a call');
       return;
     }
     if (this.app.presence.status(userId) === 'online') void this.app.calls.startDirectCall(userId, media);
     else openOfflineCallDialog(this.app, userId, media, () => this.openConversation(userId));
+  }
+
+  /** Streamer calls someone into the running live stream (ringing if online, targeted push if not). */
+  private async callIntoStream(userId: string): Promise<void> {
+    const name = this.app.presence.nameOf(userId);
+    const r = await this.app.live.callViewer(userId);
+    if (r === 'watching') this.toasts.show('info', `${name} is already watching`);
+    else if (r === 'ringing') this.toasts.show('info', `Calling ${name} into the stream…`);
+    else if (r === 'push') this.toasts.show('info', `${name} is offline – sent a call notification`);
+    else if (r === 'waiting')
+      this.toasts.show('warn', `${name} is offline. Call notifications can't reach one specific person with the current push server – ${name} will be rung as soon as they come online.`);
   }
 
   /** Open the 1:1 conversation (optionally highlighting a message from a notification). */
@@ -190,8 +206,16 @@ export class UIManager {
     app.presence.events.on('change', () => this.sidebar.renderUsers());
     app.live.events.on('streams', () => this.sidebar.renderStreams());
     app.live.events.on('invite', (invite) => {
-      if (app.calls.inCall) this.toasts.show('info', `${invite.hostName} added you to the live stream “${invite.title}” – find it under Live when you're free`);
-      else openLiveInvite(app, invite);
+      if (app.calls.inCall) {
+        this.toasts.show('info', `${invite.hostName} ${invite.ring ? 'is calling you into' : 'added you to'} the live stream “${invite.title}” – find it under Live when you're free`);
+        return;
+      }
+      openLiveInvite(app, invite);
+      // Tab hidden/unfocused: also a system notification (NotificationService skips it when focused).
+      if (invite.ring) {
+        const room = app.rooms.current;
+        void app.notifications.showIncomingCall({ callId: invite.streamId, callerId: invite.hostId, callerName: invite.hostName, media: 'video', callKind: 'live', groupName: invite.title, roomId: room?.roomId, roomName: room?.roomName });
+      }
     });
     app.network.events.on('change', ({ reason }) => {
       if (reason === 'offline') this.toasts.show('warn', 'You are offline – calls will recover when the network returns');
@@ -236,6 +260,7 @@ export class UIManager {
       this.callView = new CallView(this.app, {
         onInvite: () => openAddParticipants(this.app),
         onManageAudience: () => openManageAudience(this.app),
+        onCallViewer: (id) => this.callUser(id, 'audio'),
         onToggleDiagnostics: () => this.toggleDiagnostics(),
         onBack: () => this.setView('people'),
         onToast: (level, text) => this.toasts.show(level, text),
@@ -341,7 +366,7 @@ export class UIManager {
     return h(
       'section',
       { class: 'idle' },
-      h('div', { class: 'brand-mark big' }, '◉'),
+      h('div', { class: 'brand-mark big', html: logo }),
       h('h1', {}, 'Peer-to-peer calls'),
       h('p', {}, 'Pick someone from the list to start an audio or video call, start a group call, or go live.'),
       this.idleHints,

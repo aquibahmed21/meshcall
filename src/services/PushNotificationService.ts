@@ -300,7 +300,12 @@ export class PushNotificationService {
   }
 
   notifyIncomingCall(targetDeviceId: string, payload: IncomingCallPush): Promise<NotifyResult> {
-    const what = payload.callType === 'group' ? 'invites you to a group call' : `is calling you (${payload.callType})`;
+    const what =
+      payload.callType === 'live'
+        ? `invites you to watch ${payload.title ? `“${payload.title}”` : 'a live stream'}`
+        : payload.callType === 'group'
+          ? 'invites you to a group call'
+          : `is calling you (${payload.callType})`;
     return this.sendToUser(targetDeviceId, { title: `${payload.callerName} ${what}`, body: `Room: ${payload.roomName}`, data: payload });
   }
 

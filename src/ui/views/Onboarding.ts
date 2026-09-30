@@ -1,3 +1,4 @@
+import { logo } from '../icons';
 import { h } from '../dom';
 
 /** First launch: ask for a display name (the device ID is generated silently). */
@@ -6,7 +7,7 @@ export function renderOnboarding(root: HTMLElement, onDone: (name: string) => vo
   const form = h(
     'form',
     { class: 'onboarding card' },
-    h('div', { class: 'brand-mark big' }, '◉'),
+    h('div', { class: 'brand-mark big', html: logo }),
     h('h1', {}, 'Welcome'),
     h('label', { for: 'name' }, 'Enter your name:'),
     input,

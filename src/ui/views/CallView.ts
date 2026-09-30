@@ -67,6 +67,8 @@ export interface CallViewCallbacks {
   onInvite: () => void;
   /** Live streamer: change who may watch. */
   onManageAudience: () => void;
+  /** Streamer: call this person into the live stream. */
+  onCallViewer: (userId: string) => void;
   onToggleDiagnostics: () => void;
   onBack: () => void;
   onToast: (level: 'info' | 'warn' | 'error', text: string) => void;
@@ -435,6 +437,9 @@ export class CallView {
                   h('span', { class: 'avatar sm', style: `--avatar:${colorFor(v.userId)}` }, initials(v.name)),
                   h('span', { class: 'grow' }, v.name, h('small', { class: `viewer-status ${v.status}` }, label[v.status] ?? v.status)),
                   v.connected ? h('span', { class: 'viewer-rate', title: 'Measured upload to this viewer' }, formatBitrate(v.uploadBps)) : null,
+                  !v.connected && v.status !== 'connecting'
+                    ? h('button', { class: 'icon-btn viewer-call', title: `Call ${v.name} into the stream`, 'aria-label': `Call ${v.name} into the stream`, html: icons.phone, onclick: () => this.cb.onCallViewer(v.userId) })
+                    : null,
                 ),
               ),
             )

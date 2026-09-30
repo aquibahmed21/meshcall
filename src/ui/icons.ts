@@ -1,6 +1,9 @@
 const svg = (body: string) =>
   `<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${body}</svg>`;
 
+/** MeshCall mark (three fully connected nodes), same geometry as public/icon.svg. */
+export const logo = `<svg class="logo" viewBox="3 3 18 18" width="1em" height="1em" aria-hidden="true"><path d="M12 7.2 6.4 16.8h11.2z" fill="currentColor" fill-opacity=".16" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><g fill="currentColor"><circle cx="12" cy="7.2" r="2.8"/><circle cx="6.4" cy="16.8" r="2.8"/><circle cx="17.6" cy="16.8" r="2.8"/></g></svg>`;
+
 export const icons = {
   mic: svg('<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/>'),
   micOff: svg('<path d="M3 3l18 18"/><path d="M9 9v2a3 3 0 0 0 5.1 2.1M15 10V6a3 3 0 0 0-5.7-1.3"/><path d="M5 11a7 7 0 0 0 11.6 5.3M19 11a7 7 0 0 1-.7 3M12 18v3"/>'),

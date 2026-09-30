@@ -4,6 +4,8 @@ import { storage } from '../core/storage';
 export const MAX_ROOM_NAME_LENGTH = 64;
 const RECENT_KEY = 'voip.recentRooms';
 const MAX_RECENT = 5;
+/** The room to reopen on the next launch (cleared only by an explicit "Leave room"). */
+const ACTIVE_KEY = 'voip.activeRoom';
 
 /** Room scope carried by the app. The deviceId (not the room) remains the user identity. */
 export interface RoomContext {
@@ -70,7 +72,25 @@ export class RoomService {
     this.events.emit('change', room);
   }
 
-  /** Recently used room names – offered as shortcuts, never auto-joined. */
+  /** Remember the room that is active now, so the next launch reopens it. */
+  saveActive(room: RoomContext): void {
+    storage.set(ACTIVE_KEY, room.roomName);
+  }
+
+  /** The user explicitly left: the next launch asks which room to join. */
+  clearActive(): void {
+    storage.remove(ACTIVE_KEY);
+  }
+
+  /** Room to reopen on launch, if one was active when the app was closed (validated again). */
+  savedActive(): RoomContext | null {
+    const name = storage.get<unknown>(ACTIVE_KEY, null);
+    if (typeof name !== 'string') return null;
+    const v = validateRoomName(name);
+    return v.ok ? v.room : null;
+  }
+
+  /** Recently used room names – offered as shortcuts. */
   recent(): string[] {
     const list = storage.get<unknown>(RECENT_KEY, []);
     return Array.isArray(list) ? list.filter((x): x is string => typeof x === 'string').slice(0, MAX_RECENT) : [];

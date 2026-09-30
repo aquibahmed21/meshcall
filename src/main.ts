@@ -43,13 +43,14 @@ async function boot(): Promise<void> {
   /** Notification context that can only be acted on after joining its room. */
   let pendingContext: LaunchContext | undefined;
 
-  const showRoomScreen = (error?: string, info?: string) => {
+  const showRoomScreen = (error?: string, info?: string, autoJoin = false) => {
     document.title = 'MeshCall – Join a room';
     renderRoomScreen(mount, {
       userName: app.identity.displayName,
       prefill,
       error,
       info,
+      autoJoin,
       recent: app.rooms.recent(),
       onJoin: async (room) => {
         await joinRoom(app, room);
@@ -60,6 +61,7 @@ async function boot(): Promise<void> {
         if (!ui) {
           ui = new UIManager(app, mount, {
             onLeaveRoom: () => {
+              app.rooms.clearActive(); // explicit leave → next launch asks for a room
               leaveRoom(app);
               showRoomScreen();
             },
@@ -67,7 +69,7 @@ async function boot(): Promise<void> {
         } else {
           ui.attach(mount);
         }
-        if (ctx?.kind === 'incoming-call') app.calls.expectCall(ctx.callId, ctx.callerName);
+        if (ctx?.kind === 'incoming-call' && ctx.callType !== 'live') app.calls.expectCall(ctx.callId, ctx.callerName);
         else if (ctx?.kind === 'chat-message') ui.openConversation(ctx.senderId, ctx.messageId);
       },
     });
@@ -86,14 +88,16 @@ async function boot(): Promise<void> {
     const current = app.rooms.current;
     const sameRoom = !!current && (!target?.ok || target.room.roomId === current.roomId);
     const apply = () => {
-      if (ctx.kind === 'incoming-call') app.calls.expectCall(ctx.callId, ctx.callerName);
-      else if (source === 'click') ui?.openConversation(ctx.senderId, ctx.messageId);
+      if (ctx.kind === 'incoming-call') {
+        // Live stream invitation: the streamer rings us again as soon as we are online in the room.
+        if (ctx.callType !== 'live') app.calls.expectCall(ctx.callId, ctx.callerName);
+      } else if (source === 'click') ui?.openConversation(ctx.senderId, ctx.messageId);
       else ui?.toast('info', `New message from ${ctx.senderName ?? 'someone'}`, { label: 'Open', run: () => ui?.openConversation(ctx.senderId, ctx.messageId) });
     };
     if (sameRoom) return apply();
     if (!target?.ok) return;
     const who = (ctx.kind === 'incoming-call' ? ctx.callerName : ctx.senderName) ?? 'Someone';
-    const info = ctx.kind === 'incoming-call' ? `${who} is calling you in “${target.room.roomName}”. Join the room to answer.` : `${who} sent you a message in “${target.room.roomName}”. Join the room to read it.`;
+    const info = ctx.kind === 'incoming-call' && ctx.callType === 'live' ? `${who} invites you to a live stream in “${target.room.roomName}”. Join the room to watch.` : ctx.kind === 'incoming-call' ? `${who} is calling you in “${target.room.roomName}”. Join the room to answer.` : `${who} sent you a message in “${target.room.roomName}”. Join the room to read it.`;
     const go = () => {
       if (current) leaveRoom(app);
       prefill = target.room.roomName;
@@ -117,8 +121,13 @@ async function boot(): Promise<void> {
     await startApp(app);
     const launchCtx = await app.pwa.consumeLaunchContext();
     log.info(`Started as ${app.identity.displayName} (${app.identity.deviceId.slice(0, 8)})`);
+    const saved = app.rooms.savedActive();
     if (launchCtx) handleLaunchContext(launchCtx, 'click');
-    else showRoomScreen();
+    else if (saved && !prefill) {
+      // The app was closed/reloaded while in a room → reopen it (same join path as the Join button).
+      prefill = saved.roomName;
+      showRoomScreen(undefined, undefined, true);
+    } else showRoomScreen();
   };
 
   if (!app.identity.isRegistered) {

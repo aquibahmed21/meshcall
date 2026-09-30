@@ -128,7 +128,8 @@ export type LiveStreamStartedMessage = Envelope<'live-started', LiveStreamInfo>;
 export type LiveStreamStoppedMessage = Envelope<'live-stopped', { streamId: string }>;
 export type LiveStreamAudienceUpdatedMessage = Envelope<'live-audience-updated', LiveStreamInfo>;
 /** Directed (inbox) from the streamer to the affected viewer. */
-export type LiveStreamViewerAddedMessage = Envelope<'live-viewer-added', { streamId: string; title: string; targetUserId: string }>;
+/** `ring`: the streamer is actively calling this person (ringing invitation, not just "added"). */
+export type LiveStreamViewerAddedMessage = Envelope<'live-viewer-added', { streamId: string; title: string; targetUserId: string; ring?: boolean }>;
 export type LiveStreamViewerRemovedMessage = Envelope<'live-viewer-removed', { streamId: string; targetUserId: string; reason: string }>;
 /** Directed (inbox) from a viewer to the streamer. */
 export type LiveStreamViewerJoinedMessage = Envelope<'live-viewer-joined', { streamId: string }>;

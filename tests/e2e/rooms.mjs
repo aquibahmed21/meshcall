@@ -23,7 +23,14 @@ const browser = await chromium.launch({
 });
 
 async function enterRoom(page, room) {
-  await page.waitForSelector('#room-name', { timeout: 30_000 });
+  // Reload/relaunch reopens the last active room automatically – nothing to enter then.
+  const want = typeof room === 'string' ? room.replace(/\s+/g, ' ').trim() : undefined;
+  await page.waitForFunction(
+    (r) => (!!r && window.__voip?.app.rooms.current?.roomName === r && window.__voip.app.signaling.status === 'connected') || !!document.querySelector('#room-name:not([disabled])'),
+    want,
+    { timeout: 30_000 },
+  );
+  if (want && (await page.evaluate((r) => window.__voip?.app.rooms.current?.roomName === r, want))) return;
   await page.fill('#room-name', room);
   await page.click('.room-screen button[type=submit]');
   await page.waitForFunction(() => !!window.__voip?.app.rooms.current && window.__voip.app.signaling.status === 'connected', null, { timeout: 30_000 });
@@ -116,8 +123,7 @@ try {
   check('Caller in the other room sees "offline"', true);
 
   await bob.page.reload();
-  check('Refresh asks for the room again (no silent restore)', await bob.page.waitForSelector('#room-name', { timeout: 20_000 }).then(() => ev(bob, () => window.__voip.app.rooms.current === null)));
-  await enterRoom(bob.page, ROOM);
+  check('Refresh reopens the active room automatically', await bob.page.waitForFunction((r) => window.__voip?.app.rooms.current?.roomName === r && window.__voip.app.signaling.status === 'connected', ROOM, { timeout: 30_000 }).then(() => true, () => false));
 
   await alice.page.click('.room-chip button[aria-label="Leave room"]');
   await alice.page.waitForSelector('#room-name');

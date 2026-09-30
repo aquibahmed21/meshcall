@@ -1,3 +1,4 @@
+import { Ringtone } from '../../services/Ringtone';
 import type { AppContext } from '../../app';
 import { logHub } from '../../core/logger';
 import type { AudioQualityPreset, IceTestMode, VideoQualityPreset } from '../../services/SettingsService';
@@ -316,10 +317,21 @@ export function openManageAudience(app: AppContext): Modal | null {
 
 /** Viewer: the streamer added you to a (selected-audience) live stream. */
 export function openLiveInvite(app: AppContext, invite: LiveInvite): Modal {
-  const m = new Modal('Live stream invitation');
+  const m = new Modal(invite.ring ? 'Incoming live stream call' : 'Live stream invitation', { className: invite.ring ? 'live-ring' : undefined });
+  if (invite.ring) {
+    // The streamer is calling us: ring (same tone as an incoming call) until answered, dismissed or timed out.
+    const ringtone = new Ringtone();
+    ringtone.start('incoming');
+    const timer = setTimeout(() => m.close(), app.config.timeouts.ringMs);
+    m.onClose = () => {
+      ringtone.stop();
+      clearTimeout(timer);
+      void app.notifications.close(`call-${invite.streamId}`);
+    };
+  }
   m.setContent(
-    h('div', { class: 'avatar big', style: `--avatar:${colorFor(invite.hostId)}` }, initials(invite.hostName)),
-    h('p', { class: 'incoming-text' }, `${invite.hostName} added you to the live stream “${invite.title}”`),
+    h('div', { class: `avatar big${invite.ring ? ' pulse' : ''}`, style: `--avatar:${colorFor(invite.hostId)}` }, initials(invite.hostName)),
+    h('p', { class: 'incoming-text' }, invite.ring ? `${invite.hostName} is calling you to watch the live stream “${invite.title}”` : `${invite.hostName} added you to the live stream “${invite.title}”`),
     h(
       'div',
       { class: 'modal-actions' },

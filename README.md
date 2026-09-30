@@ -1,5 +1,7 @@
 # MeshCall – P2P-first WebRTC mesh calling
 
+![MeshCall](public/banner.png)
+
 A browser VoIP and video app built with Vite, TypeScript, WebRTC and ScaleDrone signaling. It supports:
 
 - 1:1 audio and video calls
@@ -56,7 +58,7 @@ More detail:
 
 ### Rooms
 
-- **Every fresh page load asks for a room.** A previous room is never restored silently. Recently used names are offered as chips that only fill the input; you still have to press Join. A notification click may prefill the room (`?room=`), but still needs Join.
+- **A page load asks for a room unless a room was active when the app was closed**, in which case that room is reopened (see *Reopening the last room* below). Recently used names are offered as chips that only fill the input; you still have to press Join. A notification click may prefill the room (`?room=`), but still needs Join.
 - **Validation:** room names are trimmed, internal whitespace is collapsed, and Unicode is NFKC-normalised. They must be at most 64 characters, using only letters, digits, spaces and `- _ . '`.
 - **`roomId`:** the lower-cased, dash-joined name, e.g. "Engineering Team" → `engineering-team`. It is stamped on every signaling message.
 - **`roomKey`:** a 64-bit FNV hash of the `roomId`, used to build ScaleDrone room names: `observable-room-<key>` and `inbox-<key>-<deviceId>`.
@@ -77,6 +79,15 @@ flowchart LR
 ```
 
 The top bar shows **Room: name**, with **Copy** (copies only the name, never any credential) and **Leave**.
+
+
+**Reopening the last room:**
+
+- **Close or reload while in a room:** the next launch rejoins that room automatically, using the normal join path. If the join fails, the room screen shows the error with the room prefilled.
+- **Clicking Leave room:** clears the saved room, so the next launch asks *"Which room do you want to join?"* again.
+- **Switching rooms:** joining a new room saves it instead.
+
+A notification launch, or a `?room=` link, still takes priority and only prefills its room. The saved room is stored under `localStorage` key `voip.activeRoom`, and holds the room name only.
 
 ### Call layouts
 
@@ -339,6 +350,14 @@ The broadcaster joins as `broadcaster` and announces the stream in the lobby eve
 - Viewers are capped at `mesh.maxLiveViewers` (8) and are rejected with `mesh-reject: full` beyond that.
 
 > **Mesh bandwidth warning:** there is no media server, so the broadcaster uploads one full copy of its stream per viewer. At 1 Mbps and 8 viewers that is about 8 Mbps of upstream. The UI shows this warning before going live.
+
+
+### Calling someone into a live stream
+
+While you are live, **Call** (in the sidebar, or the phone button next to a viewer in the audience panel) invites that person into the stream instead of starting a separate call. If the audience is *Selected*, they are added to it. They then join as a normal viewer, so the WebRTC and live-stream path is unchanged.
+
+- **Online:** they get a ringing invitation (the *Incoming live stream call* dialog) and the incoming-call ringtone until they choose **Watch** or **Not now**, or the ring timeout passes. A system notification is also shown if their tab is hidden.
+- **Offline or unknown:** a **targeted** `incoming-call` push with `callType: 'live'` goes to that person only, through `PushNotificationService.notifyIncomingCall`. It is never broadcast. The current backend can't target a device, so no push is sent: the streamer is told so, and the person is rung **as soon as they come online** in the room within the ring window. Once the backend supports `POST /notify`, the push is sent with no other changes. Its notification reads *Live Stream Invitation — Host invites you to watch “Title” in Room*.
 
 ## P2P-first strategy
 
@@ -819,6 +838,8 @@ npm run test:pwa               # SW, installability, offline shell, update flow 
 npm run test:diagnostics       # connection path/server on tiles + panel, STUN/TURN tests, offline users,
                                #   DMs (online → Delivered, offline → queued, never /notifyAll), notification click
                                #   (needs the local TURN setup below; TURN_HOST=<LAN-IP>)
+npm run test:room-persistence  # active room reopened on launch, cleared by Leave, switching saves the new room
+npm run test:live-call         # streamer calls someone into a live stream: ringing invite, targeted push, re-ring online
 npm run test:push              # Web Push against the real backend – needs `npx vite --base=/meshcall/ --port 5173`
                                #  (never calls /notifyAll; removes every test subscription afterwards)
 ```

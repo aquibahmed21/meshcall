@@ -3,6 +3,7 @@ import { createLogger } from '../core/logger';
 import type { AppConfig } from '../config';
 import type { IdentityService } from '../services/IdentityService';
 import type { PresenceService } from '../services/PresenceService';
+import type { NotifyResult, PushNotificationService } from '../services/PushNotificationService';
 import { lobbyRoom, type SignalingService } from '../services/SignalingService';
 import type { AudienceMode, LiveStreamInfo, LiveStreamMessage, PayloadOf, SignalingMessage } from '../types/signaling';
 import type { CallState } from '../types/state';
@@ -51,7 +52,17 @@ export interface LiveInvite {
   title: string;
   hostId: string;
   hostName: string;
+  /** The streamer is actively calling (ring + attention), not just adding us to the audience. */
+  ring?: boolean;
 }
+
+/**
+ * Outcome of calling someone into the stream:
+ *  ringing      – online: ringing invitation delivered over signaling
+ *  push         – offline/unknown: targeted push accepted by the push server (not proof of delivery)
+ *  waiting      – offline/unknown and no targeted push available: they are rung as soon as they come online
+ */
+export type LiveCallResult = 'ringing' | 'push' | 'waiting' | 'watching' | 'not-live';
 
 /**
  * Mesh live streaming with audience control.
@@ -79,6 +90,8 @@ export class LiveStreamManager {
   /** Viewer side: the stream we are currently watching (to send joined/left). */
   private watching: { streamId: string; hostId: string } | null = null;
   private lastViewerCount = -1;
+  /** People the streamer called into the stream who have not joined yet → call expiry. */
+  private calling = new Map<string, { until: number; rungOnline: boolean }>();
 
   constructor(
     private readonly calls: CallManager,
@@ -86,6 +99,7 @@ export class LiveStreamManager {
     private readonly identity: IdentityService,
     private readonly presence: PresenceService,
     private readonly config: AppConfig,
+    private readonly push: PushNotificationService,
   ) {}
 
   /** Enter the room: listen for stream signaling of THIS room only. */
@@ -94,7 +108,13 @@ export class LiveStreamManager {
     this.disposer.add(this.signaling.events.on('message', ({ msg }) => this.onMessage(msg)));
     this.disposer.add(this.calls.events.on('state', (s) => this.onCallState(s)));
     this.disposer.add(this.calls.events.on('stats', ({ usage }) => this.onUsage(usage.peers)));
-    this.disposer.add(this.presence.events.on('change', () => this.current && this.emitState()));
+    this.disposer.add(
+      this.presence.events.on('change', () => {
+        if (!this.current) return;
+        this.ringCalledWhenOnline();
+        this.emitState();
+      }),
+    );
     this.disposer.interval(() => this.expire(), 10_000);
     // Viewer closing/reloading the page: tell the streamer right away (frees the upload slot).
     this.disposer.listen(window, 'pagehide', () => {
@@ -109,6 +129,7 @@ export class LiveStreamManager {
     this.announceTimer = null;
     this.current = null;
     this.watching = null;
+    this.calling.clear();
     this.streams.clear();
     this.uploadByViewer.clear();
     this.events.emit('streams', []);
@@ -178,6 +199,58 @@ export class LiveStreamManager {
     }
     this.signaling.broadcast(this.lobby(), 'live-audience-updated', this.info(false), { callId: cur.streamId });
     this.emitState();
+  }
+
+  /**
+   * Call someone into the running stream (streamer only). They are added to the audience if
+   * needed, then:
+   *   online           → ringing invitation over signaling (incoming UI + ringtone on their side)
+   *   offline/unknown  → TARGETED incoming-call push (never broadcast); with no targeted push the
+   *                      call waits and rings them as soon as presence shows them online
+   * The WebRTC/live-stream path is unchanged: they join as a normal viewer.
+   */
+  async callViewer(userId: string): Promise<LiveCallResult> {
+    const cur = this.current;
+    const room = this.signaling.currentRoom;
+    if (!cur?.streamId || userId === this.identity.deviceId) return 'not-live';
+    if (this.connectedViewerIds().includes(userId)) return 'watching';
+    const online = this.presence.status(userId) === 'online';
+    this.calling.set(userId, { until: Date.now() + this.config.timeouts.ringMs, rungOnline: online });
+    if (!this.isAllowed(userId)) this.updateAudience('selected', [...cur.selectedViewerIds, userId]); // → ringing invite
+    else if (online) this.notifyAdded(userId);
+    if (online) {
+      log.info(`Calling ${this.nameOf(userId)} into the stream (ringing)`);
+      return 'ringing';
+    }
+    const result: NotifyResult = room
+      ? await this.push.notifyIncomingCall(userId, {
+          type: 'incoming-call',
+          callId: cur.streamId,
+          roomId: room.roomId,
+          roomName: room.roomName,
+          callerId: this.identity.deviceId,
+          callerName: this.identity.displayName,
+          callType: 'live',
+          title: cur.title,
+          timestamp: Date.now(),
+          expiresAt: Date.now() + this.config.timeouts.ringMs,
+        })
+      : 'failed';
+    log.info(`Calling ${this.nameOf(userId)} into the stream: offline → targeted push ${result}`);
+    return result === 'accepted' ? 'push' : 'waiting';
+  }
+
+  /** Called people who just came online (e.g. opened the push notification) get the ringing invite. */
+  private ringCalledWhenOnline(): void {
+    const now = Date.now();
+    for (const [id, c] of this.calling) {
+      if (now > c.until) this.calling.delete(id);
+      else if (!c.rungOnline && this.presence.status(id) === 'online' && this.isAllowed(id)) {
+        c.rungOnline = true;
+        log.info(`${this.nameOf(id)} is online – ringing the stream invitation`);
+        this.notifyAdded(id);
+      }
+    }
   }
 
   isAllowed(deviceId: string): boolean {
@@ -250,8 +323,9 @@ export class LiveStreamManager {
         if (m.payload.targetUserId !== me) return;
         const known = this.streams.get(m.payload.streamId);
         if (known && known.hostId !== m.senderId) return;
-        log.info(`${m.senderName} added you to "${m.payload.title}"`);
-        this.events.emit('invite', { streamId: m.payload.streamId, title: m.payload.title, hostId: m.senderId, hostName: m.senderName });
+        const ring = m.payload.ring === true;
+        log.info(`${m.senderName} ${ring ? 'is calling you into' : 'added you to'} "${m.payload.title}"`);
+        this.events.emit('invite', { streamId: m.payload.streamId, title: m.payload.title, hostId: m.senderId, hostName: m.senderName, ring });
         break;
       }
       case 'live-viewer-removed': {
@@ -267,7 +341,9 @@ export class LiveStreamManager {
         break;
       }
       case 'live-viewer-joined':
-        if (this.current?.streamId === m.payload.streamId) this.emitState();
+        if (this.current?.streamId !== m.payload.streamId) return;
+        this.calling.delete(m.senderId); // answered
+        this.emitState();
         break;
       case 'live-viewer-left':
         if (this.current?.streamId !== m.payload.streamId) return;
@@ -300,6 +376,7 @@ export class LiveStreamManager {
       if (this.announceTimer) clearInterval(this.announceTimer);
       this.announceTimer = null;
       this.current = null;
+      this.calling.clear();
       this.uploadByViewer.clear();
       this.events.emit('state', null);
       return;
@@ -370,7 +447,9 @@ export class LiveStreamManager {
   private notifyAdded(id: string): void {
     const cur = this.current;
     if (!cur?.streamId) return;
-    this.signaling.send(id, 'live-viewer-added', { streamId: cur.streamId, title: cur.title, targetUserId: id }, { callId: cur.streamId });
+    const c = this.calling.get(id);
+    const ring = !!c && Date.now() <= c.until;
+    this.signaling.send(id, 'live-viewer-added', { streamId: cur.streamId, title: cur.title, targetUserId: id, ring }, { callId: cur.streamId });
   }
 
   private info(heartbeat: boolean): PayloadOf<'live-started'> {

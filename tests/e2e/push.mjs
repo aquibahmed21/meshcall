@@ -63,7 +63,14 @@ async function onboard(page, name, room) {
   if (room) await enterRoom(page, room);
 }
 async function enterRoom(page, room) {
-  await page.waitForSelector('#room-name', { timeout: 20_000 });
+  // Reload/relaunch reopens the last active room automatically – nothing to enter then.
+  const want = typeof room === 'string' ? room.replace(/\s+/g, ' ').trim() : undefined;
+  await page.waitForFunction(
+    (r) => (!!r && window.__voip?.app.rooms.current?.roomName === r && window.__voip.app.signaling.status === 'connected') || !!document.querySelector('#room-name:not([disabled])'),
+    want,
+    { timeout: 30_000 },
+  );
+  if (want && (await page.evaluate((r) => window.__voip?.app.rooms.current?.roomName === r, want))) return;
   if (room) await page.fill('#room-name', room);
   await page.click('.room-screen button[type=submit]');
   await page.waitForSelector('.room-chip strong', { timeout: 30_000 });

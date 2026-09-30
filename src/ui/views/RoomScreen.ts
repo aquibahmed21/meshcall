@@ -1,3 +1,4 @@
+import { logo } from '../icons';
 import { MAX_ROOM_NAME_LENGTH, validateRoomName, type RoomContext } from '../../services/RoomService';
 import { h } from '../dom';
 
@@ -9,6 +10,8 @@ export interface RoomScreenOptions {
   info?: string;
   recent: string[];
   onJoin: (room: RoomContext) => Promise<void>;
+  /** Join the prefilled room right away (restoring the room that was active last time). */
+  autoJoin?: boolean;
 }
 
 /**
@@ -70,7 +73,7 @@ export function renderRoomScreen(root: HTMLElement, opts: RoomScreenOptions): vo
   const form = h(
     'form',
     { class: 'onboarding card room-screen', novalidate: true },
-    h('div', { class: 'brand-mark big' }, '◉'),
+    h('div', { class: 'brand-mark big', html: logo }),
     h('h1', {}, 'MeshCall'),
     h('h2', {}, 'Join a Room'),
     h('p', { class: 'hint' }, `Signed in as ${opts.userName}. People only see and call others in the same room.`),
@@ -106,5 +109,6 @@ export function renderRoomScreen(root: HTMLElement, opts: RoomScreenOptions): vo
   });
   root.replaceChildren(h('div', { class: 'onboarding-wrap' }, form));
   validate();
-  input.focus();
+  if (opts.autoJoin && validate().ok) form.requestSubmit();
+  else input.focus();
 }

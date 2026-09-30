@@ -7,7 +7,14 @@ import { chromium } from 'playwright-core';
 const ROOM = process.env.E2E_ROOM || `e2e-${Date.now().toString(36)}`;
 /** Every page load asks for a room – enter the shared test room. */
 async function enterRoom(page, room = ROOM) {
-  await page.waitForSelector('#room-name', { timeout: 30_000 });
+  // Reload/relaunch reopens the last active room automatically – nothing to enter then.
+  const want = typeof room === 'string' ? room.replace(/\s+/g, ' ').trim() : undefined;
+  await page.waitForFunction(
+    (r) => (!!r && window.__voip?.app.rooms.current?.roomName === r && window.__voip.app.signaling.status === 'connected') || !!document.querySelector('#room-name:not([disabled])'),
+    want,
+    { timeout: 30_000 },
+  );
+  if (want && (await page.evaluate((r) => window.__voip?.app.rooms.current?.roomName === r, want))) return;
   await page.fill('#room-name', room);
   await page.click('.room-screen button[type=submit]');
   await page.waitForFunction(() => !!window.__voip?.app.rooms.current && window.__voip.app.signaling.status === 'connected', null, { timeout: 30_000 });

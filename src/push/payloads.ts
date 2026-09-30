@@ -11,7 +11,9 @@ export interface IncomingCallPush {
   roomName: string;
   callerId: string;
   callerName: string;
-  callType: 'audio' | 'video' | 'group';
+  callType: 'audio' | 'video' | 'group' | 'live';
+  /** Live stream title (callType 'live'). */
+  title?: string;
   timestamp: number;
   /** Absolute expiry (caller clock) – after this the Service Worker shows "Missed call". */
   expiresAt: number;
@@ -52,7 +54,7 @@ export function isIncomingCallPush(v: unknown): v is IncomingCallPush {
     typeof p.callId === 'string' &&
     typeof p.roomName === 'string' &&
     typeof p.callerName === 'string' &&
-    (p.callType === 'audio' || p.callType === 'video' || p.callType === 'group')
+    (p.callType === 'audio' || p.callType === 'video' || p.callType === 'group' || p.callType === 'live')
   );
 }
 
