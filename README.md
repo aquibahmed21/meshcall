@@ -507,24 +507,32 @@ MeshCall uses the **existing push backend `https://web-push-3zaz.onrender.com`**
 - **Permission is only requested from a click:** Settings → Notifications → **Incoming calls** switch, or the idle-screen **Enable Notifications** card. When the browser has denied it, the app shows per-browser unblock instructions and never re-prompts.
 - **States:** Enabled / Disabled / Connecting / Blocked by browser / Unavailable (with the reason). They appear in Settings and in Diagnostics → Push Notifications. The diagnostics show support, permission, SW state, the subscription and server confirmation, a redacted endpoint, the server URL, the last registration, and targeting capability. Subscription keys are never shown or logged.
 
-### Incoming calls: backend limitation (important)
+### Targeted delivery (calls, private messages)
 
-> **The current push backend supports subscription registration but does not provide per-user notification targeting.** It stores bare subscriptions (no `deviceId`/user) and can only broadcast (`/notifyAll`).
-
-Because a call must never be broadcast to every subscriber:
-
-- `notifyIncomingCall(targetDeviceId, payload)` goes through `PushBackend.notifyDevice`, which the current backend does not support. It returns `'unsupported'`, and **nothing is sent**; the e2e test asserts no `/notifyAll` request is made.
-- **Consequence:** a *closed* MeshCall cannot yet be woken for an incoming call. The caller falls back to the existing behaviour ("appears to be offline" after 8 s).
-- **What works today:**
-  - **Tab in the background, or not focused:** the app shows a local system notification through the Service Worker, with *Open MeshCall* and *Decline*. No backend is needed.
-  - **App visible:** only the in-app Accept/Reject dialog is shown, with no duplicate notification.
-- **Backend change needed for closed-app calls:** see below. Once the backend has it, only a new adapter with `targetedDelivery: true` is required, not changes in calls or UI:
+The backend (`aquibahmed21/web-push`) was extended with targeted delivery:
 
 ```text
-POST /subscribe  { subscription, deviceId }            ← associate subscription with the MeshCall device
-POST /notify     { targetDeviceId, payload }           ← deliver to that device only (authenticated)
-payload = { type:'incoming-call', callId, roomId, roomName, callerId, callerName, callType, timestamp, expiresAt }
+POST /subscribe  { ...PushSubscription.toJSON(), deviceId }     subscription + this MeshCall device id
+                                                                (re-registering a known endpoint attaches/updates the id)
+POST /notify     { targetDeviceId, title, body, data, ttl }     push ONLY to that device's subscriptions
+                 → 200 {successes, failures} | 404 {error} no subscription for the device
+payload delivered = { title, body, data }   data = incoming-call | chat-message payload (see src/push/payloads.ts)
 ```
+
+- **Senders:**
+  - An **incoming call** to someone who is not online sends `POST /notify`. This includes direct calls, group invites and live-stream invitations.
+  - A **private message** to an offline user sends `POST /notify` too.
+  - The caller does not need push enabled; only the recipient does.
+  - `/notifyAll` is never used for calls or messages.
+- **Results:**
+  - `accepted`: the push server took it, which is not proof of delivery.
+  - `not-subscribed` (404 JSON): the recipient never enabled notifications. The call ends with *"X is offline and hasn't enabled call notifications"*, and a message stays queued.
+  - `unsupported`: an HTML 404 means a server without `/notify`.
+- **Existing subscriptions** get their `deviceId` attached automatically: the app re-registers idempotently on every start.
+- **Known backend limitations** (not changed here):
+  - `/notify` is unauthenticated, so anyone who knows a device id can send it a notification. Add auth, for example a signed token, and rate limiting before wider use.
+  - Subscriptions live in `notifications.json` on Render's ephemeral disk, and are lost on restart or redeploy until each device opens MeshCall again. Use a persistent store.
+  - The VAPID **private** key is committed in `notifications.json`. Move the keys to environment variables. Rotating them invalidates every subscription.
 
 ### Service Worker (`public/sw.js`)
 

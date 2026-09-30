@@ -103,8 +103,8 @@ export class ConversationDrawer {
     const offline = status !== 'online';
     this.banner.hidden = !offline;
     this.banner.textContent = offline
-      ? this.app.push.canSendToUsers && user?.pushEnabled
-        ? `${name} is offline. Messages are sent as push notifications.`
+      ? this.app.push.canSendToUsers
+        ? `${name} is offline. They get a notification if they have enabled notifications; the message itself is delivered when ${name} comes online.`
         : `${name} is offline. Push delivery is unavailable (the push server cannot notify one specific person), so messages wait on this device and are delivered when ${name} comes online.`
       : '';
     const sig = conv.messages.map((m) => `${m.messageId}:${m.status ?? ''}`).join(',') + this.highlight;

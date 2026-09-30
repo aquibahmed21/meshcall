@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { uint8ArrayToUrlBase64, urlBase64ToUint8Array } from '../../src/push/base64url';
 import { isCallLaunchContext, isIncomingCallPush } from '../../src/push/payloads';
-import { PushBackendError, PushUnsupportedError, WebPushServerBackend } from '../../src/push/PushBackend';
+import { PushBackendError, WebPushServerBackend } from '../../src/push/PushBackend';
 
 const URL = 'https://push.example';
 const KEY = 'BC_wKpFJExx0VHEtHsO6Eu2kYBONetj7erkZ2AH1yheGsGpMhZJcxy1uJcHOVTQ8oYTEYwSgaGDlY0c6tc96f2Y';
@@ -88,12 +88,36 @@ describe('WebPushServerBackend – existing API contract', () => {
     await expect(new WebPushServerBackend(URL).isRegistered('e')).rejects.toBeInstanceOf(PushBackendError);
   });
 
-  it('has NO targeted delivery – notifyDevice refuses and never falls back to /notifyAll', async () => {
-    const calls = mockFetch(() => ({ status: 200, body: {} }));
+  it('targeted delivery: POST /notify for ONE device, never /notifyAll', async () => {
+    const calls = mockFetch(() => ({ status: 200, body: { successes: 1, failures: 0 } }));
     const b = new WebPushServerBackend(URL);
-    expect(b.capabilities.targetedDelivery).toBe(false);
-    await expect(b.notifyDevice()).rejects.toBeInstanceOf(PushUnsupportedError);
-    expect(calls).toHaveLength(0);
+    expect(b.capabilities.targetedDelivery).toBe(true);
+    const data = { type: 'incoming-call', callId: 'c', roomId: 'r', roomName: 'R', callerId: 'a', callerName: 'A', callType: 'audio', timestamp: 1, expiresAt: 2 } as const;
+    await b.notifyDevice('device-bob-1234', { title: 't', body: 'b', data });
+    expect(calls).toEqual([{ url: `${URL}/notify`, method: 'POST', body: { targetDeviceId: 'device-bob-1234', title: 't', body: 'b', data, ttl: 60 } }]);
+  });
+
+  it('404 from /notify → PushNotSubscribedError (recipient never enabled push)', async () => {
+    mockFetch(() => ({ status: 404, body: { error: 'No push subscription for this device' } }));
+    const { PushNotSubscribedError } = await import('../../src/push/PushBackend');
+    await expect(
+      new WebPushServerBackend(URL).notifyDevice('device-x-12345', { title: 't', body: 'b', data: { type: 'chat-message', messageId: 'm', senderId: 's', senderName: 'S', text: 'hi', roomId: 'r', roomName: 'R', timestamp: 1 } }),
+    ).rejects.toBeInstanceOf(PushNotSubscribedError);
+  });
+
+  it('a server without /notify (HTML 404) → PushUnsupportedError, not "not subscribed"', async () => {
+    vi.stubGlobal('fetch', async () => new Response('<pre>Cannot POST /notify</pre>', { status: 404 }));
+    const { PushUnsupportedError } = await import('../../src/push/PushBackend');
+    await expect(
+      new WebPushServerBackend(URL).notifyDevice('device-x-12345', { title: 't', body: 'b', data: { type: 'chat-message', messageId: 'm', senderId: 's', senderName: 'S', text: 'hi', roomId: 'r', roomName: 'R', timestamp: 1 } }),
+    ).rejects.toBeInstanceOf(PushUnsupportedError);
+  });
+
+  it('register sends the subscription unchanged plus this deviceId', async () => {
+    const calls = mockFetch(() => ({ status: 201, body: {} }));
+    const sub = { endpoint: 'https://push.example/x', keys: { p256dh: 'p', auth: 'a' } };
+    expect(await new WebPushServerBackend(URL).register(sub, 'device-me-12345')).toBe('created');
+    expect(calls[0]!.body).toEqual({ ...sub, deviceId: 'device-me-12345' });
   });
 });
 
@@ -102,15 +126,22 @@ describe('PushNotificationService', async () => {
   const { PushNotificationService, redactEndpoint } = await import('../../src/services/PushNotificationService');
   const { CONFIG } = await import('../../src/config');
 
-  it('incoming-call push is "unsupported" with the broadcast-only backend and sends nothing', async () => {
-    const calls = mockFetch(() => ({ status: 200, body: {} }));
-    const svc = new PushNotificationService({ ...CONFIG, push: { serverUrl: URL, vapidPublicKey: '' } });
-    const r = await svc.notifyIncomingCall('bob', {
+  it('incoming-call push goes to /notify for that device only (caller needs no subscription)', async () => {
+    const calls = mockFetch(() => ({ status: 200, body: { successes: 1, failures: 0 } }));
+    const svc = new PushNotificationService({ ...CONFIG, push: { serverUrl: URL, vapidPublicKey: '' } }, 'device-me-12345');
+    const r = await svc.notifyIncomingCall('device-bob-1234', {
       type: 'incoming-call', callId: 'c', roomId: 'r', roomName: 'R', callerId: 'a', callerName: 'A', callType: 'audio', timestamp: 1, expiresAt: 2,
     });
-    expect(r).toBe('unsupported');
-    expect(svc.canTarget).toBe(false);
-    expect(calls).toHaveLength(0); // in particular: no POST /notifyAll
+    expect(r).toBe('accepted');
+    expect(svc.canSendToUsers).toBe(true);
+    expect(svc.canTarget).toBe(false); // THIS device is not subscribed – irrelevant for sending
+    expect(calls.map((c) => c.url)).toEqual([`${URL}/notify`]); // in particular: no /notifyAll
+  });
+
+  it('recipient without a subscription → "not-subscribed"', async () => {
+    mockFetch(() => ({ status: 404, body: { error: 'No push subscription for this device' } }));
+    const svc = new PushNotificationService({ ...CONFIG, push: { serverUrl: URL, vapidPublicKey: '' } });
+    expect(await svc.notifyIncomingCall('device-bob-1234', { type: 'incoming-call', callId: 'c', roomId: 'r', roomName: 'R', callerId: 'a', callerName: 'A', callType: 'video', timestamp: 1, expiresAt: 2 })).toBe('not-subscribed');
   });
 
   it('defaults to the existing push server', () => {

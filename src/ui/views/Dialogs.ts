@@ -389,7 +389,7 @@ export function openOfflineCallDialog(app: AppContext, userId: string, media: Me
   const user = app.presence.get(userId);
   const name = user?.name ?? app.presence.nameOf(userId);
   const status = user?.status ?? 'unknown';
-  const canPush = app.push.canSendToUsers && !!user?.pushEnabled;
+  const canPush = app.push.canSendToUsers;
   const m = new Modal(`Call ${name}`);
   const what = status === 'unknown' || status === 'connecting' ? `${name}'s status is unknown right now` : `${name} is currently offline`;
   m.setContent(
@@ -397,7 +397,7 @@ export function openOfflineCallDialog(app: AppContext, userId: string, media: Me
       h('div', { class: 'avatar big', style: `--avatar:${colorFor(userId)}` }, initials(name)),
       h('p', { class: 'incoming-text' }, `${what}.`),
       canPush
-        ? h('p', {}, 'They may receive a push notification for this call if their notifications are enabled.')
+        ? h('p', {}, `${name} gets a call notification on their device${user?.pushEnabled ? '' : ' if they have enabled notifications'}.`)
         : h(
             'p',
             { class: 'notice' },

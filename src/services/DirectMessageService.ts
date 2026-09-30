@@ -54,8 +54,10 @@ export type DmSendResult = 'ok' | 'empty' | 'too-long' | 'no-room';
 export function offlineExplanation(result: NotifyResult, name: string): string {
   if (result === 'unsupported')
     return `${name} is offline. Push delivery is unavailable (the push server cannot notify one specific person), so the message is queued on this device and delivered when ${name} comes online.`;
+  if (result === 'not-subscribed')
+    return `${name} is offline and hasn't enabled notifications. The message is queued on this device and delivered when ${name} comes online.`;
   if (result === 'failed') return `${name} is offline and the push request failed. The message is queued on this device and delivered when ${name} comes online.`;
-  return `${name} is offline. The push server accepted a notification request – that does not guarantee delivery.`;
+  return `${name} is offline – notification sent (the push server accepted it; that does not guarantee delivery). The message is delivered when ${name} comes online.`;
 }
 
 /**

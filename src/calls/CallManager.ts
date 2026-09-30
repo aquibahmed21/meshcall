@@ -1,3 +1,4 @@
+import type { NotifyResult } from '../services/PushNotificationService';
 import { BoundedSet, Timer } from '../core/async';
 import { Disposer, Emitter } from '../core/emitter';
 import { uuid } from '../core/ids';
@@ -77,6 +78,8 @@ export class CallManager {
   /** Opened from a call notification: the call we expect an invite for (NOT auto-accepted). */
   private expected: { callId: string; callerName?: string; timer: ReturnType<typeof setTimeout> } | null = null;
   private pushSent = false;
+  /** Outcome of the last call notification for the current outgoing call. */
+  private pushResult: NotifyResult | undefined;
   private inviteAcked = false;
   private seenInvites = new BoundedSet<string>(200);
   private ringtone = new Ringtone();
@@ -174,6 +177,7 @@ export class CallManager {
 
     this.inviteAcked = false;
     this.pushSent = false;
+    this.pushResult = undefined;
     this.calleeOnline = user?.status === 'online';
     this.sendInvite(userId, 'direct');
     this.ringtone.start('outgoing');
@@ -183,11 +187,14 @@ export class CallManager {
     if (user?.status !== 'online') void this.sendPush(userId);
     this.noAckTimer.start(config.timeouts.offlineNoAckMs, () => {
       if (this.call?.callId !== callId || this.call.status !== 'calling' || this.inviteAcked) return;
-      if (this.pushSent || this.d.push.canTarget) {
-        if (!this.pushSent) void this.sendPush(userId);
-        this.setStatus('calling', `${name} is offline – sent a notification`);
+      if (this.pushSent) {
+        this.setStatus('calling', `${name} is offline – sent a call notification`);
+      } else if (this.pushResult === undefined && this.d.push.canSendToUsers) {
+        // Looked online but did not answer the invite → try a push now and keep ringing.
+        void this.sendPush(userId);
+        this.setStatus('calling', `${name} is not responding – sending a call notification`);
       } else {
-        this.finish('failed', `${name} appears to be offline`);
+        this.finish('failed', this.pushResult === 'not-subscribed' ? `${name} is offline and hasn't enabled call notifications` : `${name} appears to be offline`);
       }
     });
     this.ringTimer.start(config.timeouts.ringMs, () => {
@@ -266,7 +273,7 @@ export class CallManager {
     entry.timers.push(
       setTimeout(() => {
         if (this.pendingInvites.get(userId) !== entry || entry.acked) return;
-        if (!this.d.push.canTarget) {
+        if (!this.d.push.canSendToUsers) {
           this.toast('warn', `${name} appears to be offline`);
           this.clearPendingInvite(userId);
         }
@@ -911,13 +918,13 @@ export class CallManager {
   }
 
   /**
-   * Wake an offline callee through Web Push – ONLY via targeted delivery. With a broadcast-only
-   * backend this is a no-op ('unsupported'); a call is never broadcast to all subscribers.
+   * Wake an offline callee through Web Push – ONLY via targeted delivery (POST /notify for that
+   * device); a call is never broadcast to all subscribers. The CALLER does not need push enabled.
    */
   private async sendPush(userId: string): Promise<void> {
     const c = this.call;
     const room = this.d.signaling.currentRoom;
-    if (!c || !room || !this.d.push.canTarget) return;
+    if (!c || !room || !this.d.push.canSendToUsers) return;
     this.pushSent = true;
     const result = await this.d.push.notifyIncomingCall(userId, {
       type: 'incoming-call',
@@ -930,7 +937,10 @@ export class CallManager {
       timestamp: Date.now(),
       expiresAt: Date.now() + this.d.config.timeouts.ringMs,
     });
+    if (this.call?.callId !== c.callId) return;
+    this.pushResult = result;
     if (result !== 'accepted') this.pushSent = false;
+    log.info(`Call notification to ${this.d.presence.nameOf(userId)}: ${result}`);
   }
 
 

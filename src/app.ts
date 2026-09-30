@@ -56,7 +56,7 @@ export function createApp(): AppContext {
   const devices = new DeviceManager(settings, media);
   const webrtc = new WebRTCManager(config, settings);
   const notifications = new NotificationService();
-  const push = new PushNotificationService(config);
+  const push = new PushNotificationService(config, identity.deviceId);
   const calls = new CallManager({ identity, signaling, presence, media, settings, webrtc, network, notifications, push, config });
   const groups = new GroupCallManager(calls, identity);
   const live = new LiveStreamManager(calls, signaling, identity, presence, config, push);

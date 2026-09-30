@@ -4,7 +4,7 @@ import { storage } from '../core/storage';
 import type { AppConfig } from '../config';
 import { uint8ArrayToUrlBase64, urlBase64ToUint8Array } from '../push/base64url';
 import type { ChatMessagePush, IncomingCallPush, TargetedPushPayload } from '../push/payloads';
-import { PushUnsupportedError, WebPushServerBackend, type PushBackend } from '../push/PushBackend';
+import { PushNotSubscribedError, PushUnsupportedError, WebPushServerBackend, type PushBackend } from '../push/PushBackend';
 import { PwaService } from './PwaService';
 
 const log = createLogger('Push');
@@ -50,7 +50,13 @@ export const PUSH_STATUS_LABEL: Record<PushStatus, string> = {
  * 'unsupported' – the backend cannot target a single device → nothing was sent
  * 'failed'      – the request failed
  */
-export type NotifyResult = 'accepted' | 'unsupported' | 'failed';
+/**
+ *  accepted       – the push server accepted it for the recipient's device(s) (not proof of delivery)
+ *  not-subscribed – the recipient never enabled notifications, so there is nothing to push to
+ *  unsupported    – the backend cannot target one device
+ *  failed         – network/server error
+ */
+export type NotifyResult = 'accepted' | 'not-subscribed' | 'unsupported' | 'failed';
 
 export interface PushDiagnostics {
   browserSupport: boolean;
@@ -95,7 +101,11 @@ export class PushNotificationService {
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private retryAttempt = 0;
 
-  constructor(config: AppConfig) {
+  constructor(
+    config: AppConfig,
+    /** This device's MeshCall id – lets the server deliver pushes to this device only. */
+    private readonly deviceId?: string,
+  ) {
     this.backend = config.push.serverUrl ? new WebPushServerBackend(config.push.serverUrl) : null;
     this.vapidKey = config.push.vapidPublicKey || null;
     this.configuredKey = !!config.push.vapidPublicKey;
@@ -105,7 +115,7 @@ export class PushNotificationService {
     return this._status;
   }
 
-  /** Whether an incoming call can be pushed to ONE specific device (false for the current backend). */
+  /** Whether THIS device can be reached by a targeted push (backend targeting + our subscription). */
   get canTarget(): boolean {
     return !!this.backend?.capabilities.targetedDelivery && this._status === 'enabled';
   }
@@ -148,10 +158,11 @@ export class PushNotificationService {
           await sub.unsubscribe().catch(() => undefined);
           sub = await this.createSubscription();
         }
-        this.serverVerified = await this.backend.isRegistered(sub.endpoint);
-        if (!this.serverVerified) {
-          await this.backend.register(sub.toJSON());
-          this.serverVerified = true;
+        // Idempotent: re-registers a subscription the server lost and (re)attaches this device's
+        // id, so subscriptions created before targeted delivery existed become reachable too.
+        const result = await this.backend.register(sub.toJSON(), this.deviceId);
+        this.serverVerified = true;
+        if (result === 'created') {
           this.markRegistered();
           log.info('Push subscription re-registered with the server');
         }
@@ -225,7 +236,7 @@ export class PushNotificationService {
           sub = null;
         }
         sub ??= await this.createSubscription();
-        const result = await this.backend.register(sub.toJSON());
+        const result = await this.backend.register(sub.toJSON(), this.deviceId);
         this.serverVerified = true;
         this.markRegistered();
         storage.set(PREF_KEY, true);
@@ -285,7 +296,7 @@ export class PushNotificationService {
 
   /**
    * Send a notification to ONE user/device. This is the only path for calls and private messages;
-   * it never falls back to /notifyAll. With the current backend it returns 'unsupported'.
+   * it never falls back to /notifyAll.
    */
   async sendToUser(targetDeviceId: string, notification: { title: string; body: string; data: TargetedPushPayload }): Promise<NotifyResult> {
     if (!this.backend?.capabilities.targetedDelivery) return 'unsupported';
@@ -294,6 +305,7 @@ export class PushNotificationService {
       return 'accepted';
     } catch (err) {
       if (err instanceof PushUnsupportedError) return 'unsupported';
+      if (err instanceof PushNotSubscribedError) return 'not-subscribed';
       log.warn('Targeted push failed', errorMessage(err));
       return 'failed';
     }

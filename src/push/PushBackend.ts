@@ -14,8 +14,8 @@ export interface PushBackend {
     broadcast: boolean;
   };
   getVapidPublicKey(): Promise<string>;
-  /** Register the browser-generated subscription (sent exactly as PushSubscription.toJSON()). */
-  register(subscription: PushSubscriptionJSON): Promise<'created' | 'exists'>;
+  /** Register the browser-generated subscription (PushSubscription.toJSON()) for this device. */
+  register(subscription: PushSubscriptionJSON, deviceId?: string): Promise<'created' | 'exists'>;
   unregister(endpoint: string): Promise<'removed' | 'not-found'>;
   isRegistered(endpoint: string): Promise<boolean>;
   /**
@@ -37,6 +37,14 @@ export class PushBackendError extends Error {
   }
 }
 
+/** The target device has no push subscription on the server (never enabled notifications). */
+export class PushNotSubscribedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'PushNotSubscribedError';
+  }
+}
+
 export class PushUnsupportedError extends Error {
   constructor(message: string) {
     super(message);
@@ -49,16 +57,17 @@ const TIMEOUT_MS = 15_000; // Render free instances cold-start slowly
 /**
  * The existing backend (https://web-push-3zaz.onrender.com):
  *   GET  /vapid              → { publicKey }
- *   POST /subscribe          ← PushSubscription JSON            → 201 created | 200 already
+ *   POST /subscribe          ← PushSubscription JSON + deviceId → 201 created | 200 already (deviceId updated)
  *   POST /unsubscribe        ← { endpoint }                     → 200 | 404
  *   POST /isPushSubscribed   ← { endpoint }                     → { isSubscribed }
- *   POST /notifyAll          ← { title, body, initiator? }      → broadcast to ALL subscribers
+ *   POST /notify             ← { targetDeviceId, title, body, data, ttl } → push to THAT device only
+ *                                                               → 200 | 404 no subscription for the device
+ *   POST /notifyAll          ← { title, body, initiator? }      → broadcast to ALL subscribers (dev test only)
  *
- * It stores subscriptions without any user/device association and has no targeted send, so
- * `targetedDelivery` is false: incoming calls are NOT pushed (never broadcast a call).
+ * Calls and private messages only ever use /notify (targeted); they are never broadcast.
  */
 export class WebPushServerBackend implements PushBackend {
-  readonly capabilities = { targetedDelivery: false, broadcast: true } as const;
+  readonly capabilities = { targetedDelivery: true, broadcast: true } as const;
 
   constructor(readonly url: string) {}
 
@@ -68,8 +77,8 @@ export class WebPushServerBackend implements PushBackend {
     return body.publicKey;
   }
 
-  async register(subscription: PushSubscriptionJSON): Promise<'created' | 'exists'> {
-    const { status } = await this.requestRaw('POST', '/subscribe', subscription);
+  async register(subscription: PushSubscriptionJSON, deviceId?: string): Promise<'created' | 'exists'> {
+    const { status } = await this.requestRaw('POST', '/subscribe', deviceId ? { ...subscription, deviceId } : subscription);
     return status === 201 ? 'created' : 'exists';
   }
 
@@ -83,8 +92,15 @@ export class WebPushServerBackend implements PushBackend {
     return body.isSubscribed === true;
   }
 
-  async notifyDevice(): Promise<void> {
-    throw new PushUnsupportedError('The push server has no per-device endpoint (only /notifyAll) – targeted call notifications are unavailable');
+  async notifyDevice(targetDeviceId: string, notification: { title: string; body: string; data: TargetedPushPayload }): Promise<void> {
+    // Calls ring for a short while only; a message notification stays useful for longer.
+    const ttl = notification.data.type === 'chat-message' ? 3600 : 60;
+    const { status, json } = await this.requestRaw('POST', '/notify', { targetDeviceId, ...notification, ttl }, [404]);
+    if (status === 404) {
+      // JSON error = the device has no subscription; any other 404 = a server without /notify.
+      if ((json as { error?: unknown } | null)?.error) throw new PushNotSubscribedError('The recipient has not enabled notifications on any device');
+      throw new PushUnsupportedError('This push server has no POST /notify endpoint (targeted delivery not deployed)');
+    }
   }
 
   async notifyAll(title: string, body: string): Promise<{ successes: number; failures: number }> {
