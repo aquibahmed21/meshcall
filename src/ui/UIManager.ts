@@ -364,6 +364,7 @@ export class UIManager {
     }
     if (c && c.callId !== this.lastCallId && showCall) {
       this.lastCallId = c.callId;
+      this.drawer.close(); // the conversation page would cover the call screen
       this.setView('call');
     }
     if (!c) {

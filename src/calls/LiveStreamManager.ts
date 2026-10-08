@@ -397,7 +397,7 @@ export class LiveStreamManager {
 
   /** Everyone the streamer could pick from: room users + anyone currently connected. */
   private audienceUniverse(): string[] {
-    const ids = new Set(this.presence.list().filter((u) => u.status === 'online').map((u) => u.deviceId));
+    const ids = new Set(this.presence.contacts().filter((u) => u.status === 'online').map((u) => u.deviceId));
     for (const id of this.connectedViewerIds()) ids.add(id);
     for (const id of this.current?.selectedViewerIds ?? []) ids.add(id);
     ids.delete(this.identity.deviceId);

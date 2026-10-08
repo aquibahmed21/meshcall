@@ -189,7 +189,7 @@ export function openIncomingCall(app: AppContext, call: CallState): Modal {
 
 export function openGroupCall(app: AppContext): Modal {
   const m = new Modal('New group call');
-  const users = app.presence.list();
+  const users = app.presence.contacts();
   const chosen = new Set<string>();
   let media: MediaKind = 'video';
   const name = h('input', { type: 'text', placeholder: 'Group name (optional)', maxlength: 40 });
@@ -232,7 +232,7 @@ export function openAddParticipants(app: AppContext): Modal {
   const c = app.calls.state;
   const m = new Modal(c?.kind === 'direct' ? 'Add participants' : 'Add to call');
   const inCall = new Set([...(c?.participants.keys() ?? []), ...app.calls.pendingInviteIds]);
-  const users = app.presence.list().filter((u) => !inCall.has(u.deviceId));
+  const users = app.presence.contacts().filter((u) => !inCall.has(u.deviceId));
   const chosen = new Set<string>();
   const add = h('button', { class: 'btn primary', disabled: true }, 'Add to Call');
   const max = app.config.mesh.maxParticipants - 1 - (c?.participants.size ?? 0) - app.calls.pendingInviteIds.length;
@@ -278,7 +278,7 @@ export function openAddParticipants(app: AppContext): Modal {
 /** Everyone / Selected members + room-user checklist (Go live & Manage audience). */
 function audiencePicker(app: AppContext, mode: AudienceMode, selected: Set<string>, onChange: () => void) {
   const state = { mode, ids: new Set(selected) };
-  const users = app.presence.list();
+  const users = app.presence.contacts();
   const list = h(
     'ul',
     { class: 'pick-list audience-pick' },

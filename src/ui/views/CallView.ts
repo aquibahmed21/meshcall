@@ -210,9 +210,31 @@ export class CallView {
         // This browser has no automatic PiP action – Safari's attribute (below) may still apply.
       }
     }
-    // Back in the app: close a popup we opened automatically (a user-opened PiP stays).
+    if (session) {
+      try {
+        session.metadata = new MediaMetadata({ title: 'MeshCall', artist: this.app.calls.state?.remoteUser?.name ?? this.app.calls.state?.title ?? 'Call' });
+        session.playbackState = 'playing';
+        this.disposer.add(() => {
+          session.metadata = null;
+          session.playbackState = 'none';
+        });
+      } catch {
+        /* metadata unsupported */
+      }
+    }
     this.disposer.listen(document, 'visibilitychange', () => {
-      if (document.visibilityState !== 'visible' || !this.autoPip) return;
+      if (document.visibilityState === 'hidden') {
+        // Fallback where the media-session action does not exist: some browsers still allow
+        // PiP while the page is being hidden (others reject it – harmless).
+        const c = this.app.calls.state;
+        const video = this.pipCandidate();
+        if (c && !isTerminal(c.status) && video && this.viewModes.snapshot.pip !== 'active') {
+          void this.viewModes.enterPip(video).then((ok) => ok && (this.autoPip = true));
+        }
+        return;
+      }
+      // Back in the app: close a popup we opened automatically (a user-opened PiP stays).
+      if (!this.autoPip) return;
       this.autoPip = false;
       if (this.viewModes.snapshot.pip === 'active') void this.viewModes.exitPip();
     });
