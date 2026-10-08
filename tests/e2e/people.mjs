@@ -47,13 +47,23 @@ try {
   await ann.page.keyboard.press('Escape');
 
   // People pane: no heading, search only on demand
-  check('People: no "People" heading, no search field until tapped', !(await visible(ann, '#people h2')) && !(await visible(ann, '.search-row')));
+  check('People: no "People" heading, no search field until tapped', !(await visible(ann, '#people h2')) && !(await visible(ann, '.search-box.open')));
   await ann.page.click('.list-toolbar button[aria-label="Search contacts"]');
-  await ann.page.fill('.search-row input', 'car');
+  await ann.page.waitForTimeout(350); // expand animation
+  await ann.page.keyboard.type('car'); // the field is focused right away
   const names = await ev(ann, () => [...document.querySelectorAll('li.user .user-name')].map((n) => n.textContent));
-  check('Search icon → field appears and filters', (await visible(ann, '.search-row')) && names.join() === 'Cara', names.join());
-  await ann.page.click('.search-row button[aria-label="Close search"]');
-  check('Closing search hides it and clears the filter', !(await visible(ann, '.search-row')) && (await ev(ann, () => document.querySelectorAll('li.user').length)) === 2);
+  const sameRow = await ev(ann, () => document.querySelector('.search-box').parentElement === document.querySelector('.list-toolbar'));
+  check('Search icon expands into the field in the same row and filters', (await visible(ann, '.search-box.open')) && sameRow && names.join() === 'Cara', names.join());
+  await ann.page.click('.search-box .search-close');
+  check('Closing search collapses it and clears the filter', !(await visible(ann, '.search-box.open')) && (await ev(ann, () => document.querySelectorAll('li.user').length)) === 2);
+  const dots = await ev(ann, () => [...document.querySelectorAll('li.user .status-dot')].map((d) => d.className));
+  check('Contact rows show a status dot on the right (no "Online" text)', dots.length === 2 && dots.every((d) => /online/.test(d)) && !(await ev(ann, () => /Online/.test(document.querySelector('.user-list').textContent))), dots.join(','));
+  await ann.page.click('.bottom-nav button[data-view=live]');
+  check('Live tab has a direct Go live button', await visible(ann, '#live .go-live-btn'));
+  await ann.page.click('#live .go-live-btn');
+  check('…which opens Go live', await ann.page.waitForSelector('dialog[open]', { timeout: 5000 }).then(() => ann.page.textContent('dialog[open]').then((t) => /live/i.test(t)), () => false));
+  await ann.page.keyboard.press('Escape');
+  await ann.page.click('.bottom-nav button[data-view=people]');
 
   // Live now only under Live
   check('Live now is not on the People tab', !(await visible(ann, '#live')));

@@ -1,3 +1,4 @@
+import { confirmDialog } from './ui/views/ConfirmDialog';
 import './styles/main.css';
 import { createApp, joinRoom, leaveRoom, startApp } from './app';
 import { CONFIG } from './config';
@@ -107,8 +108,8 @@ async function boot(): Promise<void> {
     if (!current || !ui) return go();
     ui.toast('info', ctx.kind === 'incoming-call' ? `${who} is calling you in room “${target.room.roomName}”` : `New message from ${who} in room “${target.room.roomName}”`, {
       label: 'Switch room',
-      run: () => {
-        if (app.calls.inCall && !confirm('Switching rooms ends your current call. Switch anyway?')) return;
+      run: async () => {
+        if (app.calls.inCall && !(await confirmDialog({ title: 'Switch room?', message: 'This ends your current call.', confirmLabel: 'Switch', danger: true }))) return;
         go();
       },
     });

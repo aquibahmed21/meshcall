@@ -1,3 +1,4 @@
+import { alertDialog, confirmDialog } from './ConfirmDialog';
 import type { AppContext } from '../../app';
 import { PUSH_STATUS_LABEL } from '../../services/PushNotificationService';
 import { PwaService } from '../../services/PwaService';
@@ -95,11 +96,11 @@ export function renderNotificationSettings(app: AppContext, rerender: () => void
               class: 'btn small danger-ghost',
               title: 'Development only – sends to EVERY subscriber of the push server',
               onclick: async () => {
-                if (!confirm('DEV ONLY: /notifyAll sends "MeshCall Test" to EVERY subscriber of the push server. Continue?')) return;
+                if (!(await confirmDialog({ title: 'Broadcast test?', message: 'DEV ONLY: /notifyAll sends “MeshCall Test” to EVERY subscriber of the push server.', confirmLabel: 'Send', danger: true }))) return;
                 try {
-                  alert(await push.broadcastTest());
+                  await alertDialog('Broadcast sent', await push.broadcastTest());
                 } catch (err) {
-                  alert(`Broadcast test failed: ${(err as Error).message}`);
+                  await alertDialog('Broadcast failed', (err as Error).message);
                 }
               },
             },

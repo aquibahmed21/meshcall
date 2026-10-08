@@ -195,18 +195,55 @@ async function handlePush(p) {
       : p.callType === 'group'
         ? `${p.callerName} invites you to a group call${where}`
         : `${p.callerName} is calling you${where}`;
-  return self.registration.showNotification(title, {
+  const options = {
     body,
     tag: `call-${p.callId}`,
     renotify: true,
     requireInteraction: true,
+    silent: false,
     icon: ICON,
     badge: BADGE,
-    vibrate: [400, 200, 400, 200, 400],
+    vibrate: RING_VIBRATION,
     timestamp: Date.now(),
     data: { kind: 'incoming-call', callId: p.callId, roomId: p.roomId, roomName: p.roomName, callerId: p.callerId, callerName: p.callerName, callType: p.callType },
     // The app is closed: "Open" is the only meaningful action (declining needs the app).
     actions: [{ action: 'open', title: 'Open MeshCall' }],
+  };
+  await self.registration.showNotification(title, options);
+  return ringUntilHandled(p, title, options, where);
+}
+
+/*
+ * "Ringing" for a closed app. A Service Worker cannot play audio and browsers ignore custom
+ * notification sounds, so the call notification is re-shown (renotify) every few seconds: each
+ * time the device plays its notification sound and vibrates again – like a ringtone – until the
+ * user opens/dismisses it, the app comes to the foreground (it then rings in-page), or the call
+ * expires (→ "Missed call"). Runs inside the push event's waitUntil (well below the browser limit).
+ */
+const RING_INTERVAL_MS = 4000;
+const MAX_RING_MS = 45000;
+const RING_VIBRATION = [600, 300, 600, 300, 600];
+
+async function ringUntilHandled(p, title, options, where) {
+  const tag = options.tag;
+  const expires = typeof p.expiresAt === 'number' ? p.expiresAt : Date.now() + MAX_RING_MS;
+  const until = Math.min(expires, Date.now() + MAX_RING_MS);
+  const ringing = async () => (await self.registration.getNotifications({ tag })).length > 0;
+  while (Date.now() + RING_INTERVAL_MS < until) {
+    await new Promise((r) => setTimeout(r, RING_INTERVAL_MS));
+    if (!(await ringing())) return; // opened or dismissed → stop ringing
+    if ((await appWindows()).some((c) => c.visibilityState === 'visible')) return; // the app rings in-page now
+    await self.registration.showNotification(title, { ...options, timestamp: Date.now() });
+  }
+  if (!(await ringing())) return;
+  // Rang out without anyone touching it → missed call.
+  (await self.registration.getNotifications({ tag })).forEach((n) => n.close());
+  await self.registration.showNotification('Missed call', {
+    body: `You missed a call from ${p.callerName}${where}`,
+    tag: `missed-${p.callId}`,
+    icon: ICON,
+    badge: BADGE,
+    data: { kind: 'system' },
   });
 }
 

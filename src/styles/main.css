@@ -1296,19 +1296,51 @@ select {
 }
 .toast {
   pointer-events: auto;
-  padding: 10px 14px;
-  border-radius: 10px;
-  background: var(--panel-2);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px 10px 12px;
+  border-radius: 14px;
+  background: var(--panel);
   border: 1px solid var(--line);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
-  animation: slide 0.2s ease-out;
+  border-left: 3px solid var(--accent);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+  font-size: 0.92rem;
+  line-height: 1.35;
+  animation: slide 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);
+  transition:
+    opacity 0.2s,
+    transform 0.2s;
+  cursor: default;
+}
+.toast.leaving {
+  opacity: 0;
+  transform: translateY(-6px);
+}
+.toast-icon {
+  display: inline-flex;
+  flex: none;
+  color: var(--accent);
+}
+.toast-icon svg {
+  width: 20px;
+  height: 20px;
+}
+.toast-text {
+  flex: 1;
+  min-width: 0;
 }
 .toast.warn {
-  border-color: rgba(245, 165, 36, 0.6);
+  border-left-color: var(--warn);
+}
+.toast.warn .toast-icon {
+  color: var(--warn);
 }
 .toast.error {
-  border-color: rgba(239, 68, 68, 0.7);
-  background: #3a1f24;
+  border-left-color: var(--bad);
+}
+.toast.error .toast-icon {
+  color: var(--bad);
 }
 @keyframes slide {
   from {
@@ -2463,42 +2495,61 @@ body.menu-open .toasts {
 .list-toolbar .icon-btn:hover {
   color: var(--text);
 }
-.search-row {
+/* Search: the icon expands into the field inside the toolbar row */
+.list-count {
+  transition:
+    opacity 0.18s ease,
+    max-width 0.28s ease;
+  max-width: 60%;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.list-toolbar.searching .list-count {
+  flex: 0 0 auto;
+  max-width: 0;
+  opacity: 0;
+}
+.search-box {
   display: flex;
   align-items: center;
-  gap: 8px;
+  flex: 0 0 40px;
   height: 40px;
-  margin-bottom: 8px;
-  padding: 0 2px 0 12px;
-  border: 1px solid var(--line);
+  min-width: 0;
+  margin-left: auto;
+  overflow: hidden;
+  border: 1px solid transparent;
   border-radius: 999px;
-  background: var(--bg);
   transition:
-    border-color 0.15s,
-    box-shadow 0.15s;
+    flex-basis 0.28s cubic-bezier(0.2, 0.8, 0.2, 1),
+    border-color 0.2s,
+    background-color 0.2s,
+    box-shadow 0.2s;
 }
-/* One focus ring for the whole field (the input itself draws none). */
-.search-row:focus-within {
+.search-box.open {
+  flex: 1 1 100%;
+  margin-left: 0;
+  border-color: var(--line);
+  background: var(--bg);
+}
+.search-box.open:focus-within {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px rgba(59, 158, 255, 0.18);
 }
-.search-row[hidden] {
-  display: none;
-}
-.search-row .search-icon {
-  display: inline-flex;
+.list-toolbar .search-box .search-toggle {
   flex: none;
-  color: var(--muted);
+  width: 38px;
+  height: 38px;
 }
-.search-row .search-icon svg {
-  width: 18px;
-  height: 18px;
-}
-.search-row:focus-within .search-icon {
+.search-box.open .search-toggle {
   color: var(--accent);
 }
-.side-section .search-row input[type='search'] {
-  flex: 1;
+.search-box.open .search-toggle:hover {
+  background: none;
+}
+.side-section .search-box input[type='search'] {
+  flex: 1 1 auto;
+  width: 0;
   min-width: 0;
   height: 100%;
   min-height: 0;
@@ -2509,25 +2560,81 @@ body.menu-open .toasts {
   background: none;
   outline: none;
   box-shadow: none;
+  opacity: 0;
+  transition: opacity 0.18s ease 0.08s;
 }
-.side-section .search-row input[type='search']:focus-visible {
+.search-box.open input[type='search'] {
+  opacity: 1;
+}
+.side-section .search-box input[type='search']:focus-visible {
   outline: none;
 }
-.search-row .icon-btn {
-  width: 32px;
-  height: 32px;
-  border-radius: 50%;
-  color: var(--muted);
+.search-box input[type='search']::-webkit-search-cancel-button {
+  display: none;
 }
-.search-row .icon-btn svg {
+.list-toolbar .search-box .search-close {
+  flex: none;
+  width: 0;
+  height: 32px;
+  margin-right: 0;
+  opacity: 0;
+  transition:
+    opacity 0.18s ease,
+    width 0.28s ease;
+}
+.list-toolbar .search-box.open .search-close {
+  width: 32px;
+  margin-right: 3px;
+  opacity: 1;
+}
+.search-close svg {
   width: 18px;
   height: 18px;
 }
-.search-row .icon-btn:hover {
-  color: var(--text);
+@media (prefers-reduced-motion: reduce) {
+  .search-box,
+  .search-box *,
+  .list-count {
+    transition: none !important;
+  }
 }
-.search-row .icon-btn:focus-visible {
-  outline-offset: 0;
+
+/* Presence: a dot on the right of the contact row */
+.status-dot {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  margin: 0 8px 0 4px;
+  border-radius: 50%;
+  background: transparent;
+  box-shadow: inset 0 0 0 2px var(--muted);
+}
+.status-dot.online {
+  background: var(--ok);
+  box-shadow: none;
+}
+.status-dot.connecting,
+.status-dot.busy {
+  background: var(--warn);
+  box-shadow: none;
+}
+
+/* Live tab header with a direct "Go live" button */
+.pane-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.pane-head h2 {
+  flex: 1;
+}
+.icon-btn.go-live-btn {
+  border-radius: 50%;
+  background: rgba(239, 68, 68, 0.14);
+  color: var(--bad);
+}
+.icon-btn.go-live-btn:hover:not(:disabled) {
+  background: rgba(239, 68, 68, 0.26);
 }
 
 /* Contact rows: long-press call buttons, multi-select */
@@ -2638,13 +2745,80 @@ body.menu-open .toasts {
   }
 }
 
-.search-row input[type='search']::-webkit-search-cancel-button {
-  display: none; /* our own close button clears and closes */
-}
 .call-entry {
   display: flex;
   border-radius: 10px;
 }
 .call-entry:hover {
   background: var(--panel);
+}
+
+/* In-call settings: one compact column */
+.settings-grid.single {
+  grid-template-columns: minmax(0, 1fr);
+}
+.modal.call-settings {
+  width: min(460px, calc(100vw - 24px));
+}
+
+/* Custom confirm / alert dialogs */
+.modal.confirm {
+  width: min(380px, calc(100vw - 32px));
+  text-align: center;
+}
+.modal.confirm .modal-header {
+  display: none; /* icon → title → text → buttons; Cancel / Back / Esc close it */
+}
+.confirm-title {
+  margin: 4px 0 0;
+  font-size: 1.1rem;
+}
+.modal.confirm .modal-body {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding-top: 22px;
+}
+.confirm-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 52px;
+  height: 52px;
+  margin-bottom: 2px;
+  border-radius: 50%;
+  background: rgba(59, 158, 255, 0.14);
+  color: var(--accent);
+}
+.confirm-icon svg {
+  width: 26px;
+  height: 26px;
+}
+.modal.confirm.danger .confirm-icon {
+  background: rgba(239, 68, 68, 0.14);
+  color: var(--bad);
+}
+.confirm-text {
+  margin: 0;
+  color: var(--muted);
+}
+.modal.confirm .modal-actions {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(0, 1fr));
+  gap: 10px;
+  width: 100%;
+  margin-top: 14px;
+}
+.btn.danger {
+  background: var(--bad);
+  border-color: var(--bad);
+  color: #fff;
+}
+@media (max-width: 767px) {
+  /* Dialogs are bottom sheets on phones – full width like every other sheet. */
+  .modal.confirm,
+  .modal.call-settings {
+    width: 100%;
+    max-width: none;
+  }
 }

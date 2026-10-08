@@ -21,6 +21,8 @@ export interface SidebarCallbacks {
   onGroupCall: (userIds: string[], media: MediaKind) => void;
   /** Desktop tab change (mobile uses the bottom navigation). */
   onPane: (pane: SidebarPane) => void;
+  /** Start a live stream (Live tab). */
+  onGoLive: () => void;
 }
 
 const OUTCOME_TEXT: Record<CallOutcome, string> = {
@@ -58,8 +60,14 @@ export class Sidebar {
   private streams = h('ul', { class: 'stream-list', 'aria-label': 'Live streams' });
   private calls = h('ul', { class: 'call-list', 'aria-label': 'Recent calls' });
   private filter = h('input', { type: 'search', placeholder: 'Search', 'aria-label': 'Search contacts', enterkeyhint: 'search' });
-  private searchRow = h('div', { class: 'search-row', hidden: true });
+  /** The search icon itself expands into the field (same toolbar row). */
+  private searchBox = h('div', { class: 'search-box', role: 'search' });
+  private searchBtn = h('button', { class: 'icon-btn search-toggle', type: 'button', 'aria-label': 'Search contacts', title: 'Search', 'aria-expanded': 'false', html: icons.search });
+  private searchClose = h('button', { class: 'icon-btn search-close', type: 'button', 'aria-label': 'Close search', tabindex: -1, html: icons.close });
+  private countEl = h('span', { class: 'list-count' });
+  private selectBtn = h('button', { class: 'icon-btn', type: 'button' });
   private toolbar = h('div', { class: 'list-toolbar' });
+  private searchOpen = false;
   private selectBar = h('div', { class: 'select-bar', hidden: true, role: 'region', 'aria-label': 'Group call' });
   private panes: Record<SidebarPane, HTMLElement>;
   /** null = not selecting. */
@@ -74,14 +82,23 @@ export class Sidebar {
     private readonly cb: SidebarCallbacks,
   ) {
     this.filter.addEventListener('input', () => this.renderUsers());
-    this.searchRow.append(
-      h('span', { class: 'search-icon', html: icons.search, 'aria-hidden': 'true' }),
-      this.filter,
-      h('button', { class: 'icon-btn', type: 'button', 'aria-label': 'Close search', html: icons.close, onclick: () => this.setSearch(false) }),
+    // Built once (re-rendering would drop typing focus); render only updates state.
+    this.filter.tabIndex = -1;
+    this.searchBtn.addEventListener('click', () => (this.searchOpen ? this.filter.focus() : this.setSearch(true)));
+    this.searchClose.addEventListener('click', () => this.setSearch(false));
+    this.filter.addEventListener('keydown', (e) => e.key === 'Escape' && (e.stopPropagation(), this.setSearch(false)));
+    this.selectBtn.addEventListener('click', () => this.setSelecting(this.selected === null));
+    this.searchBox.append(this.searchBtn, this.filter, this.searchClose);
+    this.toolbar.append(this.countEl, this.searchBox, this.selectBtn);
+    const liveHead = h(
+      'div',
+      { class: 'pane-head' },
+      h('h2', {}, 'Live now'),
+      h('button', { class: 'icon-btn go-live-btn', type: 'button', 'aria-label': 'Go live', title: 'Go live', html: icons.live, onclick: () => this.cb.onGoLive() }),
     );
     this.panes = {
-      people: h('section', { class: 'side-section', id: 'people', 'aria-label': 'People' }, this.toolbar, this.searchRow, this.users),
-      live: h('section', { class: 'side-section', id: 'live', 'aria-label': 'Live now' }, h('h2', {}, 'Live now'), this.streams),
+      people: h('section', { class: 'side-section', id: 'people', 'aria-label': 'People' }, this.toolbar, this.users),
+      live: h('section', { class: 'side-section', id: 'live', 'aria-label': 'Live now' }, liveHead, this.streams),
       calls: h('section', { class: 'side-section', id: 'calls', 'aria-label': 'Recent calls' }, h('h2', {}, 'Recent calls'), this.calls),
     };
     this.el = h('aside', { class: 'sidebar' }, this.tabs, this.panes.people, this.panes.live, this.panes.calls, this.selectBar);
@@ -124,11 +141,16 @@ export class Sidebar {
   // ── people ───────────────────────────────────────────────────────────────
 
   private setSearch(open: boolean, viaBack = false): void {
-    if (this.searchRow.hidden === !open) return;
-    this.searchRow.hidden = !open;
+    if (this.searchOpen === open) return;
+    this.searchOpen = open;
+    this.searchBox.classList.toggle('open', open);
+    this.toolbar.classList.toggle('searching', open);
+    this.searchBtn.setAttribute('aria-expanded', String(open));
+    this.filter.tabIndex = open ? 0 : -1;
+    this.searchClose.tabIndex = open ? 0 : -1;
     if (open) {
       this.back.search = backStack.push(() => this.setSearch(false, true));
-      this.filter.focus();
+      this.filter.focus({ preventScroll: true });
     } else {
       if (!viaBack) this.back.search?.();
       delete this.back.search;
@@ -157,19 +179,14 @@ export class Sidebar {
 
   private renderToolbar(count: number): void {
     const selecting = this.selected !== null;
-    this.toolbar.replaceChildren(
-      h('span', { class: 'list-count' }, selecting ? 'Select people for a group call' : count ? `${count} ${count === 1 ? 'person' : 'people'}` : ''),
-      h('button', { class: 'icon-btn', type: 'button', 'aria-label': 'Search contacts', title: 'Search', html: icons.search, 'aria-pressed': String(!this.searchRow.hidden), onclick: () => this.setSearch(this.searchRow.hidden) }),
-      h('button', {
-        class: `icon-btn${selecting ? ' on' : ''}`,
-        type: 'button',
-        'aria-label': selecting ? 'Cancel selection' : 'Select people for a group call',
-        title: selecting ? 'Cancel' : 'Select for group call',
-        'aria-pressed': String(selecting),
-        html: selecting ? icons.close : icons.select,
-        onclick: () => this.setSelecting(!selecting),
-      }),
-    );
+    this.countEl.textContent = selecting ? 'Select people' : count ? `${count} ${count === 1 ? 'person' : 'people'}` : '';
+    const label = selecting ? 'Cancel selection' : 'Select people for a group call';
+    if (this.selectBtn.getAttribute('aria-label') !== label) {
+      this.selectBtn.setAttribute('aria-label', label);
+      this.selectBtn.title = selecting ? 'Cancel' : 'Select for group call';
+      this.selectBtn.setAttribute('aria-pressed', String(selecting));
+      this.selectBtn.innerHTML = selecting ? icons.close : icons.select;
+    }
   }
 
   renderUsers(): void {
@@ -198,13 +215,11 @@ export class Sidebar {
           },
           ...nodes(selecting ? h('span', { class: `pick${picked ? ' on' : ''}`, html: picked ? icons.check : '', 'aria-hidden': 'true' }) : null),
           h('span', { class: 'avatar', style: `--avatar:${colorFor(u.deviceId)}` }, initials(u.name)),
-          h(
-            'span',
-            { class: 'grow user-info' },
-            h('span', { class: 'user-name' }, u.name),
-            h('small', { class: `presence ${u.status}` }, `${u.status === 'online' ? '●' : '○'} ${u.busy ? 'In a call' : STATUS_TEXT[u.status]}`),
+          h('span', { class: 'grow user-info' }, h('span', { class: 'user-name' }, u.name)),
+          ...nodes(
+            unread && !actions ? h('span', { class: 'badge' }, unread > 9 ? '9+' : String(unread)) : null,
+            actions ? null : h('span', { class: `status-dot ${u.busy ? 'busy' : u.status}`, title: u.busy ? 'In a call' : STATUS_TEXT[u.status], 'aria-hidden': 'true' }),
           ),
-          ...nodes(unread && !actions ? h('span', { class: 'badge' }, unread > 9 ? '9+' : String(unread)) : null),
         );
         this.bindRow(row, u.deviceId);
         return h(

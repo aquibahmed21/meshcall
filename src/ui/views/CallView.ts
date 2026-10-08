@@ -71,6 +71,8 @@ export interface CallViewCallbacks {
   /** Streamer: call this person into the live stream. */
   onCallViewer: (userId: string) => void;
   onToggleDiagnostics: () => void;
+  /** Devices, quality, echo / noise / gain for the running call. */
+  onCallSettings: () => void;
   onBack: () => void;
   onToast: (level: 'info' | 'warn' | 'error', text: string) => void;
 }
@@ -145,6 +147,7 @@ export class CallView {
     // Fullscreen targets the call container (video + chat + controls), never the whole app.
     this.viewModes = new ViewModeController(this.el, (v) => this.grid.owns(v));
     this.disposer.add(this.viewModes.events.on('change', (s) => this.onViewModes(s)));
+    this.setupAutoPip();
     this.disposer.add(this.app.chat.events.on('change', () => {
       this.chatPanel.render();
       this.renderPanelTabs();
@@ -165,6 +168,63 @@ export class CallView {
     this.disposer.add(this.layout.events.on('change', () => this.render()));
     this.disposer.add(this.app.live.events.on('state', () => this.panelOpen && this.tab === 'people' && this.render()));
     this.tick = setInterval(() => this.renderTimer(), 1000);
+  }
+
+  // ── background popup (automatic Picture-in-Picture) ──────────────────────
+
+  /** Opened automatically because the app went to the background (closed again on return). */
+  private autoPip = false;
+
+  /** The video to float: the main tile, else any remote video, else my camera. */
+  private pipCandidate(): HTMLVideoElement | null {
+    const ids = this.grid.videoIds();
+    const id = this.grid.hasVideo(this.mainId) ? this.mainId : (ids[0] ?? null);
+    return this.grid.video(id);
+  }
+
+  /**
+   * Home button / app switch during a call → the call keeps showing as a floating popup.
+   * Browsers only allow PiP without a tap through these hooks:
+   *  - Chrome: Media Session "enterpictureinpicture" (automatic PiP for video-call pages)
+   *  - Safari (iOS/iPadOS): the `autopictureinpicture` attribute on the playing <video>
+   * Audio-only calls have no video to float; they simply keep running in the background.
+   */
+  private setupAutoPip(): void {
+    const session = navigator.mediaSession as (MediaSession & { setActionHandler(a: string, h: (() => void) | null): void }) | undefined;
+    if (session && this.viewModes.pipAvailable) {
+      try {
+        session.setActionHandler('enterpictureinpicture', () => {
+          const c = this.app.calls.state;
+          const video = this.pipCandidate();
+          if (!c || isTerminal(c.status) || !video || this.viewModes.snapshot.pip === 'active') return;
+          void this.viewModes.enterPip(video).then((ok) => (this.autoPip = ok));
+        });
+        this.disposer.add(() => {
+          try {
+            session.setActionHandler('enterpictureinpicture', null);
+          } catch {
+            /* unsupported */
+          }
+        });
+      } catch {
+        // This browser has no automatic PiP action – Safari's attribute (below) may still apply.
+      }
+    }
+    // Back in the app: close a popup we opened automatically (a user-opened PiP stays).
+    this.disposer.listen(document, 'visibilitychange', () => {
+      if (document.visibilityState !== 'visible' || !this.autoPip) return;
+      this.autoPip = false;
+      if (this.viewModes.snapshot.pip === 'active') void this.viewModes.exitPip();
+    });
+  }
+
+  /** Safari: only the candidate video carries `autopictureinpicture` while the call is live. */
+  private markAutoPip(active: boolean): void {
+    const target = active ? this.pipCandidate() : null;
+    for (const id of [...this.grid.videoIds(), this.mainId, 'local']) {
+      const v = this.grid.video(id);
+      if (v) v.toggleAttribute('autopictureinpicture', v === target);
+    }
   }
 
   dispose(): void {
@@ -227,6 +287,7 @@ export class CallView {
       this.plan,
     );
     this.el.classList.toggle('is-fullscreen', vm.fullscreen === 'active');
+    this.markAutoPip(!isTerminal(c.status));
     this.renderControls(c, m, vm);
     this.renderPanelTabs();
     if (this.panelOpen && this.tab === 'people') this.renderPeople(c);
@@ -536,6 +597,7 @@ export class CallView {
           secondary: true,
         });
       specs.push({ key: 'stats', label: 'Network', icon: icons.stats, on: () => this.cb.onToggleDiagnostics(), secondary: true });
+      specs.push({ key: 'settings', label: 'Call settings', icon: icons.settings, on: () => this.cb.onCallSettings(), secondary: true });
     }
     specs.push({
       key: 'end',

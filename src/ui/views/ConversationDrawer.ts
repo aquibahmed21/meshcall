@@ -1,3 +1,4 @@
+import { confirmDialog } from './ConfirmDialog';
 import type { AppContext } from '../../app';
 import { MAX_DM_LENGTH, type DirectMessage, type DmStatus } from '../../services/DirectMessageService';
 import { backStack } from '../BackStack';
@@ -134,9 +135,9 @@ export class ConversationDrawer {
           class: 'menu-item danger',
           role: 'menuitem',
           type: 'button',
-          onclick: () => {
+          onclick: async () => {
             this.setMenu(false);
-            if (!confirm(`Remove ${name} from your contacts? Your conversation with ${name} is deleted.`)) return;
+            if (!(await confirmDialog({ title: `Remove ${name}?`, message: 'They are removed from your contacts and your conversation is deleted.', confirmLabel: 'Remove', danger: true, icon: icons.trash }))) return;
             this.app.dms.deleteConversation(peerId);
             this.app.presence.removeContact(peerId);
             this.close();

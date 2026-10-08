@@ -62,6 +62,7 @@ try {
   await ann.page.waitForFunction((id) => window.__voip.app.dms.conversation(id).messages.length === 1, bob.id);
   await ann.page.click('.dm-head button[aria-label=More]');
   await ann.page.click('.dm-menu button:has-text("Remove contact")');
+  await ann.page.click('dialog.confirm[open] button:has-text("Remove")'); // custom confirm
   await ann.page.waitForSelector('.dm-drawer[hidden]', { state: 'attached', timeout: 5_000 });
   check('Remove contact → gone from the list', !(await listed(ann, bob.id)));
   check('…and the conversation is deleted', (await ev(ann, (id) => window.__voip.app.dms.conversation(id).messages.length, bob.id)) === 0);

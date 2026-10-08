@@ -118,9 +118,17 @@ try {
   await ann.page.click('.topbar button[aria-label=More]');
   await ann.page.keyboard.press('Escape');
   await ann.page.waitForTimeout(500);
-  await ann.page.goBack({ timeout: 5000 }).catch(() => {});
-  await ann.page.waitForTimeout(500);
-  check('After closing layers in the UI, one Back leaves the app (no "dead" Back presses)', ann.page.url() === 'about:blank', ann.page.url());
+  await back(ann);
+  const prompt = await ann.page.waitForSelector('dialog.confirm[open]', { timeout: 5000 }).then(() => ann.page.textContent('dialog.confirm[open]'), () => '');
+  check('With nothing open, Back asks "Exit MeshCall?" (custom dialog)', /Exit MeshCall\?/.test(prompt) && (await inApp(ann)));
+  await ann.page.click('dialog.confirm[open] button:has-text("Stay")');
+  await ann.page.waitForTimeout(400);
+  check('"Stay" keeps the app open', await inApp(ann));
+  await back(ann);
+  await ann.page.waitForSelector('dialog.confirm[open]', { timeout: 5000 });
+  await ann.page.click('dialog.confirm[open] button:has-text("Exit")');
+  await ann.page.waitForTimeout(1500);
+  check('"Exit" leaves the app (no stray Back presses needed)', ann.page.url() === 'about:blank', ann.page.url());
 } catch (err) {
   check('Run', false, err.stack?.split('\n').slice(0, 2).join(' '));
 } finally {

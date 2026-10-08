@@ -1,3 +1,4 @@
+import { confirmDialog } from './views/ConfirmDialog';
 import { PUSH_STATUS_LABEL } from '../services/PushNotificationService';
 import type { AppContext } from '../app';
 import { isTerminal } from '../calls/CallStateMachine';
@@ -54,6 +55,11 @@ export class UIManager {
   private diagBack: (() => void) | null = null;
   private menuBack: (() => void) | null = null;
   private callGuard: (() => void) | null = null;
+  /** Bottom of the Back stack: Back with nothing open asks before leaving the app. */
+  private exitGuard: (() => void) | null = null;
+  private exiting = false;
+  /** Set right before an intentional reload (update) so the in-call unload prompt is skipped. */
+  private allowUnload = false;
   private readonly mobile = matchMedia('(max-width: 767px)');
 
   constructor(
@@ -66,6 +72,7 @@ export class UIManager {
       onCall: (id, media) => this.callUser(id, media),
       onGroupCall: (ids, media) => this.startGroupCall(ids, media),
       onPane: (pane) => this.sidebar.setPane(pane), // desktop tabs (mobile: bottom navigation)
+      onGoLive: () => (this.app.calls.inCall ? this.toasts.show('info', 'You are already in a call') : openGoLive(this.app)),
     });
     settingsHooks.openDiagnostics = () => this.toggleDiagnostics(true);
     this.drawer = new ConversationDrawer(app, (id, media) => this.callUser(id, media));
@@ -214,8 +221,8 @@ export class UIManager {
           ? item(
               icons.exit,
               'Leave room',
-              () => {
-                if (this.app.calls.inCall && !confirm('Leaving the room ends your current call. Leave anyway?')) return;
+              async () => {
+                if (this.app.calls.inCall && !(await confirmDialog({ title: 'Leave room?', message: 'This ends your current call.', confirmLabel: 'Leave', danger: true }))) return;
                 this.opts.onLeaveRoom();
               },
               'danger',
@@ -227,6 +234,15 @@ export class UIManager {
 
   private wire(): void {
     const { app } = this;
+    this.armExitGuard();
+    // Closing / reloading the tab mid-call would drop the call. Browsers only allow their own
+    // generic "Leave site?" prompt here (a page cannot style it), so ask only during a call.
+    window.addEventListener('beforeunload', (e) => {
+      if (!this.allowUnload && !this.exiting && app.calls.inCall) {
+        e.preventDefault();
+        e.returnValue = '';
+      }
+    });
     this.topMenuBtn.addEventListener('click', (e) => {
       e.stopPropagation();
       this.setTopMenu(this.topMenu.hidden);
@@ -336,6 +352,7 @@ export class UIManager {
         onManageAudience: () => openManageAudience(this.app),
         onCallViewer: (id) => this.callUser(id, 'audio'),
         onToggleDiagnostics: () => this.toggleDiagnostics(),
+        onCallSettings: () => openSettings(this.app, 'call', { callOnly: true }),
         onBack: () => this.setView('people'),
         onToast: (level, text) => this.toasts.show(level, text),
       });
@@ -358,6 +375,48 @@ export class UIManager {
     this.root.classList.toggle('in-call', !!c && !isTerminal(c.status));
     this.renderBanner();
     if (this.diagOpen) this.diagnostics.render();
+  }
+
+  private armExitGuard(): void {
+    if (this.exitGuard) return;
+    // Chrome skips history entries created without a user gesture when Back is pressed (e.g.
+    // after an automatic room rejoin) – then arm on the first tap / key press instead.
+    const activation = (navigator as Navigator & { userActivation?: { isActive: boolean } }).userActivation;
+    if (activation && !activation.isActive) {
+      const arm = () => {
+        window.removeEventListener('click', arm, true);
+        window.removeEventListener('keydown', arm, true);
+        this.armExitGuard();
+      };
+      window.addEventListener('click', arm, true);
+      window.addEventListener('keydown', arm, true);
+      return;
+    }
+    this.exitGuard = backStack.push(() => {
+      // Open after the stack has re-armed this entry, so the dialog sits above it.
+      setTimeout(() => void this.confirmExit(), 0);
+      return false;
+    });
+  }
+
+  private async confirmExit(): Promise<void> {
+    const ok = await confirmDialog({ title: 'Exit MeshCall?', confirmLabel: 'Exit', cancelLabel: 'Stay', icon: icons.exit });
+    if (!ok) return;
+    this.exiting = true;
+    this.exitGuard?.();
+    this.exitGuard = null;
+    // Back from here lands on dead entries only → the stack keeps going and leaves the app.
+    history.back();
+    // Nothing to go back to (first page of a tab / some installed apps): try closing the window,
+    // otherwise stay and re-arm the prompt.
+    setTimeout(() => {
+      if (document.visibilityState === 'hidden') return;
+      window.close();
+      setTimeout(() => {
+        this.exiting = false;
+        this.armExitGuard();
+      }, 300);
+    }, 600);
   }
 
   /** During a call, Back at the top level must not leave the page (that would end the call). */
@@ -456,8 +515,9 @@ export class UIManager {
           'button',
           {
             class: 'btn small primary',
-            onclick: () => {
-              if (this.app.calls.inCall && !confirm('Reloading ends your current call. Reload now?')) return;
+            onclick: async () => {
+              if (this.app.calls.inCall && !(await confirmDialog({ title: 'Update now?', message: 'Reloading ends your current call.', confirmLabel: 'Reload', danger: true }))) return;
+              this.allowUnload = true;
               this.app.pwa.applyUpdate();
             },
           },

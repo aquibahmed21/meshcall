@@ -31,8 +31,12 @@ type SettingsTab = 'call' | 'device';
 /** Set by the UI shell: actions Settings can trigger outside the dialog. */
 export const settingsHooks: { openDiagnostics: (() => void) | null } = { openDiagnostics: null };
 
-export function openSettings(app: AppContext, initialTab: SettingsTab = 'call'): Modal {
-  const m = new Modal('Settings', { className: 'wide' });
+/**
+ * Settings. `callOnly` = the in-call "Call settings" dialog: devices, quality and audio processing
+ * only (no tabs, no device-level sections) – changes apply to the running call immediately.
+ */
+export function openSettings(app: AppContext, initialTab: SettingsTab = 'call', opts: { callOnly?: boolean } = {}): Modal {
+  const m = new Modal(opts.callOnly ? 'Call settings' : 'Settings', { className: opts.callOnly ? 'call-settings' : 'wide' });
   let tab: SettingsTab = initialTab;
   let version = '';
   void app.pwa.version().then((v) => {
@@ -140,6 +144,10 @@ export function openSettings(app: AppContext, initialTab: SettingsTab = 'call'):
       ['call', 'Call', [devices, quality, connection]],
       ['device', 'Device', [profile, renderNotificationSettings(app, render), appSection, diagnostics]],
     ];
+    if (opts.callOnly) {
+      m.setContent(h('div', { class: 'settings-grid single' }, devices, quality));
+      return;
+    }
     m.setContent(
       h(
         'div',

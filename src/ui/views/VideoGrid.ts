@@ -129,6 +129,12 @@ export class VideoGrid {
     return null;
   }
 
+  /** Ids of tiles currently showing video (remote first). */
+  videoIds(): string[] {
+    const ids = [...this.tiles].filter(([, t]) => t.hasVideo).map(([id]) => id);
+    return ids.sort((a, b) => Number(a === 'local') - Number(b === 'local'));
+  }
+
   owns(video: HTMLVideoElement): boolean {
     return this.idOfVideo(video) !== null;
   }

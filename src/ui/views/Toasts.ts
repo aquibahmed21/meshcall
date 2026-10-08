@@ -1,4 +1,7 @@
 import { h } from '../dom';
+import { icons } from '../icons';
+
+const ICON = { info: icons.info, warn: icons.warn, error: icons.error } as const;
 
 export class Toasts {
   readonly el = h('div', { class: 'toasts', role: 'status', 'aria-live': 'polite' });
@@ -9,13 +12,21 @@ export class Toasts {
     if ((this.recent.get(text) ?? 0) > now - 3000) return; // de-dupe bursts
     this.recent.set(text, now);
     for (const [k, t] of this.recent) if (now - t > 10_000) this.recent.delete(k);
-    const t = h('div', { class: `toast ${level}${action ? ' has-action' : ''}` }, h('span', {}, text));
+    const t = h(
+      'div',
+      { class: `toast ${level}${action ? ' has-action' : ''}`, role: level === 'error' ? 'alert' : undefined },
+      h('span', { class: 'toast-icon', html: ICON[level], 'aria-hidden': 'true' }),
+      h('span', { class: 'toast-text' }, text),
+    );
     if (action) {
       t.append(h('button', { class: 'btn small primary', onclick: (e: Event) => { e.stopPropagation(); t.remove(); action.run(); } }, action.label));
     }
     t.addEventListener('click', () => t.remove());
     this.el.append(t);
     while (this.el.children.length > 4) this.el.firstElementChild?.remove();
-    setTimeout(() => t.remove(), action ? Math.max(ms, 20_000) : level === 'error' ? ms * 1.5 : ms);
+    setTimeout(() => {
+      t.classList.add('leaving'); // fade out, then remove
+      setTimeout(() => t.remove(), 200);
+    }, action ? Math.max(ms, 20_000) : level === 'error' ? ms * 1.5 : ms);
   }
 }
