@@ -1,3 +1,4 @@
+import { backStack } from '../BackStack';
 import type { AppContext } from '../../app';
 import { isTerminal } from '../../calls/CallStateMachine';
 import { Disposer } from '../../core/emitter';
@@ -100,6 +101,8 @@ export class CallView {
   private panelOpen = false;
   private tab: PanelTab = 'chat';
   private moreOpen = false;
+  /** History entries for the open panel / menus (Back closes them). */
+  private back: Partial<Record<'panel' | 'more' | 'layout', () => void>> = {};
   private mainId: string | null = null;
   private followTarget: string | null = null;
   private exitedOnEnd = false;
@@ -165,6 +168,9 @@ export class CallView {
   }
 
   dispose(): void {
+    // Give back the history entries of anything still open (panel, menus).
+    for (const release of Object.values(this.back)) release?.();
+    this.back = {};
     clearInterval(this.tick);
     this.viewModes.dispose(); // exits PiP/fullscreen and removes document listeners
     this.disposer.dispose();
@@ -244,9 +250,19 @@ export class CallView {
     this.layout.togglePin(id);
   }
 
-  private setLayoutMenu(open: boolean): void {
+  /** Own (or give up) the history entry of one layer; `viaBack` = Back already consumed it. */
+  private trackBack(key: 'panel' | 'more' | 'layout', open: boolean, close: () => void, viaBack: boolean): void {
+    if (open) this.back[key] ??= backStack.push(close);
+    else {
+      if (!viaBack) this.back[key]?.();
+      delete this.back[key];
+    }
+  }
+
+  private setLayoutMenu(open: boolean, viaBack = false): void {
     if (this.layoutOpen === open) return;
     this.layoutOpen = open;
+    this.trackBack('layout', open, () => this.setLayoutMenu(false, true), viaBack);
     if (open) this.setMore(false);
     this.renderLayoutMenu();
     this.renderControlsFor();
@@ -319,7 +335,8 @@ export class CallView {
 
   // ── side panel (participants / chat) ─────────────────────────────────────
 
-  private setPanel(open: boolean, tab: PanelTab = this.tab): void {
+  private setPanel(open: boolean, tab: PanelTab = this.tab, viaBack = false): void {
+    if (this.panelOpen !== open) this.trackBack('panel', open, () => this.setPanel(false, this.tab, true), viaBack);
     this.panelOpen = open;
     this.tab = tab;
     this.panel.hidden = !open;
@@ -584,9 +601,10 @@ export class CallView {
     );
   }
 
-  private setMore(open: boolean): void {
+  private setMore(open: boolean, viaBack = false): void {
     if (this.moreOpen === open) return;
     this.moreOpen = open;
+    this.trackBack('more', open, () => this.setMore(false, true), viaBack);
     this.moreMenu.hidden = !open;
     this.renderControlsFor();
     if (open) (this.moreMenu.querySelector('button:not(:disabled)') as HTMLElement | null)?.focus();

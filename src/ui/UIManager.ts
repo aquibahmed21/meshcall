@@ -3,6 +3,7 @@ import type { AppContext } from '../app';
 import { isTerminal } from '../calls/CallStateMachine';
 import type { SavedCall } from '../calls/CallManager';
 import type { NetworkQuality } from '../types/state';
+import { backStack } from './BackStack';
 import { colorFor, h, initials, nodes } from './dom';
 import { icons, logo } from './icons';
 import { CallView } from './views/CallView';
@@ -48,6 +49,12 @@ export class UIManager {
   private topMenu = h('div', { class: 'more-menu top-menu', role: 'menu', hidden: true });
   private topMenuBtn = h('button', { class: 'icon-btn', type: 'button', 'aria-label': 'More', title: 'More', 'aria-haspopup': 'menu', 'aria-expanded': 'false', html: icons.more });
   private drawer!: ConversationDrawer;
+  /** History entries owned by this view (see BackStack). */
+  private viewBack: (() => void) | null = null;
+  private diagBack: (() => void) | null = null;
+  private menuBack: (() => void) | null = null;
+  private callGuard: (() => void) | null = null;
+  private readonly mobile = matchMedia('(max-width: 767px)');
 
   constructor(
     private readonly app: AppContext,
@@ -146,20 +153,35 @@ export class UIManager {
     this.renderAll();
   }
 
+  /** Header identity: avatar with a presence dot, my name, and the room I'm in. */
   private renderProfile(): void {
-    const { identity, signaling } = this.app;
-    const online = signaling.status === 'connected';
-    this.profile.setAttribute('aria-label', `${identity.displayName} – profile and settings`);
+    const { identity, signaling, rooms } = this.app;
+    const sig = signaling.status;
+    const state = sig === 'connected' ? 'online' : sig === 'unavailable' ? 'offline' : 'connecting';
+    const stateText = state === 'online' ? 'Online' : state === 'offline' ? 'Offline' : 'Connecting';
+    const room = rooms.current?.roomName;
+    this.profile.setAttribute('aria-label', `${identity.displayName}, ${stateText}${room ? `, room ${room}` : ''} – profile and settings`);
     this.profile.onclick = () => openSettings(this.app, 'device');
     this.profile.replaceChildren(
-      h('span', { class: 'avatar', style: `--avatar:${colorFor(identity.deviceId)}` }, initials(identity.displayName)),
-      h('span', { class: 'me-text' }, h('strong', {}, identity.displayName), h('small', { class: `sig ${signaling.status}` }, online ? '● Online' : `○ ${signaling.status}`)),
+      h(
+        'span',
+        { class: 'me-avatar' },
+        h('span', { class: 'avatar', style: `--avatar:${colorFor(identity.deviceId)}` }, initials(identity.displayName)),
+        h('span', { class: `presence-dot ${state}`, title: stateText }),
+      ),
+      h('span', { class: 'me-text' }, h('strong', {}, identity.displayName), ...nodes(room ? h('small', {}, room) : null)),
     );
   }
 
-  private setTopMenu(open: boolean): void {
+  private setTopMenu(open: boolean, viaBack = false): void {
+    if (this.topMenu.hidden === !open) return;
     this.topMenu.hidden = !open;
     document.body.classList.toggle('menu-open', open);
+    if (open) this.menuBack = backStack.push(() => this.setTopMenu(false, true));
+    else {
+      if (!viaBack) this.menuBack?.();
+      this.menuBack = null;
+    }
     this.topMenuBtn.setAttribute('aria-expanded', String(open));
     if (open) {
       this.renderTopMenu();
@@ -209,6 +231,7 @@ export class UIManager {
     app.pwa.events.on('install', () => !this.topMenu.hidden && this.renderTopMenu());
     app.rooms.events.on('change', (room) => {
       this.renderTopMenu();
+      this.renderProfile();
       if (!room) this.drawer.close();
     });
     app.dms.events.on('change', () => this.sidebar.renderUsers());
@@ -283,6 +306,8 @@ export class UIManager {
 
   private onCallState(): void {
     const c = this.app.calls.state;
+    // First, so the guard sits BELOW the Call view's history entry (Back: call → people → guard).
+    this.guardCall(!!c && !isTerminal(c.status));
     const incomingRinging = !!c && c.status === 'ringing' && c.direction === 'incoming';
     if (incomingRinging && !this.incoming) {
       this.incoming = openIncomingCall(this.app, c);
@@ -323,14 +348,43 @@ export class UIManager {
     if (this.diagOpen) this.diagnostics.render();
   }
 
-  private toggleDiagnostics(force?: boolean): void {
-    this.diagOpen = force ?? !this.diagOpen;
+  /** During a call, Back at the top level must not leave the page (that would end the call). */
+  private guardCall(active: boolean): void {
+    if (active && !this.callGuard) {
+      this.callGuard = backStack.push(() => {
+        this.toasts.show('info', 'Hang up to leave the call');
+        return false;
+      });
+    } else if (!active && this.callGuard) {
+      this.callGuard();
+      this.callGuard = null;
+    }
+  }
+
+  private toggleDiagnostics(force?: boolean, viaBack = false): void {
+    const open = force ?? !this.diagOpen;
+    if (open && !this.diagBack) this.diagBack = backStack.push(() => this.toggleDiagnostics(false, true));
+    if (!open) {
+      if (!viaBack) this.diagBack?.();
+      this.diagBack = null;
+    }
+    this.diagOpen = open;
     this.diagnostics.el.hidden = !this.diagOpen;
     this.root.classList.toggle('diag-open', this.diagOpen);
     if (this.diagOpen) this.diagnostics.render();
   }
 
-  private setView(view: MobileView): void {
+  /**
+   * Mobile sections: People is the root; Live / Call own one history entry, so Back returns to
+   * People (a running call keeps going – "Return to call" stays available).
+   */
+  private setView(view: MobileView, viaBack = false): void {
+    if (view === 'people') {
+      if (!viaBack) this.viewBack?.();
+      this.viewBack = null;
+    } else if (!this.viewBack && this.mobile.matches) {
+      this.viewBack = backStack.push(() => this.setView('people', true));
+    }
     this.view = view;
     this.root.dataset.view = view;
     for (const b of this.nav.querySelectorAll('button')) b.setAttribute('aria-current', b.dataset.view === view ? 'page' : 'false');

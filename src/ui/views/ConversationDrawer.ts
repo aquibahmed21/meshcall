@@ -1,5 +1,6 @@
 import type { AppContext } from '../../app';
 import { MAX_DM_LENGTH, type DirectMessage, type DmStatus } from '../../services/DirectMessageService';
+import { backStack } from '../BackStack';
 import { colorFor, h, initials, nodes } from '../dom';
 import { icons } from '../icons';
 
@@ -31,6 +32,8 @@ export class ConversationDrawer {
   private sendBtn = h('button', { class: 'btn primary chat-send', type: 'submit', 'aria-label': 'Send message', html: icons.send });
   private lastSig = '';
   private menu = h('div', { class: 'more-menu dm-menu', role: 'menu', hidden: true });
+  private releaseBack: (() => void) | null = null;
+  private releaseMenuBack: (() => void) | null = null;
 
   constructor(
     private readonly app: AppContext,
@@ -69,19 +72,28 @@ export class ConversationDrawer {
     this.highlight = highlightMessageId ?? null;
     this.lastSig = '';
     this.el.hidden = false;
+    this.releaseBack ??= backStack.push(() => this.close(true)); // Back → back to the contact list
     this.app.dms.setActive(peerId);
     void this.app.notifications.close(`dm-${peerId}`); // clear its notification
     this.render();
     if (!matchMedia('(pointer: coarse)').matches) this.input.focus();
   }
 
-  private setMenu(open: boolean): void {
+  private setMenu(open: boolean, viaBack = false): void {
+    if (this.menu.hidden === !open) return;
     this.menu.hidden = !open;
     document.body.classList.toggle('menu-open', open);
+    if (open) this.releaseMenuBack = backStack.push(() => this.setMenu(false, true));
+    else {
+      if (!viaBack) this.releaseMenuBack?.();
+      this.releaseMenuBack = null;
+    }
   }
 
-  close(): void {
+  close(viaBack = false): void {
     this.setMenu(false);
+    if (!viaBack) this.releaseBack?.();
+    this.releaseBack = null;
     this.peerId = null;
     this.el.hidden = true;
     this.app.dms.setActive(null);

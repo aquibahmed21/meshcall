@@ -2242,15 +2242,23 @@ input[aria-invalid='true'] {
   cursor: pointer;
 }
 
-/* ── Top bar: my profile + ⋮ menu (room, install, leave) ── */
+/* ── Top bar: my profile (left, takes the free space) · status pills · actions ── */
+.topbar {
+  gap: 4px;
+  padding-left: max(10px, env(safe-area-inset-left));
+  padding-right: max(8px, env(safe-area-inset-right));
+}
 .topbar .me {
   display: flex;
+  flex: 1 1 auto;
   align-items: center;
   gap: 10px;
   min-width: 0;
-  padding: 4px 8px 4px 4px;
+  max-width: max-content;
+  margin-right: auto;
+  padding: 4px 10px 4px 4px;
   border: 0;
-  border-radius: 12px;
+  border-radius: 999px;
   background: none;
   color: inherit;
   font: inherit;
@@ -2259,17 +2267,45 @@ input[aria-invalid='true'] {
 .topbar .me:hover {
   background: var(--panel);
 }
+.topbar .me:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.me-avatar {
+  position: relative;
+  flex: none;
+  display: inline-flex;
+}
 .topbar .me .avatar {
-  width: 34px;
-  height: 34px;
-  font-size: 0.85rem;
+  width: 38px;
+  height: 38px;
+  font-size: 0.9rem;
+}
+.presence-dot {
+  position: absolute;
+  right: -1px;
+  bottom: -1px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid var(--bg-2);
+  background: var(--muted);
+}
+.presence-dot.online {
+  background: var(--ok);
+}
+.presence-dot.connecting {
+  background: var(--warn);
 }
 .me-text {
   display: flex;
   flex-direction: column;
+  justify-content: center;
   min-width: 0;
+  line-height: 1.2;
 }
 .me-text strong {
+  font-size: 0.95rem;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2277,9 +2313,23 @@ input[aria-invalid='true'] {
 .me-text small {
   color: var(--muted);
   font-size: 0.75rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.me-text .sig.connected {
-  color: var(--ok);
+.topbar > .icon-btn,
+.topbar .top-menu-wrap > .icon-btn {
+  border-radius: 50%;
+  color: var(--muted);
+}
+.topbar > .icon-btn:hover,
+.topbar .top-menu-wrap > .icon-btn:hover,
+.topbar .top-menu-wrap > .icon-btn[aria-expanded='true'] {
+  color: var(--text);
+}
+.topbar .pills {
+  margin-left: 0;
+  margin-right: 6px;
 }
 .top-menu-wrap {
   position: relative;

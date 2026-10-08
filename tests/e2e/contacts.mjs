@@ -39,7 +39,7 @@ try {
 
   // Top bar
   const top = await ev(ann, () => ({ profile: document.querySelector('.topbar .me')?.textContent ?? '', copy: [...document.querySelectorAll('.topbar button')].some((b) => /copy/i.test(b.textContent)), leaveText: [...document.querySelectorAll('.topbar > button, .topbar > div > button')].some((b) => /^leave$/i.test(b.textContent.trim())), roomRow: !!document.querySelector('.room-chip') }));
-  check('Top bar starts with my profile', /Ann/.test(top.profile) && /Online/.test(top.profile), top.profile);
+  check('Top bar starts with my profile (name, online dot, room)', /Ann/.test(top.profile) && top.profile.includes(ROOM) && (await ev(ann, () => !!document.querySelector('.topbar .me .presence-dot.online'))), top.profile);
   check('No Copy button, no room-name row, no "Leave" text button', !top.copy && !top.roomRow && !top.leaveText);
 
   // Contact row

@@ -1,3 +1,4 @@
+import { backStack } from '../BackStack';
 import { h } from '../dom';
 import { icons } from '../icons';
 
@@ -6,9 +7,12 @@ export class Modal {
   readonly el: HTMLDialogElement;
   private body: HTMLElement;
   onClose: (() => void) | null = null;
+  private readonly dismissible: boolean;
+  private releaseBack: (() => void) | null = null;
 
   constructor(title: string, opts: { dismissible?: boolean; className?: string } = {}) {
     const dismissible = opts.dismissible ?? true;
+    this.dismissible = dismissible;
     this.body = h('div', { class: 'modal-body' });
     this.el = h(
       'dialog',
@@ -25,6 +29,8 @@ export class Modal {
       if (!dismissible) e.preventDefault();
     });
     this.el.addEventListener('close', () => {
+      this.releaseBack?.();
+      this.releaseBack = null;
       this.el.remove();
       this.onClose?.();
     });
@@ -40,6 +46,11 @@ export class Modal {
   open(): this {
     document.body.append(this.el);
     this.el.showModal();
+    // Back closes a dismissible dialog; a non-dismissible one (incoming call) stays until answered.
+    this.releaseBack = backStack.push(() => {
+      if (!this.dismissible) return false;
+      this.close();
+    });
     return this;
   }
 
