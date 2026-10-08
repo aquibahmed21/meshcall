@@ -163,7 +163,7 @@ export class UIManager {
     this.renderAll();
   }
 
-  /** Header identity: avatar with a presence dot, my name, and the room I'm in. */
+  /** Header identity: avatar with a presence dot and my name. */
   private renderProfile(): void {
     const { identity, signaling, rooms } = this.app;
     const sig = signaling.status;
@@ -179,7 +179,7 @@ export class UIManager {
         h('span', { class: 'avatar', style: `--avatar:${colorFor(identity.deviceId)}` }, initials(identity.displayName)),
         h('span', { class: `presence-dot ${state}`, title: stateText }),
       ),
-      h('span', { class: 'me-text' }, h('strong', {}, identity.displayName), ...nodes(room ? h('small', {}, room) : null)),
+      h('span', { class: 'me-text' }, h('strong', {}, identity.displayName)), // room name lives in the ⋮ menu
     );
   }
 

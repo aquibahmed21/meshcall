@@ -2466,30 +2466,68 @@ body.menu-open .toasts {
 .search-row {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
+  height: 40px;
   margin-bottom: 8px;
-  padding-left: 10px;
+  padding: 0 2px 0 12px;
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: 999px;
   background: var(--bg);
+  transition:
+    border-color 0.15s,
+    box-shadow 0.15s;
+}
+/* One focus ring for the whole field (the input itself draws none). */
+.search-row:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(59, 158, 255, 0.18);
 }
 .search-row[hidden] {
   display: none;
 }
 .search-row .search-icon {
   display: inline-flex;
+  flex: none;
   color: var(--muted);
+}
+.search-row .search-icon svg {
+  width: 18px;
+  height: 18px;
+}
+.search-row:focus-within .search-icon {
+  color: var(--accent);
 }
 .side-section .search-row input[type='search'] {
   flex: 1;
+  min-width: 0;
+  height: 100%;
+  min-height: 0;
   margin: 0;
+  padding: 0;
   border: 0;
+  border-radius: 0;
   background: none;
-  padding-left: 0;
+  outline: none;
+  box-shadow: none;
+}
+.side-section .search-row input[type='search']:focus-visible {
+  outline: none;
 }
 .search-row .icon-btn {
-  width: 36px;
-  height: 36px;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  color: var(--muted);
+}
+.search-row .icon-btn svg {
+  width: 18px;
+  height: 18px;
+}
+.search-row .icon-btn:hover {
+  color: var(--text);
+}
+.search-row .icon-btn:focus-visible {
+  outline-offset: 0;
 }
 
 /* Contact rows: long-press call buttons, multi-select */
