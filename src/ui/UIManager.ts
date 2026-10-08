@@ -8,7 +8,7 @@ import { colorFor, h, initials, nodes } from './dom';
 import { icons, logo } from './icons';
 import { CallView } from './views/CallView';
 import { DiagnosticsPanel } from './views/DiagnosticsPanel';
-import { openAddParticipants, openGoLive, openGroupCall, openIncomingCall, openInstallHelp, openLiveInvite, openManageAudience, openOfflineCallDialog, openSettings } from './views/Dialogs';
+import { openAddParticipants, openGoLive, settingsHooks, openIncomingCall, openInstallHelp, openLiveInvite, openManageAudience, openOfflineCallDialog, openSettings } from './views/Dialogs';
 import { ConversationDrawer } from './views/ConversationDrawer';
 import type { Modal } from './views/Modal';
 import { Sidebar } from './views/Sidebar';
@@ -62,10 +62,12 @@ export class UIManager {
     private readonly opts: UIManagerOptions,
   ) {
     this.sidebar = new Sidebar(app, {
-      onGroup: () => openGroupCall(app),
-      onGoLive: () => openGoLive(app),
       onOpenContact: (id) => this.openConversation(id),
+      onCall: (id, media) => this.callUser(id, media),
+      onGroupCall: (ids, media) => this.startGroupCall(ids, media),
+      onPane: (pane) => this.sidebar.setPane(pane), // desktop tabs (mobile: bottom navigation)
     });
+    settingsHooks.openDiagnostics = () => this.toggleDiagnostics(true);
     this.drawer = new ConversationDrawer(app, (id, media) => this.callUser(id, media));
     this.diagnostics = new DiagnosticsPanel(app, () => this.toggleDiagnostics(false));
     this.idle = this.renderIdle();
@@ -84,8 +86,6 @@ export class UIManager {
         { class: 'topbar' },
         this.profile,
         h('div', { class: 'pills' }, this.pushPill, this.sigPill, this.netPill),
-        h('button', { class: 'icon-btn', 'aria-label': 'Diagnostics', title: 'Diagnostics', html: icons.stats, onclick: () => this.toggleDiagnostics() }),
-        h('button', { class: 'icon-btn', 'aria-label': 'Settings', title: 'Settings', html: icons.settings, onclick: () => openSettings(app) }),
         h('div', { class: 'top-menu-wrap' }, this.topMenuBtn, this.topMenu),
       ),
       this.banner,
@@ -123,6 +123,16 @@ export class UIManager {
     }
     if (this.app.presence.status(userId) === 'online') void this.app.calls.startDirectCall(userId, media);
     else openOfflineCallDialog(this.app, userId, media, () => this.openConversation(userId));
+  }
+
+  /** Group call with contacts picked in the list (multi-select or a group entry in call history). */
+  private startGroupCall(userIds: string[], media: 'audio' | 'video'): void {
+    if (this.app.calls.inCall) {
+      this.toasts.show('info', 'You are already in a call');
+      return;
+    }
+    if (userIds.length === 1) return this.callUser(userIds[0]!, media);
+    void this.app.groups.create(userIds, media, '');
   }
 
   /** Streamer calls someone into the running live stream (ringing if online, targeted push if not). */
@@ -197,6 +207,8 @@ export class UIManager {
     this.topMenu.replaceChildren(
       ...nodes(
         room ? h('div', { class: 'menu-label', title: room.roomName }, h('small', {}, 'Room'), h('strong', {}, room.roomName)) : null,
+        room ? item(icons.live, 'Go live', () => (this.app.calls.inCall ? this.toasts.show('info', 'You are already in a call') : openGoLive(this.app))) : null,
+        item(icons.settings, 'Settings', () => openSettings(this.app)),
         inst === 'available' || inst === 'ios-manual' ? item(icons.download, 'Install app', () => this.install()) : null,
         room
           ? item(
@@ -387,9 +399,9 @@ export class UIManager {
     }
     this.view = view;
     this.root.dataset.view = view;
+    // Mobile: the bottom tabs choose the sidebar pane (Call tab without a call = call history).
+    if (this.mobile.matches) this.sidebar.setPane(view === 'call' ? 'calls' : view);
     for (const b of this.nav.querySelectorAll('button')) b.setAttribute('aria-current', b.dataset.view === view ? 'page' : 'false');
-    if (view === 'live') document.getElementById('live')?.scrollIntoView({ block: 'start' });
-    if (view === 'people') document.getElementById('people')?.scrollIntoView({ block: 'start' });
     this.renderBanner();
   }
 

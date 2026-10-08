@@ -101,7 +101,10 @@ try {
   check('Info button is aria-expanded', (await ev(alice, () => document.querySelector('.tile:not(.local) .tile-info').getAttribute('aria-expanded'))) === 'true');
 
   // ── Network Diagnostics panel ─────────────────────────────────────────────
-  await alice.page.click('.topbar button[aria-label=Diagnostics], button[aria-label=Diagnostics]');
+  await alice.page.click('.topbar button[aria-label=More]');
+  await alice.page.click('.top-menu button:has-text("Settings")');
+  await alice.page.click('dialog[open] .settings-tabs button:has-text("Device")');
+  await alice.page.click('dialog[open] button:has-text("Open diagnostics")');
   await alice.page.waitForSelector('.diagnostics .net-card', { timeout: 10_000 });
   const card = await ev(alice, (id) => {
     const c = document.querySelector(`.net-card[data-peer="${id}"]`);
@@ -169,7 +172,7 @@ try {
   const uiTurn = await ev(alice, () => [...document.querySelectorAll('.diagnostics li.ice-test')].map((l) => `${l.dataset.url}:${l.className.replace('ice-test ', '')}`));
   check('Panel "Test all TURN" shows per-server result', uiTurn.some((x) => x.includes(`${TURN_HOST}:3479`) && x.endsWith('success')), uiTurn.join(', '));
   check('Panel groups STUN Tests / TURN Tests', await ev(alice, () => /STUN Tests/.test(document.querySelector('.diagnostics').textContent) && /TURN Tests/.test(document.querySelector('.diagnostics').textContent)));
-  await alice.page.click('.diagnostics .diag-header button[aria-label*=Close], .diagnostics button[aria-label="Close diagnostics"]').catch(() => ev(alice, () => document.querySelector('button[aria-label=Diagnostics]').click()));
+  await alice.page.click('.diagnostics .diag-header button[aria-label*=Close], .diagnostics button[aria-label="Close diagnostics"]').catch(() => alice.page.goBack({ waitUntil: 'commit', timeout: 1500 }).catch(() => {}));
 
   // ── Direct message to an ONLINE user → ScaleDrone → Delivered ───────────
   await alice.page.click(`li.user[data-user="${bob.id}"] .user-row`);

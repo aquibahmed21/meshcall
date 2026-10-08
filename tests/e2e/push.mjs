@@ -183,7 +183,9 @@ try {
   await server('/unsubscribe', { endpoint: ep }); // old endpoint: already invalid, keep the server clean
   ep = ep2;
 
-  await bob.page.click('.topbar button[aria-label=Settings]');
+  await bob.page.click('.topbar button[aria-label=More]');
+  await bob.page.click('.top-menu button:has-text("Settings")');
+  await bob.page.click('dialog[open] .settings-tabs button:has-text("Device")');
   await bob.page.click('dialog button[role=switch]');
   await waitStatus(bob.page, 'disabled');
   check('Unsubscribe: POST /unsubscribe + subscription.unsubscribe()', (await endpointOf(bob.page)) === null && (await server('/isPushSubscribed', { endpoint: ep })).isSubscribed === false);
@@ -354,7 +356,10 @@ try {
   const cep = await endpointOf(carol.page);
   if (cep) created.add(cep);
   check('Retry after the backend recovers → Enabled', recovered, `${await status(carol.page)} ${JSON.stringify((await carol.page.evaluate(() => window.__voip.app.push.diagnostics())).lastError)}`);
-  await carol.page.click('.topbar button[aria-label=Diagnostics]');
+  await carol.page.click('.topbar button[aria-label=More]');
+  await carol.page.click('.top-menu button:has-text("Settings")');
+  await carol.page.click('dialog[open] .settings-tabs button:has-text("Device")');
+  await carol.page.click('dialog[open] button:has-text("Open diagnostics")');
   await carol.page.waitForTimeout(1500);
   const dtext = await carol.page.textContent('.diagnostics');
   check('Diagnostics panel: push section, endpoint redacted, no keys', /Push Notifications/.test(dtext) && /Targeted delivery/.test(dtext) && !/p256dh|auth"/.test(dtext) && !dtext.includes(cep ?? '###'));

@@ -52,7 +52,8 @@ try {
   check('Back closes the conversation → contact list (still in the app)', !(await drawerOpen(ann)) && (await inApp(ann)));
 
   // Dialog (Settings)
-  await ann.page.click('.topbar button[aria-label=Settings]');
+  await ann.page.click('.topbar button[aria-label=More]');
+  await ann.page.click('.top-menu button:has-text("Settings")');
   await ann.page.waitForSelector('dialog[open]');
   await back(ann);
   check('Back closes a dialog (Settings)', (await ev(ann, () => !document.querySelector('dialog[open]'))) && (await inApp(ann)));
@@ -100,22 +101,26 @@ try {
   // Desktop: diagnostics panel
   await bob.page.waitForFunction(() => !window.__voip.app.calls.inCall, null, { timeout: 15_000 });
   await bob.page.waitForTimeout(800);
-  await bob.page.click('.topbar button[aria-label=Diagnostics]');
+  await bob.page.click('.topbar button[aria-label=More]');
+  await bob.page.click('.top-menu button:has-text("Settings")');
+  await bob.page.click('dialog[open] .settings-tabs button:has-text("Device")');
+  await bob.page.click('dialog[open] button:has-text("Open diagnostics")');
+  check('Diagnostics opens from Settings → Device', (await ev(bob, () => !document.querySelector('.diagnostics').hidden && !document.querySelector('dialog[open]'))));
   await back(bob);
   check('Back closes the Diagnostics panel (desktop)', (await ev(bob, () => document.querySelector('.diagnostics').hidden)) && (await inApp(bob)));
 
   // Layers closed in the UI leave no stray entries: one Back now leaves the app.
   await ann.page.click(`li.user[data-user="${bob.id}"] .user-row`);
   await ann.page.click('.dm-head button[aria-label=Back]');
-  await ann.page.click('.topbar button[aria-label=Settings]');
+  await ann.page.click('.topbar button[aria-label=More]');
+  await ann.page.click('.top-menu button:has-text("Settings")');
   await ann.page.click('dialog[open] button[aria-label=Close]');
   await ann.page.click('.topbar button[aria-label=More]');
   await ann.page.keyboard.press('Escape');
   await ann.page.waitForTimeout(500);
-  check('After closing layers in the UI, the history stack is clean', (await ev(ann, () => window.history.state?.__meshcallBack ?? 0)) === 0);
   await ann.page.goBack({ timeout: 5000 }).catch(() => {});
   await ann.page.waitForTimeout(500);
-  check('…so one Back leaves the app as expected', ann.page.url() === 'about:blank', ann.page.url());
+  check('After closing layers in the UI, one Back leaves the app (no "dead" Back presses)', ann.page.url() === 'about:blank', ann.page.url());
 } catch (err) {
   check('Run', false, err.stack?.split('\n').slice(0, 2).join(' '));
 } finally {

@@ -28,6 +28,9 @@ function toggle(label: string, value: boolean, onChange: (v: boolean) => void): 
 
 type SettingsTab = 'call' | 'device';
 
+/** Set by the UI shell: actions Settings can trigger outside the dialog. */
+export const settingsHooks: { openDiagnostics: (() => void) | null } = { openDiagnostics: null };
+
 export function openSettings(app: AppContext, initialTab: SettingsTab = 'call'): Modal {
   const m = new Modal('Settings', { className: 'wide' });
   let tab: SettingsTab = initialTab;
@@ -113,11 +116,29 @@ export function openSettings(app: AppContext, initialTab: SettingsTab = 'call'):
       app.pwa.updateReady
         ? h('button', { class: 'btn primary', onclick: () => app.pwa.applyUpdate() }, 'Reload to update')
         : h('button', { class: 'btn small', onclick: () => void app.pwa.checkForUpdate().then(() => setTimeout(render, 1500)) }, 'Check for updates'),
+    );
+    const diagnostics = h(
+      'section',
+      {},
+      h('h3', {}, 'Diagnostics'),
+      h(
+        'button',
+        {
+          class: 'btn',
+          type: 'button',
+          onclick: () => {
+            m.close();
+            settingsHooks.openDiagnostics?.();
+          },
+        },
+        h('span', { html: icons.stats }),
+        'Open diagnostics',
+      ),
       field('Log level', select(['ERROR', 'WARN', 'INFO', 'DEBUG'].map((l): [string, string] => [l, l]), logHub.level, (v) => logHub.setLevel(v))),
     );
     const tabs: Array<[SettingsTab, string, HTMLElement[]]> = [
       ['call', 'Call', [devices, quality, connection]],
-      ['device', 'Device', [profile, renderNotificationSettings(app, render), appSection]],
+      ['device', 'Device', [profile, renderNotificationSettings(app, render), appSection, diagnostics]],
     ];
     m.setContent(
       h(

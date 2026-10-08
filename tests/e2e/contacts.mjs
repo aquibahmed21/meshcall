@@ -74,13 +74,14 @@ try {
   check('Bob messages Ann → he is back in her list (with the message)', back && (await ev(ann, (id) => window.__voip.app.dms.unreadFor(id), bob.id)) === 1);
 
   // Settings tabs
-  await bob.page.click('.topbar button[aria-label=Settings]');
+  await bob.page.click('.topbar button[aria-label=More]');
+  await bob.page.click('.top-menu button:has-text("Settings")');
   await bob.page.waitForSelector('dialog[open] .settings-tabs');
   const callTab = await ev(bob, () => [...document.querySelectorAll('dialog[open] [role=tabpanel]:not([hidden]) h3')].map((x) => x.textContent));
   await bob.page.click('dialog[open] .settings-tabs button:has-text("Device")');
   const devTab = await ev(bob, () => [...document.querySelectorAll('dialog[open] [role=tabpanel]:not([hidden]) h3')].map((x) => x.textContent));
   check('Settings → Call tab: devices, quality, connection', callTab.join('|') === 'Audio & video devices|Quality|Connection', callTab.join(', '));
-  check('Settings → Device tab: profile, notifications, app', devTab.join('|') === 'Profile|Notifications|App', devTab.join(', '));
+  check('Settings → Device tab: profile, notifications, app, diagnostics', devTab.join('|') === 'Profile|Notifications|App|Diagnostics', devTab.join(', '));
   await bob.page.keyboard.press('Escape');
   await bob.page.click('.topbar .me');
   check('Tapping my profile opens Settings on the Device tab', await bob.page.waitForSelector('dialog[open] #settings-tab-device[aria-selected=true]', { timeout: 5_000 }).then(() => true, () => false));

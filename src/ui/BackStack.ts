@@ -1,75 +1,80 @@
 /**
  * Browser / Android Back for an app without routes.
  *
- * Every open layer (modal, conversation, panel, menu, secondary mobile view) owns exactly one
- * history entry, so the number of our entries always equals the number of open layers:
+ * Every open layer (modal, conversation, panel, menu, secondary mobile view) gets a history
+ * entry at depth = current depth + 1, so Back closes the top layer:
  *
- *   open a layer   → history.pushState         (Back now closes it)
- *   Back pressed   → popstate → close the top layer(s) above the entry we landed on
- *   closed in UI   → its entry is consumed with history.back() (silently), so Back never
- *                    "does nothing" because of a leftover entry
+ *   open a layer   → history.pushState({depth})
+ *   Back pressed   → popstate(depth d) → close every layer deeper than d
+ *   closed in UI   → the layer is forgotten; its entry stays as a "dead" entry
+ *
+ * The stack never calls history.back() for a UI close: that is asynchronous and races with
+ * layers opened in the same moment (e.g. a declined call closes the dialog and opens the call
+ * view), which could step out of the app. Instead, when a Back press lands on dead entries, the
+ * stack keeps going back by itself until it closes a live layer – or, with nothing open,
+ * leaves the app – so Back never appears to "do nothing".
  *
  * A layer's onBack may return false to stay open (e.g. an incoming-call dialog); its entry is
- * then re-armed. Entries left over from before a reload are skipped.
+ * then re-armed.
  */
 interface Layer {
+  depth: number;
   onBack: () => boolean | void;
 }
 
 const MARK = '__meshcallBack';
 
+function depthOf(state: unknown): number {
+  const v = (state as Record<string, unknown> | null)?.[MARK];
+  return typeof v === 'number' ? v : 0;
+}
+
 class BackStack {
   private layers: Layer[] = [];
-  /** popstate events caused by our own history.back() calls. */
-  private ignorePops = 0;
 
   constructor() {
-    window.addEventListener('popstate', (e) => this.onPop(e));
+    window.addEventListener('popstate', (e) => this.onPop(depthOf(e.state)));
   }
 
   /** Register an open layer. Returns the function to call when the UI closes it. */
   push(onBack: () => boolean | void): () => void {
-    const layer: Layer = { onBack };
+    const layer: Layer = { depth: depthOf(history.state) + 1, onBack };
     this.layers.push(layer);
-    history.pushState({ [MARK]: this.layers.length }, '');
-    return () => this.release(layer);
+    history.pushState({ [MARK]: layer.depth }, '');
+    return () => {
+      const i = this.layers.indexOf(layer);
+      if (i >= 0) this.layers.splice(i, 1); // entry becomes dead; skipped on the next Back
+    };
   }
 
   get depth(): number {
     return this.layers.length;
   }
 
-  private release(layer: Layer): void {
-    const i = this.layers.indexOf(layer);
-    if (i < 0) return; // already closed by Back
-    this.layers.splice(i, 1);
-    // Drop one of our entries; the entries are interchangeable, so depth stays = layers.length.
-    this.ignorePops++;
-    history.back();
-  }
-
-  private onPop(e: PopStateEvent): void {
-    if (this.ignorePops > 0) {
-      this.ignorePops--;
-      return;
-    }
-    const raw = (e.state as Record<string, unknown> | null)?.[MARK];
-    const target = typeof raw === 'number' ? raw : 0;
-    if (this.layers.length === 0) {
-      // A leftover entry from before a reload: keep going back so Back still leaves the app.
-      if (target > 0) history.back();
-      return;
-    }
-    // Usually one step; a long-press on Back can jump several entries.
-    while (this.layers.length > target) {
-      const layer = this.layers.pop()!;
-      if (layer.onBack() === false) {
-        // Stay open: re-arm its entry (and stop – the user sees this layer).
-        this.layers.push(layer);
-        history.pushState({ [MARK]: this.layers.length }, '');
-        return;
+  private onPop(depth: number): void {
+    let closed = false;
+    for (;;) {
+      const top = this.topAbove(depth);
+      if (!top) break;
+      this.layers.splice(this.layers.indexOf(top), 1);
+      closed = true;
+      if (top.onBack() === false) {
+        // Stay open: re-arm its entry; the user sees this layer, so stop here.
+        top.depth = depth + 1;
+        this.layers.push(top);
+        history.pushState({ [MARK]: top.depth }, '');
+        break;
       }
     }
+    // Nothing was open above this entry: it was dead (closed in the UI / left over from before a
+    // reload). Keep going – over further dead entries, or out of the app at the bottom.
+    if (!closed) history.back();
+  }
+
+  private topAbove(depth: number): Layer | undefined {
+    let top: Layer | undefined;
+    for (const l of this.layers) if (l.depth > depth && (!top || l.depth > top.depth)) top = l;
+    return top;
   }
 }
 

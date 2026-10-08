@@ -45,7 +45,10 @@ for (const [label, opts] of Object.entries(viewports)) {
   await me.page.waitForFunction(() => window.__voip.diagnostics().call?.peers[0]?.connectionType);
   await me.page.waitForTimeout(2500);
   await me.page.screenshot({ path: `${OUT}${label}-call.png` });
-  await me.page.click('button[aria-label=Diagnostics]');
+  await me.page.click('.topbar button[aria-label=More]');
+  await me.page.click('.top-menu button:has-text("Settings")');
+  await me.page.click('dialog[open] .settings-tabs button:has-text("Device")');
+  await me.page.click('dialog[open] button:has-text("Open diagnostics")');
   await me.page.waitForTimeout(2500);
   await me.page.screenshot({ path: `${OUT}${label}-diagnostics.png` });
   const overflow = await me.page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth);

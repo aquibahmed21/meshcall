@@ -22,7 +22,8 @@
     "test:live-call": "node tests/e2e/live-call.mjs",
     "test:room-persistence": "node tests/e2e/room-persistence.mjs",
     "test:contacts": "node tests/e2e/contacts.mjs",
-    "test:back": "node tests/e2e/back-nav.mjs"
+    "test:back": "node tests/e2e/back-nav.mjs",
+    "test:people": "node tests/e2e/people.mjs"
   },
   "devDependencies": {
     "@types/node": "^26.6.3",

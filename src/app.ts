@@ -1,3 +1,4 @@
+import { CallHistoryService } from './services/CallHistoryService';
 import { GroupCallManager } from './calls/GroupCallManager';
 import { CallManager } from './calls/CallManager';
 import { isTerminal } from './calls/CallStateMachine';
@@ -40,6 +41,7 @@ export interface AppContext {
   rooms: RoomService;
   pwa: PwaService;
   dms: DirectMessageService;
+  history: CallHistoryService;
 }
 
 const log = createLogger('Room');
@@ -65,7 +67,8 @@ export function createApp(): AppContext {
   const pwa = new PwaService();
   pwa.listenForInstall(); // as early as possible – beforeinstallprompt can fire right after load
   const dms = new DirectMessageService(signaling, identity, presence, push);
-  return { dms, pwa, config, identity, settings, signaling, presence, network, media, devices, webrtc, notifications, push, calls, groups, live, chat, rooms };
+  const history = new CallHistoryService(calls, identity);
+  return { history, dms, pwa, config, identity, settings, signaling, presence, network, media, devices, webrtc, notifications, push, calls, groups, live, chat, rooms };
 }
 
 /**
@@ -112,6 +115,7 @@ export async function joinRoom(app: AppContext, room: RoomContext): Promise<void
   app.calls.start();
   app.live.start();
   app.dms.start(room);
+  app.history.start(room);
   app.rooms.set(room);
   try {
     await withTimeout(joined, JOIN_TIMEOUT_MS, 'room join');
@@ -138,6 +142,7 @@ export function leaveRoom(app: AppContext): void {
   app.calls.stop();
   app.live.stop();
   app.dms.stop();
+  app.history.stop();
   app.chat.unbind();
   app.presence.stop();
   app.media.release();

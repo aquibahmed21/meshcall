@@ -2422,3 +2422,191 @@ body.menu-open .toasts {
   background: none;
   text-align: center;
 }
+
+/* ── Sidebar panes: People · Live · Calls ── */
+.side-tabs {
+  flex: none;
+  margin: 10px 14px 0;
+  padding: 4px;
+  border-radius: 10px;
+  background: var(--bg);
+}
+.side-tabs .badge {
+  margin-left: 4px;
+}
+.side-section[hidden] {
+  display: none;
+}
+.call-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.list-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-height: 44px;
+  margin: 4px -6px 0 0;
+}
+.list-count {
+  flex: 1;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+.list-toolbar .icon-btn {
+  border-radius: 50%;
+  color: var(--muted);
+}
+.list-toolbar .icon-btn[aria-pressed='true'],
+.list-toolbar .icon-btn:hover {
+  color: var(--text);
+}
+.search-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+  padding-left: 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg);
+}
+.search-row[hidden] {
+  display: none;
+}
+.search-row .search-icon {
+  display: inline-flex;
+  color: var(--muted);
+}
+.side-section .search-row input[type='search'] {
+  flex: 1;
+  margin: 0;
+  border: 0;
+  background: none;
+  padding-left: 0;
+}
+.search-row .icon-btn {
+  width: 36px;
+  height: 36px;
+}
+
+/* Contact rows: long-press call buttons, multi-select */
+.user-row {
+  -webkit-touch-callout: none;
+  user-select: none;
+  touch-action: pan-y;
+}
+.user.actions,
+.user.picked {
+  background: var(--panel);
+}
+.row-actions {
+  display: flex;
+  gap: 4px;
+  padding-right: 6px;
+}
+.icon-btn.call-btn {
+  border-radius: 50%;
+  background: rgba(46, 204, 113, 0.14);
+  color: var(--ok);
+}
+.icon-btn.call-btn:hover:not(:disabled) {
+  background: rgba(46, 204, 113, 0.26);
+}
+.pick {
+  display: inline-grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  flex: none;
+  border-radius: 50%;
+  border: 2px solid var(--line);
+  color: #fff;
+}
+.pick svg {
+  width: 14px;
+  height: 14px;
+}
+.pick.on {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+.select-bar {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: auto;
+  padding: 10px 14px;
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+  font-weight: 600;
+}
+.select-bar[hidden] {
+  display: none;
+}
+
+/* Call history rows */
+.call-entry .user-row {
+  min-height: 56px;
+}
+.call-entry.missed .user-name {
+  color: var(--bad);
+}
+.call-detail {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--muted);
+}
+.call-detail.bad {
+  color: var(--bad);
+}
+.call-dir {
+  display: inline-flex;
+}
+.call-dir svg {
+  width: 14px;
+  height: 14px;
+}
+.call-media {
+  display: inline-flex;
+  color: var(--muted);
+  padding-right: 6px;
+}
+.group-avatar {
+  background: var(--panel-2);
+  color: var(--muted);
+}
+.group-avatar svg {
+  width: 20px;
+  height: 20px;
+}
+
+@media (max-width: 767px) {
+  .side-tabs {
+    display: none;
+  }
+  /* Call tab without a running call shows the call history (sidebar), not the empty stage. */
+  .app[data-view='call']:not(.in-call) .sidebar {
+    display: flex;
+  }
+  .app[data-view='call']:not(.in-call) .stage {
+    display: none;
+  }
+}
+
+.search-row input[type='search']::-webkit-search-cancel-button {
+  display: none; /* our own close button clears and closes */
+}
+.call-entry {
+  display: flex;
+  border-radius: 10px;
+}
+.call-entry:hover {
+  background: var(--panel);
+}
