@@ -434,7 +434,7 @@ export function openOfflineCallDialog(app: AppContext, userId: string, media: Me
   const name = user?.name ?? app.presence.nameOf(userId);
   const status = user?.status ?? 'unknown';
   const canPush = app.push.canSendToUsers;
-  const m = new Modal(`Call ${name}`);
+  const m = new Modal(`Call ${name}`, { className: 'offline-call' });
   const what = status === 'unknown' || status === 'connecting' ? `${name}'s status is unknown right now` : `${name} is currently offline`;
   m.setContent(
     ...nodes(

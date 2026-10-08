@@ -2822,3 +2822,52 @@ body.menu-open .toasts {
     max-width: none;
   }
 }
+
+/* Action rows never overflow: wrap instead of pushing buttons off-screen */
+.modal-actions {
+  flex-wrap: wrap;
+}
+.modal-actions .btn {
+  min-width: 0;
+  white-space: nowrap;
+}
+/* Offline-call dialog: centred, buttons stacked full width on phones (primary first) */
+.modal.offline-call .modal-body {
+  text-align: center;
+}
+.modal.offline-call .avatar.big {
+  margin: 4px auto 0;
+}
+@media (max-width: 767px) {
+  .modal.offline-call {
+    width: 100%;
+    max-width: none;
+  }
+  .modal.offline-call .modal-actions {
+    flex-direction: column-reverse;
+    align-items: stretch;
+  }
+  .modal.offline-call .modal-actions .btn {
+    width: 100%;
+    justify-content: center;
+  }
+}
+
+/* Icon + label buttons: icon vertically centred with the text, consistent size */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+.btn > span:has(> svg) {
+  display: inline-flex;
+  flex: none;
+}
+.btn svg {
+  width: 18px;
+  height: 18px;
+}
+.modal.offline-call .avatar.big {
+  display: grid;
+}
