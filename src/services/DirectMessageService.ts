@@ -128,6 +128,17 @@ export class DirectMessageService {
     return this.conversations.get(peerId)?.unread ?? 0;
   }
 
+  /** Delete the whole conversation with someone (removing a contact). */
+  deleteConversation(peerId: string): void {
+    const c = this.conversations.get(peerId);
+    if (!c) return;
+    for (const m of c.messages) this.clearAck(m.messageId);
+    this.conversations.delete(peerId);
+    if (this.active === peerId) this.active = null;
+    this.persist();
+    this.events.emit('change', undefined);
+  }
+
   /** The conversation the user is looking at (its incoming messages are not "unread"). */
   setActive(peerId: string | null): void {
     this.active = peerId;

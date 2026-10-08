@@ -73,7 +73,7 @@ async function enterRoom(page, room) {
   if (want && (await page.evaluate((r) => window.__voip?.app.rooms.current?.roomName === r, want))) return;
   if (room) await page.fill('#room-name', room);
   await page.click('.room-screen button[type=submit]');
-  await page.waitForSelector('.room-chip strong', { timeout: 30_000 });
+  await page.waitForSelector('.topbar .me', { timeout: 30_000 });
 }
 const status = (page) => page.evaluate(() => window.__voip.app.push.status);
 const waitStatus = (page, s, timeout = 45_000) => page.waitForFunction((x) => window.__voip.app.push.status === x, s, { timeout }).then(() => true, () => false);
@@ -294,14 +294,16 @@ try {
   check('App visible → no duplicate system notification for a call push', !(await notifications(bob.ctx)).some((n) => n.tag === 'call-dup-1'));
 
   // App open in ANOTHER room + click → offer to switch (rooms are isolated).
-  await bob.page.click('.room-chip button[aria-label="Leave room"]');
+  await bob.page.click('.topbar button[aria-label=More]');
+  await bob.page.click('.top-menu button:has-text("Leave room")');
   await enterRoom(bob.page, OTHER);
   await deliver(cdp, regId, callPush('x-room', ROOM));
   const offered = await bob.page.waitForSelector('.toast.has-action button', { timeout: 10_000 }).then(() => true, () => false);
   check('Push for another room while open → "Switch room" offer, no silent switch', offered && (await bob.page.evaluate(() => window.__voip.app.rooms.current.roomName)) === OTHER);
 
   // In-app background notification (app running): Decline action rejects the real call.
-  await bob.page.click('.room-chip button[aria-label="Leave room"]');
+  await bob.page.click('.topbar button[aria-label=More]');
+  await bob.page.click('.top-menu button:has-text("Leave room")');
   await enterRoom(bob.page, ROOM);
   await alice.page.waitForFunction((id) => window.__voip.app.presence.status(id) === 'online', bobDevice, { timeout: 25_000 });
   await alice.page.evaluate((id) => window.__voip.app.calls.startDirectCall(id, 'audio'), bobDevice);

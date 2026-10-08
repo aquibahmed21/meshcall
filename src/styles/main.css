@@ -2241,3 +2241,134 @@ input[aria-invalid='true'] {
   font-size: 0.78rem;
   cursor: pointer;
 }
+
+/* ── Top bar: my profile + ⋮ menu (room, install, leave) ── */
+.topbar .me {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 4px 8px 4px 4px;
+  border: 0;
+  border-radius: 12px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+.topbar .me:hover {
+  background: var(--panel);
+}
+.topbar .me .avatar {
+  width: 34px;
+  height: 34px;
+  font-size: 0.85rem;
+}
+.me-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.me-text strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.me-text small {
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+.me-text .sig.connected {
+  color: var(--ok);
+}
+.top-menu-wrap {
+  position: relative;
+  flex: none;
+}
+.more-menu.top-menu,
+.more-menu.dm-menu {
+  top: calc(100% + 6px);
+  right: 0;
+  bottom: auto;
+  z-index: 50;
+}
+.menu-label {
+  display: flex;
+  flex-direction: column;
+  padding: 6px 12px 8px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 4px;
+  min-width: 0;
+}
+.menu-label small {
+  color: var(--muted);
+}
+.menu-label strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.menu-item.danger {
+  color: var(--bad);
+}
+
+/* ── Contact rows: the whole row opens the conversation ── */
+.user {
+  padding: 0;
+}
+.user-row {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  min-height: 52px;
+  padding: 8px 6px;
+  border: 0;
+  border-radius: 10px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+.user-row .user-info {
+  min-width: 0;
+}
+
+/* ── Conversation header ── */
+.dm-title {
+  min-width: 0;
+}
+.dm-title strong {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dm-head .icon-btn.dm-back {
+  margin-left: -4px;
+}
+
+/* ── Settings: Call / Device tabs ── */
+.settings-tabs {
+  margin-bottom: 14px;
+  padding: 4px;
+  border-radius: 10px;
+  background: var(--bg-2);
+}
+.settings-grid[hidden] {
+  display: none;
+}
+
+body.menu-open .toasts {
+  visibility: hidden;
+}
+.more-menu.top-menu {
+  z-index: 60;
+}
+.enable-card:not(.blocked) {
+  padding: 0;
+  border: 0;
+  background: none;
+  text-align: center;
+}

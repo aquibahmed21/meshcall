@@ -39,7 +39,8 @@ async function enterRoom(page, room) {
   await page.waitForFunction(() => !!window.__voip?.app.rooms.current && window.__voip.app.signaling.status === 'connected', null, { timeout: 30_000 });
 }
 async function leaveRoom(u) {
-  await u.page.click('.room-chip button[aria-label="Leave room"]');
+  await u.page.click('.topbar button[aria-label=More]');
+  await u.page.click('.top-menu button:has-text("Leave room")');
   await u.page.waitForSelector('#room-name', { timeout: 20_000 });
 }
 async function user(name) {
@@ -47,7 +48,7 @@ async function user(name) {
   const page = await ctx.newPage();
   page.on('pageerror', (e) => console.log(`[${name} pageerror]`, e.message));
   const pushRequests = [];
-  page.on('request', (r) => /notifyAll|\/notify\b/.test(r.url()) && pushRequests.push(r.url()));
+  page.on('request', (r) => /notifyAll/.test(r.url()) && pushRequests.push(r.url())); // targeted /notify is fine
   await page.goto(URL);
   await page.fill('#name', name);
   await page.click('button[type=submit]');
@@ -171,15 +172,15 @@ try {
   await alice.page.click('.diagnostics .diag-header button[aria-label*=Close], .diagnostics button[aria-label="Close diagnostics"]').catch(() => ev(alice, () => document.querySelector('button[aria-label=Diagnostics]').click()));
 
   // ── Direct message to an ONLINE user → ScaleDrone → Delivered ───────────
-  await alice.page.click(`li.user[data-user="${bob.id}"] .msg-btn`);
+  await alice.page.click(`li.user[data-user="${bob.id}"] .user-row`);
   await alice.page.waitForSelector('.dm-drawer:not([hidden])');
   await alice.page.fill('.dm-drawer .chat-input', 'Hello Bob');
   await alice.page.press('.dm-drawer .chat-input', 'Enter');
   await alice.page.waitForSelector('.dm-drawer .msg-delivery.delivered', { timeout: 15_000 }).catch(() => {});
   check('Online DM: Sent via ScaleDrone and Delivered (recipient ack)', (await dmStatus(alice, bob.id))[0] === 'delivered', (await dmStatus(alice, bob.id)).join(','));
-  const bobGot = await ev(bob, (id) => ({ msgs: window.__voip.app.dms.conversation(id).messages.map((m) => m.text), unread: window.__voip.app.dms.unreadFor(id), badge: document.querySelector(`li.user[data-user="${id}"] .msg-btn .badge`)?.textContent, toast: [...document.querySelectorAll('.toast')].map((t) => t.textContent).join('|') }), alice.id);
+  const bobGot = await ev(bob, (id) => ({ msgs: window.__voip.app.dms.conversation(id).messages.map((m) => m.text), unread: window.__voip.app.dms.unreadFor(id), badge: document.querySelector(`li.user[data-user="${id}"] .user-row .badge`)?.textContent, toast: [...document.querySelectorAll('.toast')].map((t) => t.textContent).join('|') }), alice.id);
   check('Recipient receives it once, with unread badge + toast', bobGot.msgs.length === 1 && bobGot.msgs[0] === 'Hello Bob' && bobGot.unread === 1 && bobGot.badge === '1' && /Alice/.test(bobGot.toast), JSON.stringify(bobGot));
-  await bob.page.click(`li.user[data-user="${alice.id}"] .msg-btn`);
+  await bob.page.click(`li.user[data-user="${alice.id}"] .user-row`);
   check('Opening the conversation clears unread', (await ev(bob, (id) => window.__voip.app.dms.unreadFor(id), alice.id)) === 0);
   check('No push request for an online recipient', alice.pushRequests.length === 0);
 
@@ -189,21 +190,22 @@ try {
   await waitPresence(alice, bob.id, 'offline', 30_000).catch(() => {});
   const st = await presence(alice, bob.id);
   check('Bob shown offline in Alice’s room', st !== 'online', st);
-  const btns = await ev(alice, (id) => [...document.querySelectorAll(`li.user[data-user="${id}"] button`)].map((b) => `${b.getAttribute('aria-label')}:${b.disabled}`), bob.id);
-  check('Offline user: Call / Video / Message buttons stay enabled', btns.length >= 3 && btns.every((b) => b.endsWith(':false')), btns.join(', '));
-
-  await alice.page.click(`li.user[data-user="${bob.id}"] button[aria-label="Audio call Bob"]`);
+  await alice.page.click(`li.user[data-user="${bob.id}"] .user-row`);
+  await alice.page.waitForSelector('.dm-drawer:not([hidden])');
+  const btns = await ev(alice, () => [...document.querySelectorAll('.dm-head button')].map((b) => `${b.getAttribute('aria-label')}:${b.disabled}`));
+  check('Offline user: contact opens and Audio / Video call stay enabled', btns.some((b) => b === 'Audio call Bob:false') && btns.some((b) => b === 'Video call Bob:false'), btns.join(', '));
+  await alice.page.click('.dm-head button[aria-label="Audio call Bob"]');
   await alice.page.waitForSelector('dialog', { timeout: 5_000 });
   const dlg = await ev(alice, () => [...document.querySelectorAll('dialog[open]')].map((d) => d.textContent).join(' '));
   check('Offline call → dialog explains instead of a blind WebRTC attempt', /currently offline|status is unknown/.test(dlg) && (await ev(alice, () => window.__voip.app.calls.session === null)), dlg.slice(0, 160));
-  check('Push unavailable → no "Send Call Notification" pretending to work', !/Send Call Notification/.test(dlg) && /Message instead/.test(dlg));
+  check('Targeted push available → "Send Call Notification" offered, plus Message instead', /Send Call Notification/.test(dlg) && /Message instead/.test(dlg));
   await alice.page.click('dialog[open] button:has-text("Cancel")');
 
   // ── DM to OFFLINE user → queued (never /notifyAll), delivered when online ─
-  await alice.page.click(`li.user[data-user="${bob.id}"] .msg-btn`);
+  await alice.page.click(`li.user[data-user="${bob.id}"] .user-row`);
   await alice.page.waitForSelector('.dm-drawer .dm-banner:not([hidden])', { timeout: 5_000 });
   const banner = await ev(alice, () => document.querySelector('.dm-drawer .dm-banner').textContent);
-  check('Conversation explains push unavailability for offline users', /offline/.test(banner) && /Push delivery is unavailable/.test(banner), banner.slice(0, 100));
+  check('Conversation shows a short offline note', /offline/.test(banner) && banner.length < 80, banner);
   await alice.page.fill('.dm-drawer .chat-input', 'Are you there?');
   await alice.page.press('.dm-drawer .chat-input', 'Enter');
   await alice.page.waitForSelector('.dm-drawer .msg-delivery.queued', { timeout: 5_000 }).catch(() => {});

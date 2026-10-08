@@ -26,8 +26,11 @@ function toggle(label: string, value: boolean, onChange: (v: boolean) => void): 
   return h('label', { class: 'toggle' }, input, h('span', {}, label));
 }
 
-export function openSettings(app: AppContext): Modal {
+type SettingsTab = 'call' | 'device';
+
+export function openSettings(app: AppContext, initialTab: SettingsTab = 'call'): Modal {
   const m = new Modal('Settings', { className: 'wide' });
+  let tab: SettingsTab = initialTab;
   let version = '';
   void app.pwa.version().then((v) => {
     version = v ?? '';
@@ -51,73 +54,81 @@ export function openSettings(app: AppContext): Modal {
     });
     const install = app.pwa.installState;
     const installText: Record<string, string> = {
-      installed: 'Installed – running as an app',
-      available: 'Can be installed on this device',
-      'ios-manual': 'Install via Share → Add to Home Screen',
-      unavailable: 'Use your browser menu → "Install app" / "Add to Home screen" (if offered)',
+      installed: 'Installed',
+      available: 'Not installed',
+      'ios-manual': 'Not installed',
+      unavailable: 'Not installed',
     };
+    // Call = how calls sound/look and connect · Device = this browser/device (identity, push, app).
+    const devices = h(
+      'section',
+      {},
+      h('h3', {}, 'Audio & video devices'),
+      field('Microphone', select(devOpts(d.audioinput, 'Microphone'), s.audioInputId ?? '', (v) => void app.media.switchDevice('audioinput', v || null))),
+      field('Camera', select(devOpts(d.videoinput, 'Camera'), s.videoInputId ?? '', (v) => void app.media.switchDevice('videoinput', v || null))),
+      d.outputSelectable
+        ? field('Speaker', select(devOpts(d.audiooutput, 'Speaker'), s.audioOutputId ?? '', (v) => app.settings.update({ audioOutputId: v || null })))
+        : null,
+    );
+    const quality = h(
+      'section',
+      {},
+      h('h3', {}, 'Quality'),
+      field(
+        'Video',
+        select<VideoQualityPreset>(
+          [['auto', 'Auto (adaptive)'], ['low', 'Low (180p)'], ['360p', '360p'], ['480p', '480p'], ['720p', '720p'], ['1080p', '1080p']],
+          s.videoQuality,
+          (v) => app.settings.update({ videoQuality: v }),
+        ),
+      ),
+      field('Audio', select<AudioQualityPreset>([['low', 'Low (16 kbps)'], ['standard', 'Standard (32 kbps)'], ['high', 'High (64 kbps)']], s.audioQuality, (v) => app.settings.update({ audioQuality: v }))),
+      toggle('Echo cancellation', s.echoCancellation, (v) => app.settings.update({ echoCancellation: v })),
+      toggle('Noise suppression', s.noiseSuppression, (v) => app.settings.update({ noiseSuppression: v })),
+      toggle('Auto gain control', s.autoGainControl, (v) => app.settings.update({ autoGainControl: v })),
+    );
+    const connection = h(
+      'section',
+      {},
+      h('h3', {}, 'Connection'),
+      field(
+        'ICE test mode',
+        select<IceTestMode>(
+          [['normal', 'Normal – P2P first, TURN fallback'], ['relay-only', 'TEST: force TURN relay'], ['no-relay', 'TEST: disable TURN']],
+          s.iceTestMode,
+          (v) => app.settings.update({ iceTestMode: v }),
+        ),
+        'New connections only; resets on reload.',
+      ),
+    );
+    const profile = h('section', {}, h('h3', {}, 'Profile'), field('Display name', nameInput, `Device ID ${app.identity.deviceId}`));
+    const appSection = h(
+      'section',
+      {},
+      h('h3', {}, 'App'),
+      h('p', {}, installText[install]),
+      install === 'available' ? h('button', { class: 'btn primary', onclick: () => void app.pwa.promptInstall().then(render) }, h('span', { html: icons.download }), 'Install MeshCall') : null,
+      install === 'ios-manual' ? h('button', { class: 'btn', onclick: () => openInstallHelp(app) }, 'Show me how') : null,
+      version ? h('p', { class: 'hint' }, `Version ${version}`) : null,
+      app.pwa.updateReady
+        ? h('button', { class: 'btn primary', onclick: () => app.pwa.applyUpdate() }, 'Reload to update')
+        : h('button', { class: 'btn small', onclick: () => void app.pwa.checkForUpdate().then(() => setTimeout(render, 1500)) }, 'Check for updates'),
+      field('Log level', select(['ERROR', 'WARN', 'INFO', 'DEBUG'].map((l): [string, string] => [l, l]), logHub.level, (v) => logHub.setLevel(v))),
+    );
+    const tabs: Array<[SettingsTab, string, HTMLElement[]]> = [
+      ['call', 'Call', [devices, quality, connection]],
+      ['device', 'Device', [profile, renderNotificationSettings(app, render), appSection]],
+    ];
     m.setContent(
       h(
         'div',
-        { class: 'settings-grid' },
-        h('section', {}, h('h3', {}, 'Profile'), field('Display name', nameInput, `Device ID ${app.identity.deviceId}`)),
-        h(
-          'section',
-          {},
-          h('h3', {}, 'Devices'),
-          field('Microphone', select(devOpts(d.audioinput, 'Microphone'), s.audioInputId ?? '', (v) => void app.media.switchDevice('audioinput', v || null))),
-          field('Camera', select(devOpts(d.videoinput, 'Camera'), s.videoInputId ?? '', (v) => void app.media.switchDevice('videoinput', v || null))),
-          d.outputSelectable
-            ? field('Speaker', select(devOpts(d.audiooutput, 'Speaker'), s.audioOutputId ?? '', (v) => app.settings.update({ audioOutputId: v || null })))
-            : h('p', { class: 'hint' }, 'Speaker selection is not supported by this browser.'),
-          d.audioinput.length && !d.audioinput[0]!.label ? h('p', { class: 'hint' }, 'Device names appear after granting camera/microphone permission.') : null,
+        { class: 'panel-tabs settings-tabs', role: 'tablist', 'aria-label': 'Settings' },
+        ...tabs.map(([id, label]) =>
+          h('button', { class: 'panel-tab', role: 'tab', type: 'button', id: `settings-tab-${id}`, 'aria-selected': String(tab === id), 'aria-controls': `settings-panel-${id}`, onclick: () => ((tab = id), render()) }, label),
         ),
-        h(
-          'section',
-          {},
-          h('h3', {}, 'Quality'),
-          field(
-            'Video',
-            select<VideoQualityPreset>(
-              [['auto', 'Auto (adaptive)'], ['low', 'Low (180p)'], ['360p', '360p'], ['480p', '480p'], ['720p', '720p'], ['1080p', '1080p']],
-              s.videoQuality,
-              (v) => app.settings.update({ videoQuality: v }),
-            ),
-            'Applied live via RTCRtpSender.setParameters – no reconnect.',
-          ),
-          field('Audio', select<AudioQualityPreset>([['low', 'Low (16 kbps)'], ['standard', 'Standard (32 kbps)'], ['high', 'High (64 kbps)']], s.audioQuality, (v) => app.settings.update({ audioQuality: v }))),
-          toggle('Echo cancellation', s.echoCancellation, (v) => app.settings.update({ echoCancellation: v })),
-          toggle('Noise suppression', s.noiseSuppression, (v) => app.settings.update({ noiseSuppression: v })),
-          toggle('Auto gain control', s.autoGainControl, (v) => app.settings.update({ autoGainControl: v })),
-        ),
-        renderNotificationSettings(app, render),
-        h(
-          'section',
-          {},
-          h('h3', {}, 'App'),
-          h('p', {}, installText[install]),
-          install === 'available' ? h('button', { class: 'btn primary', onclick: () => void app.pwa.promptInstall().then(render) }, h('span', { html: icons.download }), 'Install MeshCall') : null,
-          install === 'ios-manual' ? h('button', { class: 'btn', onclick: () => openInstallHelp(app) }, 'Show me how') : null,
-          h('p', { class: 'hint' }, `Offline app shell: ${app.pwa.registration ? 'on' : 'unavailable'}${version ? ` · version ${version}` : ''}`),
-          app.pwa.updateReady
-            ? h('button', { class: 'btn primary', onclick: () => app.pwa.applyUpdate() }, 'Reload to update')
-            : h('button', { class: 'btn small', onclick: () => void app.pwa.checkForUpdate().then(() => setTimeout(render, 1500)) }, 'Check for updates'),
-        ),
-        h(
-          'section',
-          {},
-          h('h3', {}, 'Advanced / testing'),
-          field(
-            'ICE test mode',
-            select<IceTestMode>(
-              [['normal', 'Normal – P2P first, TURN fallback'], ['relay-only', 'TEST: force TURN relay'], ['no-relay', 'TEST: disable TURN']],
-              s.iceTestMode,
-              (v) => app.settings.update({ iceTestMode: v }),
-            ),
-            'Test modes apply to NEW connections only and reset on reload. Never use them for normal calls.',
-          ),
-          field('Log level', select(['ERROR', 'WARN', 'INFO', 'DEBUG'].map((l): [string, string] => [l, l]), logHub.level, (v) => logHub.setLevel(v))),
-        ),
+      ),
+      ...tabs.map(([id, , sections]) =>
+        h('div', { class: 'settings-grid', role: 'tabpanel', id: `settings-panel-${id}`, 'aria-labelledby': `settings-tab-${id}`, hidden: tab !== id }, ...sections),
       ),
     );
   };
@@ -400,14 +411,7 @@ export function openOfflineCallDialog(app: AppContext, userId: string, media: Me
     ...nodes(
       h('div', { class: 'avatar big', style: `--avatar:${colorFor(userId)}` }, initials(name)),
       h('p', { class: 'incoming-text' }, `${what}.`),
-      canPush
-        ? h('p', {}, `${name} gets a call notification on their device${user?.pushEnabled ? '' : ' if they have enabled notifications'}.`)
-        : h(
-            'p',
-            { class: 'notice' },
-            `${name} cannot receive a call notification: the push server cannot notify one specific person yet. `,
-            'You can send a message instead – it will be delivered when they come online.',
-          ),
+      canPush ? null : h('p', { class: 'notice' }, 'Call notifications are unavailable.'),
       h(
         'div',
         { class: 'modal-actions' },

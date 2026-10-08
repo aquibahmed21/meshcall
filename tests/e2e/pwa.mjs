@@ -62,7 +62,7 @@ async function enterRoom(page, room) {
   if (want && (await page.evaluate((r) => window.__voip?.app.rooms.current?.roomName === r, want))) return;
   await page.fill('#room-name', room);
   await page.click('.room-screen button[type=submit]');
-  await page.waitForSelector('.room-chip strong', { timeout: 30_000 }).catch(async (e) => {
+  await page.waitForSelector('.topbar .me', { timeout: 30_000 }).catch(async (e) => {
     console.log('   join failed:', await page.textContent('#room-error').catch(() => '?'));
     throw e;
   });

@@ -1,7 +1,7 @@
 /**
  * Streamer calls participants into a live stream.
  *   online  → ringing invitation (dialog + ringtone) → Watch → joins as a normal viewer
- *   offline → targeted push only (never /notifyAll); rung as soon as they come online
+ *   offline → targeted push only (never /notifyAll); rung when they come online
  *   SW      → "Live Stream Invitation" notification text for a live incoming-call push
  *
  *   npm run dev   then   node tests/e2e/live-call.mjs
@@ -47,7 +47,7 @@ async function user(name) {
   const page = await ctx.newPage();
   page.on('pageerror', (e) => console.log(`[${name} pageerror]`, e.message));
   const backend = [];
-  page.on('request', (r) => /notifyAll|\/notify\b/.test(r.url()) && backend.push(r.url()));
+  page.on('request', (r) => /notifyAll/.test(r.url()) && backend.push(r.url()));
   await page.goto(URL);
   await page.fill('#name', name);
   await page.click('button[type=submit]');
@@ -64,7 +64,8 @@ try {
   for (const u of [bob, carol]) await host.page.waitForFunction((id) => window.__voip.app.presence.status(id) === 'online', u.id, { timeout: 30_000 });
 
   // Carol leaves → offline for the host
-  await carol.page.click('.room-chip button[aria-label="Leave room"]');
+  await carol.page.click('.topbar button[aria-label=More]');
+  await carol.page.click('.top-menu button:has-text("Leave room")');
   await carol.page.waitForSelector('#room-name');
   await host.page.waitForFunction((id) => window.__voip.app.presence.status(id) !== 'online', carol.id, { timeout: 30_000 });
 
@@ -74,7 +75,8 @@ try {
 
   // ── online participant: host uses the normal Call button ──
   const t0 = await tones(bob);
-  await host.page.click(`li.user[data-user="${bob.id}"] button[aria-label="Audio call Bob"]`);
+  await host.page.click(`li.user[data-user="${bob.id}"] .user-row`);
+  await host.page.click('.dm-head button[aria-label="Audio call Bob"]');
   await bob.page.waitForSelector('dialog.live-ring[open]', { timeout: 15_000 });
   const dlg = await ev(bob, () => document.querySelector('dialog.live-ring[open]').textContent);
   check('Online: incoming live-call UI shown', /Host is calling you to watch the live stream “Demo”/.test(dlg), dlg.slice(0, 90));
@@ -92,10 +94,11 @@ try {
   check('Answer → Bob joins as a normal viewer (existing live path)', joined && (await ev(bob, () => window.__voip.app.calls.state?.kind === 'live' && window.__voip.app.calls.state.role === 'viewer')));
 
   // ── offline participant ──
-  await host.page.click(`li.user[data-user="${carol.id}"] button[aria-label="Audio call Carol"]`);
+  await host.page.click(`li.user[data-user="${carol.id}"] .user-row`);
+  await host.page.click('.dm-head button[aria-label="Audio call Carol"]');
   await host.page.waitForTimeout(1500);
   const toast = await ev(host, () => document.querySelector('.toasts').textContent);
-  check('Offline: host told the truth (no targeted push available)', /Carol is offline/.test(toast) && /rung as soon as they come online/.test(toast), toast.slice(-140));
+  check('Offline: host told Carol will be rung when online', /Carol is offline/.test(toast) && /rung when they come online/.test(toast), toast.slice(-140));
   check('Offline: nothing broadcast (/notifyAll never requested)', host.backend.length === 0, host.backend.join(','));
   check('Offline: Carol added to the audience', await ev(host, (id) => window.__voip.app.live.isAllowed(id), carol.id));
   const ct0 = await tones(carol);

@@ -96,8 +96,8 @@ try {
   await alice.page.fill('#room-name', '   ');
   check('Empty room name cannot join', await ev(alice, () => document.querySelector('.room-screen button[type=submit]').disabled));
   await enterRoom(alice.page, `  ${ROOM.replace(' ', '   ')}  `); // messy spacing → same normalised room
-  await alice.page.waitForSelector('.room-chip strong', { timeout: 10_000 });
-  check('Room shown in UI (name normalised)', (await ev(alice, () => document.querySelector('.room-chip strong')?.textContent)) === ROOM);
+  await alice.page.waitForSelector('.top-menu .menu-label strong', { state: 'attached', timeout: 10_000 });
+  check('Room shown in UI (name normalised)', (await ev(alice, () => document.querySelector('.top-menu .menu-label strong')?.textContent)) === ROOM);
 
   const bob = await user('Bob');
   const zara = await user('Zara', ROOM_B);
@@ -125,7 +125,8 @@ try {
   await bob.page.reload();
   check('Refresh reopens the active room automatically', await bob.page.waitForFunction((r) => window.__voip?.app.rooms.current?.roomName === r && window.__voip.app.signaling.status === 'connected', ROOM, { timeout: 30_000 }).then(() => true, () => false));
 
-  await alice.page.click('.room-chip button[aria-label="Leave room"]');
+  await alice.page.click('.topbar button[aria-label=More]');
+  await alice.page.click('.top-menu button:has-text("Leave room")');
   await alice.page.waitForSelector('#room-name');
   check('Leave room → room screen, no stale subscriptions/state', (await subscriptions(alice)).length === 0 && (await ev(alice, () => window.__voip.app.presence.list().length === 0 && window.__voip.app.rooms.current === null)));
   await bob.page.waitForFunction((id) => window.__voip.app.presence.status(id) === 'offline', alice.id, { timeout: 20_000 }).then(() => check('Others see the leaver offline', true), () => check('Others see the leaver offline', false));
@@ -133,7 +134,8 @@ try {
   await alice.page.waitForTimeout(2500);
   const inB = await ev(alice, () => window.__voip.app.presence.list().filter((u) => u.status === 'online').map((u) => u.name));
   check('Join a different room: only that room\'s users', inB.includes('Zara') && !inB.includes('Bob'), inB.join(','));
-  await alice.page.click('.room-chip button[aria-label="Leave room"]');
+  await alice.page.click('.topbar button[aria-label=More]');
+  await alice.page.click('.top-menu button:has-text("Leave room")');
   await enterRoom(alice.page, ROOM);
   await waitOnline(alice, bob);
 
@@ -181,7 +183,8 @@ try {
   await dave.page.click('dialog.incoming button[aria-label=Decline]');
   check('Participant rejects invitation → inviter informed, call unaffected', (await waitToast(alice, /Dave declined/)) && (await peersOf(alice)).length === 2);
 
-  await frank.page.click('.room-chip button[aria-label="Leave room"]');
+  await frank.page.click('.topbar button[aria-label=More]');
+  await frank.page.click('.top-menu button:has-text("Leave room")');
   await alice.page.waitForFunction((id) => window.__voip.app.presence.status(id) === 'offline', frank.id, { timeout: 20_000 });
   await ev(alice, (id) => window.__voip.app.calls.addParticipants([id]), frank.id);
   check('Offline participant → "appears to be offline"', await waitToast(alice, /Frank appears to be offline/, 15_000));

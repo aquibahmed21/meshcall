@@ -20,7 +20,8 @@
     "test:push": "node tests/e2e/push.mjs",
     "test:diagnostics": "node tests/e2e/diagnostics.mjs",
     "test:live-call": "node tests/e2e/live-call.mjs",
-    "test:room-persistence": "node tests/e2e/room-persistence.mjs"
+    "test:room-persistence": "node tests/e2e/room-persistence.mjs",
+    "test:contacts": "node tests/e2e/contacts.mjs"
   },
   "devDependencies": {
     "@types/node": "^26.6.3",

@@ -30,11 +30,15 @@ export class ConversationDrawer {
   private input = h('textarea', { class: 'chat-input', rows: 1, maxlength: MAX_DM_LENGTH, placeholder: 'Message…', 'aria-label': 'Message', enterkeyhint: 'send' });
   private sendBtn = h('button', { class: 'btn primary chat-send', type: 'submit', 'aria-label': 'Send message', html: icons.send });
   private lastSig = '';
+  private menu = h('div', { class: 'more-menu dm-menu', role: 'menu', hidden: true });
 
   constructor(
     private readonly app: AppContext,
-    private readonly onCall: (peerId: string) => void,
+    private readonly onCall: (peerId: string, media: 'audio' | 'video') => void,
   ) {
+    document.addEventListener('click', (e) => {
+      if (!this.menu.hidden && !this.menu.contains(e.target as Node)) this.setMenu(false);
+    });
     const form = h('form', { class: 'chat-composer' }, this.input, this.sendBtn);
     form.addEventListener('submit', (e) => {
       e.preventDefault();
@@ -71,7 +75,13 @@ export class ConversationDrawer {
     if (!matchMedia('(pointer: coarse)').matches) this.input.focus();
   }
 
+  private setMenu(open: boolean): void {
+    this.menu.hidden = !open;
+    document.body.classList.toggle('menu-open', open);
+  }
+
   close(): void {
+    this.setMenu(false);
     this.peerId = null;
     this.el.hidden = true;
     this.app.dms.setActive(null);
@@ -94,19 +104,47 @@ export class ConversationDrawer {
     const user = this.app.presence.get(peerId);
     const name = user?.name ?? conv.peerName;
     const status = user?.status ?? 'unknown';
+    const menuBtn = h('button', {
+      class: 'icon-btn',
+      type: 'button',
+      'aria-label': 'More',
+      'aria-haspopup': 'menu',
+      html: icons.more,
+      onclick: (e: Event) => {
+        e.stopPropagation();
+        this.setMenu(this.menu.hidden);
+      },
+    });
+    this.menu.replaceChildren(
+      h(
+        'button',
+        {
+          class: 'menu-item danger',
+          role: 'menuitem',
+          type: 'button',
+          onclick: () => {
+            this.setMenu(false);
+            if (!confirm(`Remove ${name} from your contacts? Your conversation with ${name} is deleted.`)) return;
+            this.app.dms.deleteConversation(peerId);
+            this.app.presence.removeContact(peerId);
+            this.close();
+          },
+        },
+        h('span', { html: icons.trash }),
+        'Remove contact',
+      ),
+    );
     this.head.replaceChildren(
+      h('button', { class: 'icon-btn dm-back', 'aria-label': 'Back', title: 'Back', html: icons.back, onclick: () => this.close() }),
       h('span', { class: 'avatar sm', style: `--avatar:${colorFor(peerId)}` }, initials(name)),
-      h('div', { class: 'grow' }, h('strong', {}, name), h('small', { class: `presence ${status}` }, `${status === 'online' ? '●' : '○'} ${status[0]!.toUpperCase()}${status.slice(1)}`)),
-      h('button', { class: 'icon-btn', 'aria-label': `Call ${name}`, title: 'Audio call', html: icons.phone, onclick: () => this.onCall(peerId) }),
-      h('button', { class: 'icon-btn', 'aria-label': 'Close conversation', html: icons.close, onclick: () => this.close() }),
+      h('div', { class: 'grow dm-title' }, h('strong', {}, name), h('small', { class: `presence ${status}` }, `${status === 'online' ? '●' : '○'} ${status[0]!.toUpperCase()}${status.slice(1)}`)),
+      h('button', { class: 'icon-btn', 'aria-label': `Audio call ${name}`, title: 'Audio call', html: icons.phone, onclick: () => this.onCall(peerId, 'audio') }),
+      h('button', { class: 'icon-btn', 'aria-label': `Video call ${name}`, title: 'Video call', html: icons.cam, onclick: () => this.onCall(peerId, 'video') }),
+      h('div', { class: 'top-menu-wrap' }, menuBtn, this.menu),
     );
     const offline = status !== 'online';
     this.banner.hidden = !offline;
-    this.banner.textContent = offline
-      ? this.app.push.canSendToUsers
-        ? `${name} is offline. They get a notification if they have enabled notifications; the message itself is delivered when ${name} comes online.`
-        : `${name} is offline. Push delivery is unavailable (the push server cannot notify one specific person), so messages wait on this device and are delivered when ${name} comes online.`
-      : '';
+    this.banner.textContent = offline ? `${name} is offline – messages are delivered when they're back.` : '';
     const sig = conv.messages.map((m) => `${m.messageId}:${m.status ?? ''}`).join(',') + this.highlight;
     if (sig !== this.lastSig) {
       this.lastSig = sig;

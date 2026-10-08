@@ -10,6 +10,8 @@ import { lobbyRoom, type Member, type SignalingService } from './SignalingServic
 
 const log = createLogger('Presence');
 const KNOWN_KEY = 'voip.knownUsers';
+/** Contacts the user removed from their list (per room). */
+const HIDDEN_KEY = 'voip.hiddenContacts';
 const MAX_KNOWN = 200;
 
 interface UserRecord {
@@ -127,6 +129,36 @@ export class PresenceService {
     this.sendHeartbeat();
   }
 
+  /** Contact list: everyone except the people this user removed. */
+  contacts(): UserPresence[] {
+    const hidden = this.hiddenIds();
+    return this.list().filter((u) => !hidden.has(u.deviceId));
+  }
+
+  /** Remove someone from the contact list (they come back if they message you). */
+  removeContact(deviceId: string): void {
+    const hidden = this.hiddenIds();
+    hidden.add(deviceId);
+    storage.set(this.hiddenKey(), [...hidden]);
+    this.events.emit('change', undefined);
+  }
+
+  private restoreContact(deviceId: string): void {
+    const hidden = this.hiddenIds();
+    if (!hidden.delete(deviceId)) return;
+    storage.set(this.hiddenKey(), [...hidden]);
+    this.events.emit('change', undefined);
+  }
+
+  private hiddenIds(): Set<string> {
+    const v = storage.get<unknown>(this.hiddenKey(), []);
+    return new Set(Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
+  }
+
+  private hiddenKey(): string {
+    return `${HIDDEN_KEY}.${this.room?.roomId ?? ''}`;
+  }
+
   list(): UserPresence[] {
     const rank: Record<PresenceStatus, number> = { online: 0, connecting: 1, unknown: 2, offline: 3 };
     return [...this.users.values()]
@@ -154,6 +186,7 @@ export class PresenceService {
     if (name) u.name = name;
     this.users.set(deviceId, u);
     this.persist();
+    this.restoreContact(deviceId); // they messaged us → back in the list
   }
 
   // ── status derivation ─────────────────────────────────────────────────────

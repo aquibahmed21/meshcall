@@ -68,11 +68,7 @@ export function renderNotificationSettings(app: AppContext, rerender: () => void
       h(
         'small',
         {},
-        on
-          ? 'Calls and messages reach this device even when MeshCall is closed.'
-          : status === 'disabled'
-            ? 'You will not be notified while MeshCall is closed.'
-            : PUSH_STATUS_LABEL[status],
+        on ? 'Calls and messages reach you when MeshCall is closed.' : status === 'disabled' ? 'Off' : PUSH_STATUS_LABEL[status],
       ),
     ),
     resubscribe,
@@ -90,13 +86,7 @@ export function renderNotificationSettings(app: AppContext, rerender: () => void
         : null,
       status === 'install-required' ? h('button', { class: 'btn small', onclick: () => void import('./Dialogs').then((d) => d.openInstallHelp(app)) }, 'How to install') : null,
       status === 'unavailable' ? h('button', { class: 'btn small', onclick: () => void push.refreshSubscription().then(rerender) }, 'Retry') : null,
-      h(
-        'p',
-        { class: 'hint' },
-        on
-          ? 'Not receiving notifications? Use “Re-subscribe (fresh)” – it replaces this device’s subscription with a new one.'
-          : 'Allow MeshCall to notify you about incoming calls even when the app is not focused.',
-      ),
+
       perm === 'granted' ? h('button', { class: 'btn small', onclick: () => void app.notifications.showTest() }, 'Show a test notification') : null,
       import.meta.env.DEV && on
         ? h(
@@ -130,8 +120,6 @@ export function renderEnableNotificationsCard(app: AppContext, rerender: () => v
   return h(
     'div',
     { class: 'enable-card' },
-    h('div', { class: 'enable-card-head' }, h('span', { html: icons.bell }), h('strong', {}, 'Enable Notifications')),
-    h('p', {}, 'Allow MeshCall to notify you about incoming calls even when the app is not focused.'),
     h(
       'button',
       {
@@ -142,7 +130,8 @@ export function renderEnableNotificationsCard(app: AppContext, rerender: () => v
           rerender();
         },
       },
-      s === 'unavailable' ? 'Retry – Enable Notifications' : 'Enable Notifications',
+      h('span', { html: icons.bell }),
+      s === 'unavailable' ? 'Retry notifications' : 'Enable notifications',
     ),
   );
 }

@@ -18,7 +18,7 @@ const ctx = await browser.newContext(); // one device: storage survives closing/
 const current = (page) => page.evaluate(() => window.__voip?.app.rooms.current?.roomName ?? null);
 const joinedIn = (page, room) =>
   page
-    .waitForFunction((r) => window.__voip?.app.rooms.current?.roomName === r && window.__voip.app.signaling.status === 'connected' && !!document.querySelector('.room-chip'), room, { timeout: 30_000 })
+    .waitForFunction((r) => window.__voip?.app.rooms.current?.roomName === r && window.__voip.app.signaling.status === 'connected' && !!document.querySelector('.topbar .me'), room, { timeout: 30_000 })
     .then(() => true, () => false);
 const roomScreen = (page) =>
   page
@@ -31,7 +31,8 @@ async function join(page, room) {
   return joinedIn(page, room);
 }
 const leave = async (page) => {
-  await page.click('.room-chip button[aria-label="Leave room"]');
+  await page.click('.topbar button[aria-label=More]');
+  await page.click('.top-menu button:has-text("Leave room")');
   await page.waitForSelector('#room-name', { timeout: 20_000 });
 };
 

@@ -3,7 +3,7 @@ import type { AppContext } from '../app';
 import { isTerminal } from '../calls/CallStateMachine';
 import type { SavedCall } from '../calls/CallManager';
 import type { NetworkQuality } from '../types/state';
-import { h } from './dom';
+import { colorFor, h, initials, nodes } from './dom';
 import { icons, logo } from './icons';
 import { CallView } from './views/CallView';
 import { DiagnosticsPanel } from './views/DiagnosticsPanel';
@@ -34,7 +34,7 @@ export class UIManager {
   private toasts = new Toasts();
   private sigPill = h('span', { class: 'pill', title: 'Signaling (ScaleDrone)' });
   private netPill = h('span', { class: 'pill', title: 'Network' });
-  private pushPill = h('button', { class: 'pill pill-btn', type: 'button', onclick: () => openSettings(this.app) });
+  private pushPill = h('button', { class: 'pill pill-btn', type: 'button', onclick: () => openSettings(this.app, 'device') });
   private banner = h('div', { class: 'banner', hidden: true });
   private nav: HTMLElement;
   private incoming: Modal | null = null;
@@ -43,7 +43,10 @@ export class UIManager {
   private lastCallId: string | null = null;
   private worstQuality: NetworkQuality = 'unknown';
   private rejoin: SavedCall | null = null;
-  private roomChip = h('div', { class: 'room-chip' });
+  /** Top bar: my profile (opens Settings) and the ⋮ menu (room, install, leave). */
+  private profile = h('button', { class: 'me', type: 'button', title: 'Profile & settings' });
+  private topMenu = h('div', { class: 'more-menu top-menu', role: 'menu', hidden: true });
+  private topMenuBtn = h('button', { class: 'icon-btn', type: 'button', 'aria-label': 'More', title: 'More', 'aria-haspopup': 'menu', 'aria-expanded': 'false', html: icons.more });
   private drawer!: ConversationDrawer;
 
   constructor(
@@ -54,11 +57,9 @@ export class UIManager {
     this.sidebar = new Sidebar(app, {
       onGroup: () => openGroupCall(app),
       onGoLive: () => openGoLive(app),
-      onInstall: () => this.install(),
-      onCall: (id, media) => this.callUser(id, media),
-      onMessage: (id) => this.openConversation(id),
+      onOpenContact: (id) => this.openConversation(id),
     });
-    this.drawer = new ConversationDrawer(app, (id) => this.callUser(id, 'audio'));
+    this.drawer = new ConversationDrawer(app, (id, media) => this.callUser(id, media));
     this.diagnostics = new DiagnosticsPanel(app, () => this.toggleDiagnostics(false));
     this.idle = this.renderIdle();
     this.nav = h(
@@ -74,11 +75,11 @@ export class UIManager {
       h(
         'header',
         { class: 'topbar' },
-        h('div', { class: 'brand' }, h('span', { class: 'brand-mark', html: logo }), h('span', { class: 'brand-text' }, 'Mesh', h('b', {}, 'Call'))),
-        this.roomChip,
+        this.profile,
         h('div', { class: 'pills' }, this.pushPill, this.sigPill, this.netPill),
         h('button', { class: 'icon-btn', 'aria-label': 'Diagnostics', title: 'Diagnostics', html: icons.stats, onclick: () => this.toggleDiagnostics() }),
         h('button', { class: 'icon-btn', 'aria-label': 'Settings', title: 'Settings', html: icons.settings, onclick: () => openSettings(app) }),
+        h('div', { class: 'top-menu-wrap' }, this.topMenuBtn, this.topMenu),
       ),
       this.banner,
       h('div', { class: 'layout' }, this.sidebar.el, this.stage, this.diagnostics.el),
@@ -124,8 +125,7 @@ export class UIManager {
     if (r === 'watching') this.toasts.show('info', `${name} is already watching`);
     else if (r === 'ringing') this.toasts.show('info', `Calling ${name} into the stream…`);
     else if (r === 'push') this.toasts.show('info', `${name} is offline – sent a call notification`);
-    else if (r === 'waiting')
-      this.toasts.show('warn', `${name} is offline. Call notifications can't reach one specific person with the current push server – ${name} will be rung as soon as they come online.`);
+    else if (r === 'waiting') this.toasts.show('info', `${name} is offline – they'll be rung when they come online`);
   }
 
   /** Open the 1:1 conversation (optionally highlighting a message from a notification). */
@@ -146,37 +146,69 @@ export class UIManager {
     this.renderAll();
   }
 
-  private renderRoomChip(): void {
-    const room = this.app.rooms.current;
-    if (!room) {
-      this.roomChip.replaceChildren();
-      return;
+  private renderProfile(): void {
+    const { identity, signaling } = this.app;
+    const online = signaling.status === 'connected';
+    this.profile.setAttribute('aria-label', `${identity.displayName} – profile and settings`);
+    this.profile.onclick = () => openSettings(this.app, 'device');
+    this.profile.replaceChildren(
+      h('span', { class: 'avatar', style: `--avatar:${colorFor(identity.deviceId)}` }, initials(identity.displayName)),
+      h('span', { class: 'me-text' }, h('strong', {}, identity.displayName), h('small', { class: `sig ${signaling.status}` }, online ? '● Online' : `○ ${signaling.status}`)),
+    );
+  }
+
+  private setTopMenu(open: boolean): void {
+    this.topMenu.hidden = !open;
+    document.body.classList.toggle('menu-open', open);
+    this.topMenuBtn.setAttribute('aria-expanded', String(open));
+    if (open) {
+      this.renderTopMenu();
+      (this.topMenu.querySelector('button') as HTMLElement | null)?.focus();
     }
-    const copy = h('button', { class: 'btn small ghost', type: 'button', title: 'Copy room name', 'aria-label': `Copy room name ${room.roomName}` }, 'Copy');
-    copy.addEventListener('click', async () => {
-      try {
-        await navigator.clipboard.writeText(room.roomName);
-        this.toasts.show('info', `Copied room name “${room.roomName}”`);
-      } catch {
-        this.toasts.show('warn', 'Copy failed – select the room name manually');
-      }
-    });
-    const leave = h('button', { class: 'btn small danger-ghost', type: 'button', title: 'Leave room', 'aria-label': 'Leave room' }, 'Leave');
-    leave.addEventListener('click', () => {
-      if (this.app.calls.inCall && !confirm('Leaving the room ends your current call. Leave anyway?')) return;
-      this.opts.onLeaveRoom();
-    });
-    this.roomChip.replaceChildren(
-      h('span', { class: 'room-label', title: room.roomName }, h('span', { class: 'room-prefix' }, 'Room: '), h('strong', {}, room.roomName)),
-      copy,
-      leave,
+  }
+
+  private renderTopMenu(): void {
+    const room = this.app.rooms.current;
+    const inst = this.app.pwa.installState;
+    const item = (icon: string, label: string, run: () => void, cls = '') =>
+      h('button', { class: `menu-item ${cls}`.trim(), role: 'menuitem', type: 'button', onclick: () => (this.setTopMenu(false), run()) }, h('span', { html: icon }), label);
+    this.topMenu.replaceChildren(
+      ...nodes(
+        room ? h('div', { class: 'menu-label', title: room.roomName }, h('small', {}, 'Room'), h('strong', {}, room.roomName)) : null,
+        inst === 'available' || inst === 'ios-manual' ? item(icons.download, 'Install app', () => this.install()) : null,
+        room
+          ? item(
+              icons.exit,
+              'Leave room',
+              () => {
+                if (this.app.calls.inCall && !confirm('Leaving the room ends your current call. Leave anyway?')) return;
+                this.opts.onLeaveRoom();
+              },
+              'danger',
+            )
+          : null,
+      ),
     );
   }
 
   private wire(): void {
     const { app } = this;
+    this.topMenuBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.setTopMenu(this.topMenu.hidden);
+    });
+    document.addEventListener('click', (e) => {
+      if (!this.topMenu.hidden && !this.topMenu.contains(e.target as Node)) this.setTopMenu(false);
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && !this.topMenu.hidden) {
+        this.setTopMenu(false);
+        this.topMenuBtn.focus();
+      }
+    });
+    app.pwa.events.on('install', () => !this.topMenu.hidden && this.renderTopMenu());
     app.rooms.events.on('change', (room) => {
-      this.renderRoomChip();
+      this.renderTopMenu();
       if (!room) this.drawer.close();
     });
     app.dms.events.on('change', () => this.sidebar.renderUsers());
@@ -315,7 +347,7 @@ export class UIManager {
 
   private renderAll(): void {
     this.renderBanner();
-    this.renderRoomChip();
+    this.renderProfile();
     this.renderPills();
     this.sidebar.render();
     this.renderIdleHints();
@@ -378,24 +410,18 @@ export class UIManager {
       'section',
       { class: 'idle' },
       h('div', { class: 'brand-mark big', html: logo }),
-      h('h1', {}, 'Peer-to-peer calls'),
-      h('p', {}, 'Pick someone from the list to start an audio or video call, start a group call, or go live.'),
+      h('h1', {}, 'MeshCall'),
       this.idleHints,
     );
   }
 
   private renderIdleHints(): void {
-    const { config, push } = this.app;
-    const hints: Node[] = [
-      h('li', {}, 'Media flows directly between browsers (mesh). Direct P2P is always tried first; TURN relay is only a fallback.'),
-    ];
-    if (!config.hasTurn) hints.push(h('li', { class: 'warn' }, 'No TURN server configured – calls between restrictive networks may fail.'));
-    const inst = this.app.pwa.installState;
-    if (inst === 'available' || inst === 'ios-manual')
-      hints.push(h('li', {}, h('button', { class: 'btn small', onclick: () => this.install() }, h('span', { html: icons.download }), 'Install MeshCall as an app')));
-    if (push.status === 'install-required') hints.push(h('li', {}, 'On iPhone/iPad, install MeshCall to your Home Screen to receive call notifications.'));
-    if (!window.isSecureContext) hints.push(h('li', { class: 'warn' }, 'This page is not a secure context – camera, microphone and notifications need HTTPS.'));
+    const { push } = this.app;
+    // Only problems the user must act on – no general guidance.
+    const hints: Node[] = [];
+    if (push.status === 'install-required') hints.push(h('li', {}, 'Install MeshCall to your Home Screen to get call notifications.'));
+    if (!window.isSecureContext) hints.push(h('li', { class: 'warn' }, 'Camera, microphone and notifications need HTTPS.'));
     const card = renderEnableNotificationsCard(this.app, () => this.renderIdleHints());
-    this.idleHints.replaceChildren(...(card ? [card] : []), h('ul', {}, ...hints));
+    this.idleHints.replaceChildren(...(card ? [card] : []), ...(hints.length ? [h('ul', {}, ...hints)] : []));
   }
 }
