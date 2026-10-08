@@ -32,6 +32,8 @@ export class ConversationDrawer {
   private input = h('textarea', { class: 'chat-input', rows: 1, maxlength: MAX_DM_LENGTH, placeholder: 'Message…', 'aria-label': 'Message', enterkeyhint: 'send' });
   private sendBtn = h('button', { class: 'btn primary chat-send', type: 'submit', 'aria-label': 'Send message', html: icons.send });
   private lastSig = '';
+  /** Scroll to the newest message on the next list render. */
+  private stickToBottom = true;
   private menu = h('div', { class: 'more-menu dm-menu', role: 'menu', hidden: true });
   private releaseBack: (() => void) | null = null;
   private releaseMenuBack: (() => void) | null = null;
@@ -72,6 +74,7 @@ export class ConversationDrawer {
     this.peerId = peerId;
     this.highlight = highlightMessageId ?? null;
     this.lastSig = '';
+    this.stickToBottom = true; // opening a conversation starts at the newest message
     this.el.hidden = false;
     this.releaseBack ??= backStack.push(() => this.close(true)); // Back → back to the contact list
     this.app.dms.setActive(peerId);
@@ -102,6 +105,9 @@ export class ConversationDrawer {
 
   private submit(): void {
     if (!this.peerId) return;
+    // My new message must be visible: stop pointing at a highlighted (notification) message.
+    this.highlight = null;
+    this.stickToBottom = true;
     const r = this.app.dms.send(this.peerId, this.input.value);
     if (r === 'ok') {
       this.input.value = '';
@@ -161,10 +167,17 @@ export class ConversationDrawer {
     const sig = conv.messages.map((m) => `${m.messageId}:${m.status ?? ''}`).join(',') + this.highlight;
     if (sig !== this.lastSig) {
       this.lastSig = sig;
+      // Follow new messages only if the reader was already at the bottom (or just sent one).
+      const nearBottom = this.list.scrollHeight - this.list.scrollTop - this.list.clientHeight < 80;
+      const follow = this.stickToBottom || nearBottom;
+      this.stickToBottom = false;
       this.list.replaceChildren(...conv.messages.map((m) => this.item(m)));
       const target = this.highlight ? this.list.querySelector(`[data-id="${CSS.escape(this.highlight)}"]`) : null;
-      if (target) target.scrollIntoView({ block: 'center' });
-      else this.list.scrollTop = this.list.scrollHeight;
+      // After layout, so the new message's height is known.
+      requestAnimationFrame(() => {
+        if (target) target.scrollIntoView({ block: 'center' });
+        else if (follow) this.list.scrollTop = this.list.scrollHeight;
+      });
     }
     this.sendBtn.disabled = !this.input.value.trim();
   }

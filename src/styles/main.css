@@ -2871,3 +2871,47 @@ body.menu-open .toasts {
 .modal.offline-call .avatar.big {
   display: grid;
 }
+
+/* Phones: compact toasts above the bottom navigation (not over the header) */
+@media (max-width: 767px) {
+  .toasts {
+    top: auto;
+    bottom: calc(var(--nav) + var(--safe-bottom) + 12px);
+    left: 12px;
+    right: 12px;
+    width: auto;
+    transform: none;
+    flex-direction: column-reverse; /* newest nearest the thumb */
+    gap: 8px;
+  }
+  .app.in-call[data-view='call'] ~ .toasts,
+  .app.in-call[data-view='call'] .toasts {
+    bottom: calc(96px + var(--safe-bottom)); /* above the call controls */
+  }
+  .toast {
+    gap: 10px;
+    padding: 10px 10px 10px 12px;
+    border-radius: 12px;
+    font-size: 0.88rem;
+    animation-name: toast-up;
+  }
+  .toast-icon svg {
+    width: 18px;
+    height: 18px;
+  }
+  .toast .btn.small {
+    flex: none;
+    min-height: 32px;
+    padding: 4px 12px;
+    font-size: 0.82rem;
+  }
+  .toast.leaving {
+    transform: translateY(6px);
+  }
+}
+@keyframes toast-up {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+}
