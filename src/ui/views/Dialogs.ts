@@ -38,6 +38,8 @@ export const settingsHooks: { openDiagnostics: (() => void) | null } = { openDia
 export function openSettings(app: AppContext, initialTab: SettingsTab = 'call', opts: { callOnly?: boolean } = {}): Modal {
   const m = new Modal(opts.callOnly ? 'Call settings' : 'Settings', { className: opts.callOnly ? 'call-settings' : 'wide' });
   let tab: SettingsTab = initialTab;
+  // In-call: a live preview of exactly what I'm sending, so every change is visible right away.
+  const preview = opts.callOnly ? selfPreview(app) : null;
   let version = '';
   void app.pwa.version().then((v) => {
     version = v ?? '';
@@ -159,8 +161,9 @@ export function openSettings(app: AppContext, initialTab: SettingsTab = 'call', 
       ['call', 'Call', [devices, quality, effects, connection]],
       ['device', 'Device', [profile, renderNotificationSettings(app, render), appSection, diagnostics]],
     ];
-    if (opts.callOnly) {
-      m.setContent(h('div', { class: 'settings-grid single' }, devices, quality, effects));
+    if (opts.callOnly && preview) {
+      m.setContent(h('div', { class: 'cs-layout' }, preview.el, h('div', { class: 'settings-grid single' }, devices, quality, effects)));
+      preview.update();
       return;
     }
     m.setContent(
@@ -182,8 +185,47 @@ export function openSettings(app: AppContext, initialTab: SettingsTab = 'call', 
   m.onClose = () => {
     off();
     offPush();
+    preview?.dispose();
   };
   return m.open();
+}
+
+/** Live self-preview for Call settings: the sent video (effects applied) + capture size / fps. */
+function selfPreview(app: AppContext): { el: HTMLElement; update: () => void; dispose: () => void } {
+  const video = h('video', { autoplay: true, playsinline: true, 'aria-label': 'Your video preview' });
+  video.muted = true;
+  const info = h('small', { class: 'cs-preview-info' });
+  const empty = h('div', { class: 'cs-preview-empty' }, 'Camera is off');
+  const frame = h('div', { class: 'cs-preview-frame' }, video, empty);
+  const el = h('section', { class: 'cs-preview' }, h('h3', {}, 'Preview'), frame, info);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const update = () => {
+    if (video.srcObject !== app.media.stream) video.srcObject = app.media.stream;
+    void video.play().catch(() => undefined);
+    const m = app.media.state;
+    const track = app.media.stream.getVideoTracks()[0];
+    const s = app.settings.get();
+    frame.classList.toggle('mirrored', s.mirrorSelf !== false && m.facingMode !== 'environment' && !m.screenSharing);
+    empty.hidden = !!track && m.hasVideo;
+    const st = track?.getSettings();
+    info.textContent = st?.width && st.height ? `${st.width}×${st.height}${st.frameRate ? ` · ${Math.round(st.frameRate)} fps` : ''}` : '';
+  };
+  // Constraint changes settle asynchronously – refresh the readout shortly after each change.
+  const later = () => {
+    update();
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(update, 700);
+  };
+  const offs = [app.settings.events.on('change', later), app.media.events.on('state', later), app.media.events.on('track', later)];
+  return {
+    el,
+    update,
+    dispose: () => {
+      offs.forEach((f) => f());
+      if (timer) clearTimeout(timer);
+      video.srcObject = null;
+    },
+  };
 }
 
 export function openIncomingCall(app: AppContext, call: CallState): Modal {
