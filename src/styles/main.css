@@ -2753,12 +2753,14 @@ body.menu-open .toasts {
   background: var(--panel);
 }
 
-/* In-call settings: one compact column */
-.settings-grid.single {
-  grid-template-columns: minmax(0, 1fr);
-}
+/* In-call settings: devices · quality · effects side by side on wide screens, one column on phones */
 .modal.call-settings {
-  width: min(460px, calc(100vw - 24px));
+  width: min(1040px, calc(100vw - 48px));
+}
+.settings-grid.single {
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  align-items: start;
+  gap: 18px 28px;
 }
 
 /* Custom confirm / alert dialogs */
