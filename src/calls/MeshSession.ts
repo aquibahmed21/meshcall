@@ -179,7 +179,8 @@ export class MeshSession {
     this.disposer.add(media.events.on('state', () => this.scheduleMediaState()));
     this.disposer.add(
       settings.events.on('change', ({ changed }) => {
-        if (changed.includes('videoQuality')) void media.applyVideoQuality(settings.get().videoQuality).then(() => this.quality.applyAll());
+        if (changed.includes('videoBackground') || changed.includes('lowLight')) void media.applyEffects();
+        if (changed.includes('videoQuality') || changed.includes('frameRate')) void media.applyVideoQuality(settings.get().videoQuality).then(() => this.quality.applyAll());
         else if (changed.includes('audioQuality')) this.quality.applyAll();
         if (changed.some((c) => c === 'echoCancellation' || c === 'noiseSuppression' || c === 'autoGainControl')) void media.applyAudioProcessing();
       }),

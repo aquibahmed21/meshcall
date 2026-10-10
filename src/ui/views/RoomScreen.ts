@@ -59,11 +59,14 @@ export function renderRoomScreen(root: HTMLElement, opts: RoomScreenOptions): vo
           h('button', {
             type: 'button',
             class: 'chip',
+            title: `Join ${r}`,
             onclick: () => {
-              input.value = r; // fills only – the user still has to press Join
+              if (busy) return;
+              input.value = r;
               touched = true;
-              validate();
-              input.focus();
+              // A recent room is a known-good choice → join it right away (same path as "Join").
+              if (validate().ok) form.requestSubmit();
+              else input.focus();
             },
           }, r),
         ),

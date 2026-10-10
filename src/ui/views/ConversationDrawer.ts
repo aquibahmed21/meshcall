@@ -46,6 +46,12 @@ export class ConversationDrawer {
       if (!this.menu.hidden && !this.menu.contains(e.target as Node)) this.setMenu(false);
     });
     const form = h('form', { class: 'chat-composer' }, this.input, this.sendBtn);
+    // Tapping Send must not move focus off the text box (that would close the mobile keyboard).
+    this.sendBtn.addEventListener('mousedown', (e) => e.preventDefault());
+    this.sendBtn.addEventListener('touchend', (e) => {
+      e.preventDefault(); // no focus change / no synthetic click …
+      if (!this.sendBtn.disabled) this.submit(); // … so send right here
+    });
     form.addEventListener('submit', (e) => {
       e.preventDefault();
       this.submit();
@@ -114,6 +120,7 @@ export class ConversationDrawer {
       this.input.style.height = 'auto';
       this.sendBtn.disabled = true;
     }
+    this.input.focus({ preventScroll: true }); // keep typing (and the keyboard open)
   }
 
   private render(): void {

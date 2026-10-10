@@ -78,9 +78,10 @@ export class AdaptiveQualityManager {
     const q = this.settings.get().videoQuality;
     const preset = q === 'auto' ? VIDEO_PRESETS[AUTO_LADDER[this.ladderFor(s).ladder.level]!] : VIDEO_PRESETS[q];
     const captureHeight = this.media.captureHeight() ?? preset.height;
+    const fps = this.settings.get().frameRate;
     await s.setEncoding('video', {
       maxBitrate: preset.maxBitrate,
-      maxFramerate: preset.frameRate,
+      maxFramerate: fps === 'auto' || !fps ? preset.frameRate : fps,
       scaleResolutionDownBy: Math.max(1, captureHeight / preset.height),
       degradationPreference: 'balanced',
     });

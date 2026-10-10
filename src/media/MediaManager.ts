@@ -1,3 +1,4 @@
+import { VideoEffects, effectsActive } from './VideoEffects';
 import { Emitter } from '../core/emitter';
 import { createLogger, errorMessage } from '../core/logger';
 import type { SettingsService, VideoQualityPreset } from '../services/SettingsService';
@@ -64,6 +65,9 @@ export class MediaManager implements LocalMediaSource {
   private audioTrack: MediaStreamTrack | null = null;
   private cameraTrack: MediaStreamTrack | null = null;
   private screenTrack: MediaStreamTrack | null = null;
+  /** Camera effects; when active, `effectTrack` replaces the raw camera everywhere. */
+  readonly effects = new VideoEffects();
+  private effectTrack: MediaStreamTrack | null = null;
   private audioMuted = false;
   private videoMuted = false;
   private wantAudio = false;
@@ -74,7 +78,34 @@ export class MediaManager implements LocalMediaSource {
   /** Bumped by release(); captures that resolve after a release are stopped immediately. */
   private generation = 0;
 
-  constructor(private readonly settings: SettingsService) {}
+  constructor(private readonly settings: SettingsService) {
+    this.effects.onDisabled = (reason) => {
+      this.settings.update({ videoBackground: 'none' });
+      this.events.emit('warning', reason);
+    };
+  }
+
+  /** What the camera contributes right now: the processed track while effects are on. */
+  private cameraOut(): MediaStreamTrack | null {
+    if (!this.cameraTrack) return null;
+    return this.effectTrack ?? this.cameraTrack;
+  }
+
+  /** Background / low-light settings changed (or the camera came back): rebuild the pipeline. */
+  applyEffects(): Promise<void> {
+    return this.exclusive(async () => {
+      const s = this.settings.get();
+      const opts = { background: s.videoBackground ?? 'none', lowLight: !!s.lowLight };
+      const before = this.cameraOut();
+      this.effectTrack = effectsActive(opts) && this.cameraTrack ? await this.effects.configure(opts, this.cameraTrack) : null;
+      if (!effectsActive(opts)) await this.effects.configure(opts, null);
+      const out = this.cameraOut();
+      if (out !== before && !this.screenTrack && !this.videoMuted) {
+        this.replaceInPreview('video', out);
+        this.events.emit('track', { kind: 'video', track: out });
+      }
+    });
+  }
 
   get state(): MediaSnapshot {
     return {
@@ -97,7 +128,7 @@ export class MediaManager implements LocalMediaSource {
 
   getSendTrack(kind: MediaKind): MediaStreamTrack | null {
     if (kind === 'audio') return this.audioTrack;
-    return this.screenTrack ?? (this.videoMuted ? null : this.cameraTrack);
+    return this.screenTrack ?? (this.videoMuted ? null : this.cameraOut());
   }
 
   captureHeight(): number | undefined {
@@ -179,6 +210,8 @@ export class MediaManager implements LocalMediaSource {
     this.generation++;
     for (const t of [this.audioTrack, this.cameraTrack, this.screenTrack]) this.stopTrack(t);
     this.audioTrack = this.cameraTrack = this.screenTrack = null;
+    this.effects.stop();
+    this.effectTrack = null;
     this.wantAudio = false;
     this.audioMuted = this.videoMuted = false;
     this.audioError = this.videoError = undefined;
@@ -200,8 +233,9 @@ export class MediaManager implements LocalMediaSource {
         this.videoMuted = true;
         const old = this.cameraTrack;
         this.cameraTrack = null;
-        if (old) this.stream.removeTrack(old);
+        for (const t of this.stream.getVideoTracks()) if (t !== this.screenTrack) this.stream.removeTrack(t);
         this.stopTrack(old);
+        this.effects.setSource(null); // camera off → stop processing
         if (!this.screenTrack) this.events.emit('track', { kind: 'video', track: null });
         this.emitState();
         return;
@@ -271,7 +305,8 @@ export class MediaManager implements LocalMediaSource {
       if (!this.cameraTrack) return;
       const p = this.capturePreset(preset);
       try {
-        await this.cameraTrack.applyConstraints({ width: { ideal: p.width }, height: { ideal: p.height }, frameRate: { ideal: p.frameRate } });
+        const fps = this.captureFps(p.frameRate);
+        await this.cameraTrack.applyConstraints({ width: { ideal: p.width }, height: { ideal: p.height }, frameRate: { ideal: fps, max: Math.max(30, fps) } });
         const st = this.cameraTrack.getSettings();
         log.info(`Camera capture now ${st.width}×${st.height}@${Math.round(st.frameRate ?? 0)}`);
       } catch (err) {
@@ -309,7 +344,7 @@ export class MediaManager implements LocalMediaSource {
       this.screenTrack = null;
       this.stopTrack(t);
       this.stream.removeTrack(t);
-      const cam = this.videoMuted ? null : this.cameraTrack;
+      const cam = this.videoMuted ? null : this.cameraOut();
       if (cam) this.stream.addTrack(cam);
       this.events.emit('track', { kind: 'video', track: cam });
       log.info('Screen sharing stopped');
@@ -343,8 +378,14 @@ export class MediaManager implements LocalMediaSource {
       facingMode: s.videoInputId ? undefined : { ideal: this.facingMode },
       width: { ideal: p.width },
       height: { ideal: p.height },
-      frameRate: { ideal: p.frameRate, max: 30 },
+      frameRate: { ideal: this.captureFps(p.frameRate), max: Math.max(30, this.captureFps(p.frameRate)) },
     };
+  }
+
+  /** Frame rate to capture: the user's choice, or the quality preset's rate for 'auto'. */
+  private captureFps(presetFps: number): number {
+    const f = this.settings.get().frameRate;
+    return f === 'auto' || !f ? presetFps : f;
   }
 
   private async reacquireAudio(): Promise<void> {
@@ -403,9 +444,16 @@ export class MediaManager implements LocalMediaSource {
       track.contentHint = 'motion';
       track.addEventListener('ended', () => this.onTrackEnded(track), { once: true });
     }
+    // Effects keep ONE output track; a new camera just becomes its source.
+    const s = this.settings.get();
+    if (track && effectsActive({ background: s.videoBackground ?? 'none', lowLight: !!s.lowLight })) {
+      if (this.effectTrack) this.effects.setSource(track);
+      else void this.applyEffects(); // first camera of the session → build the pipeline
+    }
     if (!this.screenTrack) {
-      this.replaceInPreview('video', this.videoMuted ? null : track);
-      this.events.emit('track', { kind: 'video', track: this.videoMuted ? null : track });
+      const out = this.videoMuted ? null : this.cameraOut();
+      this.replaceInPreview('video', out);
+      this.events.emit('track', { kind: 'video', track: out });
     }
     if (old && old !== track) this.stopTrack(old);
   }

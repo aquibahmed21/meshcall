@@ -148,6 +148,7 @@ export class CallView {
     this.viewModes = new ViewModeController(this.el, (v) => this.grid.owns(v));
     this.disposer.add(this.viewModes.events.on('change', (s) => this.onViewModes(s)));
     this.setupAutoPip();
+    this.disposer.add(this.app.settings.events.on('change', ({ changed }) => changed.includes('mirrorSelf') && this.render()));
     this.disposer.add(this.app.chat.events.on('change', () => {
       this.chatPanel.render();
       this.renderPanelTabs();
@@ -727,6 +728,8 @@ export class CallView {
         audioMuted: m.audioMuted || !m.hasAudio,
         videoMuted: !m.hasVideo,
         screen: m.screenSharing,
+        // Selfie view for the front camera only (a rear camera is never mirrored).
+        mirror: this.app.settings.get().mirrorSelf !== false && m.facingMode !== 'environment',
       });
     }
     return tiles;

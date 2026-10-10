@@ -1,7 +1,8 @@
+import { BACKGROUND_LABEL, type VideoBackground } from '../../media/VideoEffects';
 import { Ringtone } from '../../services/Ringtone';
 import type { AppContext } from '../../app';
 import { logHub } from '../../core/logger';
-import type { AudioQualityPreset, IceTestMode, VideoQualityPreset } from '../../services/SettingsService';
+import type { AudioQualityPreset, IceTestMode, VideoQualityPreset, FrameRatePreset } from '../../services/SettingsService';
 import type { AudienceMode, MediaKind } from '../../types/signaling';
 import type { LiveInvite } from '../../calls/LiveStreamManager';
 import type { CallState } from '../../types/state';
@@ -89,10 +90,34 @@ export function openSettings(app: AppContext, initialTab: SettingsTab = 'call', 
           (v) => app.settings.update({ videoQuality: v }),
         ),
       ),
+      field(
+        'Frame rate',
+        select<string>(
+          [['auto', 'Auto'], ['15', '15 fps'], ['24', '24 fps'], ['30', '30 fps'], ['60', '60 fps (if the camera supports it)']],
+          String(s.frameRate ?? 'auto'),
+          (v) => app.settings.update({ frameRate: v === 'auto' ? 'auto' : (Number(v) as FrameRatePreset) }),
+        ),
+      ),
       field('Audio', select<AudioQualityPreset>([['low', 'Low (16 kbps)'], ['standard', 'Standard (32 kbps)'], ['high', 'High (64 kbps)']], s.audioQuality, (v) => app.settings.update({ audioQuality: v }))),
       toggle('Echo cancellation', s.echoCancellation, (v) => app.settings.update({ echoCancellation: v })),
       toggle('Noise suppression', s.noiseSuppression, (v) => app.settings.update({ noiseSuppression: v })),
       toggle('Auto gain control', s.autoGainControl, (v) => app.settings.update({ autoGainControl: v })),
+    );
+    const effects = h(
+      'section',
+      {},
+      h('h3', {}, 'Camera effects'),
+      field(
+        'Background',
+        select<VideoBackground>(
+          (Object.keys(BACKGROUND_LABEL) as VideoBackground[]).map((b): [VideoBackground, string] => [b, BACKGROUND_LABEL[b]]),
+          s.videoBackground ?? 'none',
+          (v) => app.settings.update({ videoBackground: v }),
+        ),
+        'Processed on this device.',
+      ),
+      toggle('Low-light boost', !!s.lowLight, (v) => app.settings.update({ lowLight: v })),
+      toggle('Mirror my video', s.mirrorSelf !== false, (v) => app.settings.update({ mirrorSelf: v })),
     );
     const connection = h(
       'section',
@@ -141,11 +166,11 @@ export function openSettings(app: AppContext, initialTab: SettingsTab = 'call', 
       field('Log level', select(['ERROR', 'WARN', 'INFO', 'DEBUG'].map((l): [string, string] => [l, l]), logHub.level, (v) => logHub.setLevel(v))),
     );
     const tabs: Array<[SettingsTab, string, HTMLElement[]]> = [
-      ['call', 'Call', [devices, quality, connection]],
+      ['call', 'Call', [devices, quality, effects, connection]],
       ['device', 'Device', [profile, renderNotificationSettings(app, render), appSection, diagnostics]],
     ];
     if (opts.callOnly) {
-      m.setContent(h('div', { class: 'settings-grid single' }, devices, quality));
+      m.setContent(h('div', { class: 'settings-grid single' }, devices, quality, effects));
       return;
     }
     m.setContent(

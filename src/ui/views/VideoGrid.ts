@@ -18,6 +18,8 @@ export interface TileModel {
   quality?: NetworkQuality;
   /** How this peer is connected (remote tiles only) – from getStats. */
   net?: PeerNetInfo;
+  /** Local tile: show the camera mirrored (selfie view). */
+  mirror?: boolean;
 }
 
 export interface GridViewState {
@@ -255,7 +257,7 @@ export class VideoGrid {
     t.root.classList.toggle('is-main', isMain);
     t.root.classList.toggle('thumb', plan.strip.includes(m.id));
     t.root.classList.toggle('has-video', t.hasVideo);
-    t.root.classList.toggle('mirrored', m.local && !m.screen);
+    t.root.classList.toggle('mirrored', m.local && !m.screen && m.mirror !== false);
     t.root.classList.toggle('screen', m.screen);
     t.root.classList.toggle('selected', selected);
     t.root.classList.toggle('in-pip', inPip);

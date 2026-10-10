@@ -30,6 +30,7 @@ function world(mode: 'everyone' | 'selected' = 'everyone', presenceOf: Record<st
     status: (id: string) => status[id] ?? 'unknown',
     nameOf: (id: string) => id,
     list: () => Object.entries(status).map(([deviceId, s]) => ({ deviceId, status: s, name: deviceId })),
+    contacts: () => Object.entries(status).map(([deviceId, s]) => ({ deviceId, status: s, name: deviceId })),
   };
   const push = { notifyIncomingCall: async (to: string, payload: Record<string, unknown>) => (pushes.push({ to, payload }), 'unsupported') };
   const live = new LiveStreamManager(

@@ -1,8 +1,11 @@
 import { Emitter } from '../core/emitter';
 import { storage } from '../core/storage';
+import type { VideoBackground } from '../media/VideoEffects';
 
 export type VideoQualityPreset = 'auto' | 'low' | '360p' | '480p' | '720p' | '1080p';
 export type AudioQualityPreset = 'low' | 'standard' | 'high';
+/** Camera frame rate; 'auto' = the video quality preset's own rate. */
+export type FrameRatePreset = 'auto' | 15 | 24 | 30 | 60;
 /**
  * ICE test modes – ONLY for diagnostics. "normal" is the production flow (iceTransportPolicy "all").
  *  relay-only: iceTransportPolicy "relay" → proves the TURN server works
@@ -12,6 +15,12 @@ export type IceTestMode = 'normal' | 'relay-only' | 'no-relay';
 
 export interface Settings {
   videoQuality: VideoQualityPreset;
+  frameRate: FrameRatePreset;
+  /** Camera effects (processed on this device). */
+  videoBackground: VideoBackground;
+  lowLight: boolean;
+  /** Show my own camera mirrored (only my preview – others always see the real orientation). */
+  mirrorSelf: boolean;
   audioQuality: AudioQualityPreset;
   echoCancellation: boolean;
   noiseSuppression: boolean;
@@ -25,6 +34,10 @@ export interface Settings {
 const KEY = 'voip.settings';
 const DEFAULTS: Settings = {
   videoQuality: 'auto',
+  frameRate: 'auto',
+  videoBackground: 'none',
+  lowLight: false,
+  mirrorSelf: true,
   audioQuality: 'standard',
   echoCancellation: true,
   noiseSuppression: true,
