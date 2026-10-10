@@ -148,6 +148,15 @@ export class CallView {
     this.viewModes = new ViewModeController(this.el, (v) => this.grid.owns(v));
     this.disposer.add(this.viewModes.events.on('change', (s) => this.onViewModes(s)));
     this.setupAutoPip();
+    // Leaving PiP (closed by the user/browser, or by us on return) pauses that <video> in some
+    // browsers → the tile would stay frozen/blank. Resume playback and redraw the call.
+    this.disposer.listen(document, 'leavepictureinpicture', () => {
+      setTimeout(() => {
+        this.grid.resumePlayback();
+        this.render();
+      }, 0);
+    });
+    this.disposer.listen(document, 'visibilitychange', () => document.visibilityState === 'visible' && this.grid.resumePlayback());
     this.disposer.add(this.app.settings.events.on('change', ({ changed }) => changed.includes('mirrorSelf') && this.render()));
     this.disposer.add(this.app.chat.events.on('change', () => {
       this.chatPanel.render();

@@ -1,6 +1,5 @@
 import { Emitter } from '../core/emitter';
 import { storage } from '../core/storage';
-import type { VideoBackground } from '../media/VideoEffects';
 
 export type VideoQualityPreset = 'auto' | 'low' | '360p' | '480p' | '720p' | '1080p';
 export type AudioQualityPreset = 'low' | 'standard' | 'high';
@@ -16,8 +15,7 @@ export type IceTestMode = 'normal' | 'relay-only' | 'no-relay';
 export interface Settings {
   videoQuality: VideoQualityPreset;
   frameRate: FrameRatePreset;
-  /** Camera effects (processed on this device). */
-  videoBackground: VideoBackground;
+  /** Camera effect (processed on this device). */
   lowLight: boolean;
   /** Show my own camera mirrored (only my preview – others always see the real orientation). */
   mirrorSelf: boolean;
@@ -35,7 +33,6 @@ const KEY = 'voip.settings';
 const DEFAULTS: Settings = {
   videoQuality: 'auto',
   frameRate: 'auto',
-  videoBackground: 'none',
   lowLight: false,
   mirrorSelf: true,
   audioQuality: 'standard',

@@ -1,4 +1,3 @@
-import { BACKGROUND_LABEL, type VideoBackground } from '../../media/VideoEffects';
 import { Ringtone } from '../../services/Ringtone';
 import type { AppContext } from '../../app';
 import { logHub } from '../../core/logger';
@@ -107,15 +106,6 @@ export function openSettings(app: AppContext, initialTab: SettingsTab = 'call', 
       'section',
       {},
       h('h3', {}, 'Camera effects'),
-      field(
-        'Background',
-        select<VideoBackground>(
-          (Object.keys(BACKGROUND_LABEL) as VideoBackground[]).map((b): [VideoBackground, string] => [b, BACKGROUND_LABEL[b]]),
-          s.videoBackground ?? 'none',
-          (v) => app.settings.update({ videoBackground: v }),
-        ),
-        'Processed on this device.',
-      ),
       toggle('Low-light boost', !!s.lowLight, (v) => app.settings.update({ lowLight: v })),
       toggle('Mirror my video', s.mirrorSelf !== false, (v) => app.settings.update({ mirrorSelf: v })),
     );

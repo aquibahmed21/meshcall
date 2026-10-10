@@ -79,10 +79,6 @@ export class MediaManager implements LocalMediaSource {
   private generation = 0;
 
   constructor(private readonly settings: SettingsService) {
-    this.effects.onDisabled = (reason) => {
-      this.settings.update({ videoBackground: 'none' });
-      this.events.emit('warning', reason);
-    };
   }
 
   /** What the camera contributes right now: the processed track while effects are on. */
@@ -91,11 +87,11 @@ export class MediaManager implements LocalMediaSource {
     return this.effectTrack ?? this.cameraTrack;
   }
 
-  /** Background / low-light settings changed (or the camera came back): rebuild the pipeline. */
+  /** Low-light setting changed (or the camera came back): rebuild the pipeline. */
   applyEffects(): Promise<void> {
     return this.exclusive(async () => {
       const s = this.settings.get();
-      const opts = { background: s.videoBackground ?? 'none', lowLight: !!s.lowLight };
+      const opts = { lowLight: !!s.lowLight };
       const before = this.cameraOut();
       this.effectTrack = effectsActive(opts) && this.cameraTrack ? await this.effects.configure(opts, this.cameraTrack) : null;
       if (!effectsActive(opts)) await this.effects.configure(opts, null);
@@ -446,7 +442,7 @@ export class MediaManager implements LocalMediaSource {
     }
     // Effects keep ONE output track; a new camera just becomes its source.
     const s = this.settings.get();
-    if (track && effectsActive({ background: s.videoBackground ?? 'none', lowLight: !!s.lowLight })) {
+    if (track && effectsActive({ lowLight: !!s.lowLight })) {
       if (this.effectTrack) this.effects.setSource(track);
       else void this.applyEffects(); // first camera of the session → build the pipeline
     }
