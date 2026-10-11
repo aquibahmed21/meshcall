@@ -1,3 +1,4 @@
+import { AudioRoute } from '../../media/AudioRoute';
 import type { NetworkQuality } from '../../types/state';
 import { colorFor, h, initials } from '../dom';
 import { icons } from '../icons';
@@ -24,6 +25,8 @@ export interface TileModel {
 
 export interface GridViewState {
   sinkId: string | null;
+  /** Phones: loudspeaker instead of the earpiece (see AudioRoute). */
+  speaker?: boolean;
   /** Main participant (drives PiP and the fullscreen spotlight). */
   selectedId: string | null;
   /** The tile whose <video> is currently shown in PiP. */
@@ -40,6 +43,8 @@ export interface GridCallbacks {
   onAutoplayBlocked: () => void;
   onSelect: (id: string) => void;
   onTileAction: (id: string, action: 'pip' | 'fullscreen') => void;
+  /** The browser refused the chosen audio output. */
+  onSinkError?: (message: string) => void;
 }
 
 interface Tile {
@@ -146,7 +151,11 @@ export class VideoGrid {
     for (const t of this.tiles.values()) void t.video.play().catch(() => undefined);
   }
 
+  /** Loudspeaker routing for remote audio (phones). */
+  readonly audioRoute = new AudioRoute();
+
   dispose(): void {
+    this.audioRoute.dispose();
     for (const t of this.tiles.values()) t.video.srcObject = null;
     this.tiles.clear();
     this.main.replaceChildren();
@@ -242,9 +251,37 @@ export class VideoGrid {
         });
       }
     }
-    if (!m.local && view.sinkId !== t.sinkId && 'setSinkId' in t.video) {
-      t.sinkId = view.sinkId;
-      void (t.video as HTMLVideoElement & { setSinkId(id: string): Promise<void> }).setSinkId(view.sinkId ?? '').catch(() => undefined);
+    if (!m.local) {
+      const route = this.audioRoute;
+      const loud = !!view.speaker && route.on;
+      // Loudspeaker via an exposed "speaker" output, otherwise via Web Audio (element muted).
+      const sink = loud && route.mode === 'sink' ? route.sinkId : view.sinkId;
+      const viaWebAudio = loud && route.mode === 'webaudio';
+      t.video.muted = viaWebAudio;
+      if (m.stream) {
+        if (viaWebAudio) route.attach(m.stream);
+        else route.detach(m.stream);
+      }
+      if (sink !== t.sinkId && 'setSinkId' in t.video) {
+        const wasPlaying = t.sinkId !== null || !!t.video.srcObject;
+        t.sinkId = sink;
+        const video = t.video;
+        void (video as HTMLVideoElement & { setSinkId(id: string): Promise<void> })
+          .setSinkId(sink ?? '')
+          .then(() => {
+            // Mid-call switch: some mobile browsers accept the new sink on a playing element but
+            // keep the old route. Re-attaching the stream makes them re-open the audio output.
+            if (!wasPlaying || !video.srcObject || document.pictureInPictureElement === video) return;
+            const s = video.srcObject;
+            video.srcObject = null;
+            video.srcObject = s;
+            void video.play().catch(() => undefined);
+          })
+          .catch((err: Error) => {
+            console.warn(`[Audio] setSinkId failed: ${err.message}`);
+            this.cb.onSinkError?.(err.message);
+          });
+      }
     }
     const vt = m.stream?.getVideoTracks()[0];
     t.hasVideo = !!vt && vt.readyState === 'live' && !vt.muted && !m.videoMuted;

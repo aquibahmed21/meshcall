@@ -77,6 +77,10 @@ export interface CallViewCallbacks {
   onToast: (level: 'info' | 'warn' | 'error', text: string) => void;
 }
 
+/** Touch devices (phones/tablets) get the earpiece ↔ loudspeaker toggle. */
+const TOUCH = typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches;
+const UNLOCK_HOLD_MS = 1500;
+
 export class CallView {
   readonly el: HTMLElement;
   private grid: VideoGrid;
@@ -120,6 +124,7 @@ export class CallView {
   ) {
     this.grid = new VideoGrid({
       onAutoplayBlocked: () => (this.audioUnlock.hidden = false),
+      onSinkError: (msg) => this.cb.onToast('warn', `Could not switch the audio output: ${msg}`),
       onSelect: (id) => this.select(id),
       onTileAction: (id, action) => void this.tileAction(id, action),
     });
@@ -157,7 +162,7 @@ export class CallView {
       }, 0);
     });
     this.disposer.listen(document, 'visibilitychange', () => document.visibilityState === 'visible' && this.grid.resumePlayback());
-    this.disposer.add(this.app.settings.events.on('change', ({ changed }) => changed.includes('mirrorSelf') && this.render()));
+    this.disposer.add(this.app.settings.events.on('change', ({ changed }) => (changed.includes('mirrorSelf') || changed.includes('audioOutputId')) && this.render()));
     this.disposer.add(this.app.chat.events.on('change', () => {
       this.chatPanel.render();
       this.renderPanelTabs();
@@ -259,7 +264,72 @@ export class CallView {
     }
   }
 
+  // ── loudspeaker (phones) ─────────────────────────────────────────────────
+
+  private speakerOn = false;
+
+  private async toggleSpeaker(): Promise<void> {
+    const on = !this.speakerOn;
+    try {
+      await this.grid.audioRoute.set(on);
+      this.speakerOn = on;
+    } catch (err) {
+      this.cb.onToast('warn', `Speaker unavailable: ${(err as Error).message}`);
+    }
+    this.render();
+  }
+
+  // ── child lock ───────────────────────────────────────────────────────────
+
+  /** While locked, a shield over the whole call swallows every tap (incl. End call). */
+  private lockShield: HTMLElement | null = null;
+
+  private setLocked(locked: boolean): void {
+    if (locked === !!this.lockShield) return;
+    if (!locked) {
+      this.lockShield?.remove();
+      this.lockShield = null;
+      this.el.classList.remove('locked');
+      return;
+    }
+    const ring = h('span', { class: 'lock-ring', 'aria-hidden': 'true' });
+    const badge = h(
+      'button',
+      { class: 'lock-badge', type: 'button', 'aria-label': 'Screen locked. Press and hold to unlock' },
+      ring,
+      h('span', { class: 'lock-icon', html: icons.lock, 'aria-hidden': 'true' }),
+      h('span', { class: 'lock-text' }, h('strong', {}, 'Locked'), h('small', {}, 'Press and hold to unlock')),
+    );
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const cancel = () => {
+      if (timer) clearTimeout(timer);
+      timer = undefined;
+      badge.classList.remove('holding');
+    };
+    badge.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      badge.classList.add('holding');
+      timer = setTimeout(() => {
+        cancel();
+        navigator.vibrate?.(30);
+        this.setLocked(false);
+      }, UNLOCK_HOLD_MS);
+    });
+    for (const ev of ['pointerup', 'pointercancel', 'pointerleave'] as const) badge.addEventListener(ev, cancel);
+    badge.addEventListener('contextmenu', (e) => e.preventDefault());
+    const shield = h('div', { class: 'child-lock', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Call screen locked' }, badge);
+    // Swallow everything else (taps, double-taps, keys) while locked.
+    for (const ev of ['click', 'dblclick', 'pointerdown', 'touchstart'] as const)
+      shield.addEventListener(ev, (e) => e.target === shield && (e.preventDefault(), e.stopPropagation()), { passive: false });
+    this.lockShield = shield;
+    this.el.classList.add('locked');
+    // Cover the whole app (header menu included), or the call itself when it is fullscreen.
+    (document.fullscreenElement ?? document.body).append(shield);
+    badge.focus();
+  }
+
   dispose(): void {
+    this.setLocked(false);
     // Give back the history entries of anything still open (panel, menus).
     for (const release of Object.values(this.back)) release?.();
     this.back = {};
@@ -309,6 +379,7 @@ export class CallView {
       tiles,
       {
         sinkId: this.app.settings.get().audioOutputId,
+        speaker: this.speakerOn,
         selectedId: tiles.length > 1 ? this.mainId : null,
         pinnedId: this.layout.pinned,
         speakerId: tiles.length > 2 ? this.layout.activeSpeaker : null,
@@ -630,6 +701,9 @@ export class CallView {
         });
       specs.push({ key: 'stats', label: 'Network', icon: icons.stats, on: () => this.cb.onToggleDiagnostics(), secondary: true });
       specs.push({ key: 'settings', label: 'Call settings', icon: icons.settings, on: () => this.cb.onCallSettings(), secondary: true });
+      if (TOUCH)
+        specs.push({ key: 'speaker', label: this.speakerOn ? 'Speaker on' : 'Speaker', icon: icons.volume, on: () => void this.toggleSpeaker(), active: this.speakerOn });
+      specs.push({ key: 'lock', label: 'Lock', icon: icons.lock, on: () => this.setLocked(true), secondary: true });
     }
     specs.push({
       key: 'end',

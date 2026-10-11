@@ -2974,3 +2974,88 @@ body.menu-open .toasts {
     max-height: 30vh;
   }
 }
+
+/* Child lock: a shield over the whole call; press-and-hold the badge to unlock */
+.call {
+  position: relative;
+}
+.child-lock {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding: 0 16px calc(28px + var(--safe-bottom));
+  background: rgba(0, 0, 0, 0.18);
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+.call.locked .controls-wrap {
+  pointer-events: none;
+  opacity: 0.45;
+}
+.lock-badge {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 20px 12px 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(22, 27, 34, 0.92);
+  color: var(--text);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(8px);
+  text-align: left;
+  touch-action: none;
+}
+.lock-icon {
+  position: relative;
+  z-index: 1;
+  display: inline-grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: var(--panel-2);
+}
+.lock-icon svg {
+  width: 22px;
+  height: 22px;
+}
+.lock-text {
+  display: flex;
+  flex-direction: column;
+}
+.lock-text small {
+  color: var(--muted);
+}
+/* progress ring around the icon while holding */
+.lock-ring {
+  position: absolute;
+  left: 9px;
+  top: 50%;
+  width: 50px;
+  height: 50px;
+  margin-top: -25px;
+  border-radius: 50%;
+  background: conic-gradient(var(--accent) calc(var(--p, 0) * 1%), transparent 0);
+  -webkit-mask: radial-gradient(circle, transparent 22px, #000 23px);
+  mask: radial-gradient(circle, transparent 22px, #000 23px);
+}
+@property --p {
+  syntax: '<number>';
+  inherits: false;
+  initial-value: 0;
+}
+.lock-badge.holding .lock-ring {
+  animation: lock-fill 1.5s linear forwards;
+}
+@keyframes lock-fill {
+  to {
+    --p: 100;
+  }
+}
