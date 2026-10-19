@@ -194,7 +194,7 @@ try {
   ep = await endpointOf(bob.page);
   created.add(ep);
   check('Resubscribe via the toggle', (await server('/isPushSubscribed', { endpoint: ep })).isSubscribed === true);
-  check('Settings shows Incoming calls ON + Browser notifications Enabled', /Enabled/.test(await bob.page.textContent('dialog .notif-settings')));
+  check('Settings shows notifications ON + browser permission Allowed', /Notifications are on[\s\S]*Allowed/.test(await bob.page.textContent('dialog .notif-settings')));
   await bob.page.keyboard.press('Escape');
 
   // ═══════════════════════════ SERVICE WORKER PUSH ══════════════════════════

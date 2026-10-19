@@ -39,75 +39,118 @@ export function renderNotificationSettings(app: AppContext, rerender: () => void
     },
     h('span', { class: 'switch-knob' }),
   );
-  const permLabel: Record<string, string> = { granted: 'Enabled', denied: 'Blocked by browser', default: 'Not enabled yet', unsupported: 'Unavailable' };
+  const blocked = status === 'denied' || perm === 'denied';
+  const permChip: Record<string, [string, string]> = {
+    granted: ['Allowed', 'ok'],
+    denied: ['Blocked', 'bad'],
+    default: ['Not asked', 'muted'],
+    unsupported: ['Unavailable', 'muted'],
+  };
+  const [permText, permTone] = permChip[perm] ?? [String(perm), 'muted'];
+  const state = on ? 'on' : busy ? 'busy' : blocked ? 'blocked' : 'off';
+  const chip = (text: string, tone: string) => h('span', { class: `notif-chip ${tone}` }, text);
+
   // Re-subscribing needs a working push setup (not blocked / unsupported / not installed on iOS).
   const canResubscribe = canToggle && perm !== 'denied';
-  const resubscribe = h(
-    'button',
-    {
-      class: 'btn small',
-      disabled: busy || !canResubscribe,
-      title: 'Remove this device’s push subscription and create a fresh one',
-      onclick: async (e: Event) => {
-        const b = e.currentTarget as HTMLButtonElement;
-        b.disabled = true;
-        b.textContent = on ? 'Re-subscribing…' : 'Subscribing…';
-        await (on ? push.resubscribe() : push.subscribe());
-        rerender();
+  const action = (icon: string, label: string, run: (b: HTMLButtonElement) => unknown, opts: { title?: string; disabled?: boolean; cls?: string } = {}) =>
+    h(
+      'button',
+      {
+        class: `btn small ${opts.cls ?? ''}`.trim(),
+        type: 'button',
+        title: opts.title ?? '',
+        disabled: !!opts.disabled,
+        onclick: (e: Event) => void run(e.currentTarget as HTMLButtonElement),
       },
-    },
-    on ? 'Re-subscribe (fresh)' : 'Subscribe',
-  );
-  const device = h(
+      h('span', { html: icon, 'aria-hidden': 'true' }),
+      label,
+    );
+
+  const hero = h(
     'div',
-    { class: `push-device ${on ? 'on' : 'off'}`, role: 'status', 'data-state': status },
-    h('span', { class: 'push-device-icon', html: icons.bell, 'aria-hidden': 'true' }),
+    { class: `notif-hero ${state}`, role: 'status', 'data-state': status },
+    h('span', { class: 'notif-hero-icon', html: icons.bell, 'aria-hidden': 'true' }),
     h(
       'div',
       { class: 'grow' },
-      h('strong', {}, on ? 'Push is enabled on this device' : busy ? 'Setting up push on this device…' : 'Push is not enabled on this device'),
-      h(
-        'small',
-        {},
-        on ? 'Calls and messages reach you when MeshCall is closed.' : status === 'disabled' ? 'Off' : PUSH_STATUS_LABEL[status],
-      ),
+      h('strong', {}, on ? 'Notifications are on' : busy ? 'Setting up notifications…' : blocked ? 'Notifications are blocked' : 'Notifications are off'),
+      h('small', {}, on ? 'Calls and messages reach this device even when MeshCall is closed.' : status === 'disabled' ? 'Turn on to get calls and messages while MeshCall is closed.' : PUSH_STATUS_LABEL[status]),
     ),
-    resubscribe,
+    chip(on ? 'On' : busy ? 'Wait' : blocked ? 'Blocked' : 'Off', on ? 'ok' : blocked ? 'bad' : 'muted'),
   );
+
+  const list = h(
+    'div',
+    { class: 'notif-list' },
+    h(
+      'div',
+      { class: 'notif-row' },
+      h('span', { class: 'notif-row-icon', html: icons.phone, 'aria-hidden': 'true' }),
+      h('div', { class: 'grow' }, h('strong', {}, 'Calls & messages when closed'), h('small', {}, PUSH_STATUS_LABEL[status])),
+      toggle,
+    ),
+    h(
+      'div',
+      { class: 'notif-row' },
+      h('span', { class: 'notif-row-icon', html: icons.info, 'aria-hidden': 'true' }),
+      h('div', { class: 'grow' }, h('strong', {}, 'Browser permission'), h('small', {}, 'Lets MeshCall show alerts while it runs in the background')),
+      chip(permText, permTone),
+    ),
+  );
+
+  const actions = h(
+    'div',
+    { class: 'notif-actions' },
+    ...nodes(
+      perm === 'granted' ? action(icons.bell, 'Send test', () => app.notifications.showTest()) : null,
+      action(
+        icons.refresh,
+        on ? 'Re-subscribe' : 'Subscribe',
+        async (b) => {
+          b.disabled = true;
+          b.lastChild!.textContent = on ? 'Re-subscribing…' : 'Subscribing…';
+          await (on ? push.resubscribe() : push.subscribe());
+          rerender();
+        },
+        { title: 'Remove this device’s push subscription and create a fresh one', disabled: busy || !canResubscribe },
+      ),
+      status === 'install-required' ? action(icons.download, 'How to install', () => import('./Dialogs').then((d) => d.openInstallHelp(app))) : null,
+      status === 'unavailable' ? action(icons.refresh, 'Retry', () => push.refreshSubscription().then(rerender)) : null,
+      import.meta.env.DEV && on
+        ? action(
+            icons.warn,
+            'Dev: /notifyAll',
+            async () => {
+              if (!(await confirmDialog({ title: 'Broadcast test?', message: 'DEV ONLY: /notifyAll sends “MeshCall Test” to EVERY subscriber of the push server.', confirmLabel: 'Send', danger: true }))) return;
+              try {
+                await alertDialog('Broadcast sent', await push.broadcastTest());
+              } catch (err) {
+                await alertDialog('Broadcast failed', (err as Error).message);
+              }
+            },
+            { title: 'Development only – sends to EVERY subscriber of the push server', cls: 'danger-ghost' },
+          )
+        : null,
+    ),
+  );
+
   return h(
     'section',
     { class: 'notif-settings' },
     h('h3', {}, 'Notifications'),
-    device,
-    h('div', { class: 'setting-row' }, h('div', { class: 'grow' }, h('strong', {}, 'Incoming calls'), h('small', {}, PUSH_STATUS_LABEL[status])), toggle),
-    h('div', { class: 'setting-row' }, h('div', { class: 'grow' }, h('strong', {}, 'Browser notifications'), h('small', {}, permLabel[perm] ?? perm))),
+    hero,
+    list,
     ...nodes(
-      status === 'denied' || perm === 'denied'
-        ? h('p', { class: 'notice' }, h('strong', {}, 'Notifications are blocked. '), unblockHelp(), ' MeshCall will not ask again until you change this.')
-        : null,
-      status === 'install-required' ? h('button', { class: 'btn small', onclick: () => void import('./Dialogs').then((d) => d.openInstallHelp(app)) }, 'How to install') : null,
-      status === 'unavailable' ? h('button', { class: 'btn small', onclick: () => void push.refreshSubscription().then(rerender) }, 'Retry') : null,
-
-      perm === 'granted' ? h('button', { class: 'btn small', onclick: () => void app.notifications.showTest() }, 'Show a test notification') : null,
-      import.meta.env.DEV && on
+      blocked
         ? h(
-            'button',
-            {
-              class: 'btn small danger-ghost',
-              title: 'Development only – sends to EVERY subscriber of the push server',
-              onclick: async () => {
-                if (!(await confirmDialog({ title: 'Broadcast test?', message: 'DEV ONLY: /notifyAll sends “MeshCall Test” to EVERY subscriber of the push server.', confirmLabel: 'Send', danger: true }))) return;
-                try {
-                  await alertDialog('Broadcast sent', await push.broadcastTest());
-                } catch (err) {
-                  await alertDialog('Broadcast failed', (err as Error).message);
-                }
-              },
-            },
-            'Dev: broadcast test (/notifyAll)',
+            'div',
+            { class: 'notif-alert', role: 'note' },
+            h('span', { html: icons.warn, 'aria-hidden': 'true' }),
+            h('div', {}, h('strong', {}, 'Unblock notifications'), h('small', {}, `${unblockHelp()} MeshCall won't ask again until you change this.`)),
           )
         : null,
     ),
+    actions,
   );
 }
 
