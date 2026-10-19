@@ -27,6 +27,10 @@ export interface Settings {
   audioInputId: string | null;
   videoInputId: string | null;
   audioOutputId: string | null;
+  /** Call playback volume in % (100–400; above 100 = amplified via Web Audio). */
+  volumeBoost: number;
+  /** Phones: play call audio as media audio. */
+  mediaVolume: boolean;
 }
 
 const KEY = 'voip.settings';
@@ -43,6 +47,8 @@ const DEFAULTS: Settings = {
   audioInputId: null,
   videoInputId: null,
   audioOutputId: null,
+  volumeBoost: 100,
+  mediaVolume: true,
 };
 
 export class SettingsService {

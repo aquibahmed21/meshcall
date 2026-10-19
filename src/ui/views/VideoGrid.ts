@@ -27,6 +27,10 @@ export interface GridViewState {
   sinkId: string | null;
   /** Phones: loudspeaker instead of the earpiece (see AudioRoute). */
   speaker?: boolean;
+  /** Playback volume factor (1 = 100 %; > 1 needs Web Audio). */
+  boost?: number;
+  /** Phones: play call audio as media (Web Audio) so the volume keys/levels behave like media. */
+  mediaVolume?: boolean;
   /** Main participant (drives PiP and the fullscreen spotlight). */
   selectedId: string | null;
   /** The tile whose <video> is currently shown in PiP. */
@@ -256,7 +260,14 @@ export class VideoGrid {
       const loud = !!view.speaker && route.on;
       // Loudspeaker via an exposed "speaker" output, otherwise via Web Audio (element muted).
       const sink = loud && route.mode === 'sink' ? route.sinkId : view.sinkId;
-      const viaWebAudio = loud && route.mode === 'webaudio';
+      const wantWebAudio = (loud && route.mode === 'webaudio') || (view.boost ?? 1) > 1 || !!view.mediaVolume;
+      if (wantWebAudio) {
+        route.ensureContext();
+        route.setBoost(view.boost ?? 1);
+        route.setOutput(sink);
+      }
+      // Mute the element only once Web Audio actually plays – never leave the call silent.
+      const viaWebAudio = wantWebAudio && route.ready;
       t.video.muted = viaWebAudio;
       if (m.stream) {
         if (viaWebAudio) route.attach(m.stream);

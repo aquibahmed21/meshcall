@@ -3059,3 +3059,8 @@ body.menu-open .toasts {
     --p: 100;
   }
 }
+
+/* Call volume slider */
+.range-row { display: flex; align-items: center; gap: 10px; }
+.range-row .range { flex: 1; min-width: 0; accent-color: var(--accent, #4f8cff); }
+.range-value { min-width: 3.5em; text-align: right; font-variant-numeric: tabular-nums; }

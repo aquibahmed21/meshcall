@@ -26,6 +26,18 @@ function toggle(label: string, value: boolean, onChange: (v: boolean) => void): 
   return h('label', { class: 'toggle' }, input, h('span', {}, label));
 }
 
+/** Call volume 100–400 %: above 100 % the remote audio is amplified (with a limiter). */
+function volumeField(app: AppContext): HTMLElement {
+  const value = app.settings.get().volumeBoost ?? 100;
+  const out = h('output', { class: 'range-value' }, `${value}%`);
+  const input = h('input', { type: 'range', min: '100', max: '400', step: '10', value: String(value), class: 'range' });
+  input.addEventListener('input', () => {
+    out.textContent = `${input.value}%`;
+    app.settings.update({ volumeBoost: Number(input.value) });
+  });
+  return field('Call volume', h('div', { class: 'range-row' }, input, out), 'Above 100% amplifies the other side’s voice.');
+}
+
 type SettingsTab = 'call' | 'device';
 
 /** Set by the UI shell: actions Settings can trigger outside the dialog. */
@@ -77,6 +89,10 @@ export function openSettings(app: AppContext, initialTab: SettingsTab = 'call', 
       field('Camera', select(devOpts(d.videoinput, 'Camera'), s.videoInputId ?? '', (v) => void app.media.switchDevice('videoinput', v || null))),
       d.outputSelectable
         ? field('Speaker', select(devOpts(d.audiooutput, 'Speaker'), s.audioOutputId ?? '', (v) => app.settings.update({ audioOutputId: v || null })))
+        : null,
+      volumeField(app),
+      matchMedia('(pointer: coarse)').matches
+        ? toggle('Use media volume (phone)', s.mediaVolume !== false, (v) => app.settings.update({ mediaVolume: v }))
         : null,
     );
     const quality = h(

@@ -162,7 +162,8 @@ export class CallView {
       }, 0);
     });
     this.disposer.listen(document, 'visibilitychange', () => document.visibilityState === 'visible' && this.grid.resumePlayback());
-    this.disposer.add(this.app.settings.events.on('change', ({ changed }) => (changed.includes('mirrorSelf') || changed.includes('audioOutputId')) && this.render()));
+    this.disposer.add(this.app.settings.events.on('change', ({ changed }) => changed.some((k) => k === 'mirrorSelf' || k === 'audioOutputId' || k === 'volumeBoost' || k === 'mediaVolume') && this.render()));
+    this.grid.audioRoute.onStateChange = () => this.render();
     this.disposer.add(this.app.chat.events.on('change', () => {
       this.chatPanel.render();
       this.renderPanelTabs();
@@ -380,6 +381,8 @@ export class CallView {
       {
         sinkId: this.app.settings.get().audioOutputId,
         speaker: this.speakerOn,
+        boost: (this.app.settings.get().volumeBoost ?? 100) / 100,
+        mediaVolume: TOUCH && this.app.settings.get().mediaVolume !== false,
         selectedId: tiles.length > 1 ? this.mainId : null,
         pinnedId: this.layout.pinned,
         speakerId: tiles.length > 2 ? this.layout.activeSpeaker : null,
