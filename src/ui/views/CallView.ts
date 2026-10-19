@@ -68,6 +68,8 @@ export interface CallViewCallbacks {
   onInvite: () => void;
   /** Live streamer: change who may watch. */
   onManageAudience: () => void;
+  /** Initiator of an open invite: end it for everyone. */
+  onEndInvite: () => void;
   /** Streamer: call this person into the live stream. */
   onCallViewer: (userId: string) => void;
   onToggleDiagnostics: () => void;
@@ -679,6 +681,8 @@ export class CallView {
       });
       if (c.kind === 'direct' || c.kind === 'group')
         specs.push({ key: 'invite', label: 'Add', icon: icons.userPlus, on: () => this.cb.onInvite(), secondary: true });
+      if (this.app.invites.isHostOf(c.callId))
+        specs.push({ key: 'endInvite', label: 'End invite', icon: icons.close, on: () => this.cb.onEndInvite(), secondary: true });
       if (c.kind === 'live' && c.role === 'broadcaster')
         specs.push({ key: 'audience', label: 'Manage', icon: icons.settings, on: () => this.cb.onManageAudience(), secondary: true });
       if (c.kind !== 'live' || c.role === 'viewer')

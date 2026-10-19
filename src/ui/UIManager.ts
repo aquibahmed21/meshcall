@@ -9,7 +9,7 @@ import { colorFor, h, initials, nodes } from './dom';
 import { icons, logo } from './icons';
 import { CallView } from './views/CallView';
 import { DiagnosticsPanel } from './views/DiagnosticsPanel';
-import { openAddParticipants, openGoLive, settingsHooks, openIncomingCall, openInstallHelp, openLiveInvite, openManageAudience, openOfflineCallDialog, openSettings } from './views/Dialogs';
+import { openAddParticipants, openGoLive, openStartInvite, settingsHooks, openIncomingCall, openInstallHelp, openLiveInvite, openManageAudience, openOfflineCallDialog, openSettings } from './views/Dialogs';
 import { ConversationDrawer } from './views/ConversationDrawer';
 import type { Modal } from './views/Modal';
 import { Sidebar } from './views/Sidebar';
@@ -73,6 +73,8 @@ export class UIManager {
       onGroupCall: (ids, media) => this.startGroupCall(ids, media),
       onPane: (pane) => this.sidebar.setPane(pane), // desktop tabs (mobile: bottom navigation)
       onGoLive: () => (this.app.calls.inCall ? this.toasts.show('info', 'You are already in a call') : openGoLive(this.app)),
+      onNewInvite: () => this.newInvite(),
+      onEndInvite: () => void this.endInvite(),
     });
     settingsHooks.openDiagnostics = () => this.toggleDiagnostics(true);
     this.drawer = new ConversationDrawer(app, (id, media) => this.callUser(id, media));
@@ -107,6 +109,23 @@ export class UIManager {
     this.wire();
     this.rejoin = app.calls.rejoinOffer;
     this.renderAll();
+  }
+
+  private newInvite(): void {
+    const own = this.app.invites.hostedInvite;
+    if (own) {
+      if (!this.app.calls.inCall) void this.app.invites.join(own.inviteId);
+      else this.toasts.show('info', 'Your invite is already open');
+      return;
+    }
+    if (this.app.calls.inCall) this.toasts.show('info', 'You are already in a call');
+    else openStartInvite(this.app);
+  }
+
+  async endInvite(): Promise<void> {
+    if (!this.app.invites.hostedInvite) return;
+    const ok = await confirmDialog({ title: 'End invite?', message: 'The call ends for everyone and nobody can join anymore.', confirmLabel: 'End invite', danger: true, icon: icons.hangup });
+    if (ok) this.app.invites.endInvite();
   }
 
   /** Public toast (used for cross-room call offers etc.). */
@@ -214,6 +233,7 @@ export class UIManager {
     this.topMenu.replaceChildren(
       ...nodes(
         room ? h('div', { class: 'menu-label', title: room.roomName }, h('small', {}, 'Room'), h('strong', {}, room.roomName)) : null,
+        room ? item(icons.userPlus, 'Start invite', () => this.newInvite()) : null,
         room ? item(icons.live, 'Go live', () => (this.app.calls.inCall ? this.toasts.show('info', 'You are already in a call') : openGoLive(this.app))) : null,
         item(icons.settings, 'Settings', () => openSettings(this.app)),
         inst === 'available' || inst === 'ios-manual' ? item(icons.download, 'Install app', () => this.install()) : null,
@@ -290,6 +310,19 @@ export class UIManager {
     app.signaling.events.on('status', () => this.renderAll());
     app.presence.events.on('change', () => this.sidebar.renderUsers());
     app.live.events.on('streams', () => this.sidebar.renderStreams());
+    app.invites.events.on('change', () => this.sidebar.renderStreams());
+    app.invites.events.on('new', (inv) => {
+      const busy = app.calls.inCall;
+      this.toasts.show(
+        'info',
+        `${inv.hostName} invited you to “${inv.title}”${busy ? ' – join from Live when you are free' : ''}`,
+        10_000,
+        busy ? undefined : { label: 'Join', run: () => void app.invites.join(inv.inviteId) },
+      );
+    });
+    app.invites.events.on('hostLeft', () => {
+      this.toasts.show('info', 'You left the call – your invite is still open', 8000, { label: 'End invite', run: () => void this.endInvite() });
+    });
     app.live.events.on('invite', (invite) => {
       if (app.calls.inCall) {
         this.toasts.show('info', `${invite.hostName} ${invite.ring ? 'is calling you into' : 'added you to'} the live stream “${invite.title}” – find it under Live when you're free`);
@@ -350,6 +383,7 @@ export class UIManager {
       this.callView = new CallView(this.app, {
         onInvite: () => openAddParticipants(this.app),
         onManageAudience: () => openManageAudience(this.app),
+        onEndInvite: () => void this.endInvite(),
         onCallViewer: (id) => this.callUser(id, 'audio'),
         onToggleDiagnostics: () => this.toggleDiagnostics(),
         onCallSettings: () => openSettings(this.app, 'call', { callOnly: true }),

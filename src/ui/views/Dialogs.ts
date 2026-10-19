@@ -349,7 +349,13 @@ export function openAddParticipants(app: AppContext): Modal {
 }
 
 /** Everyone / Selected members + room-user checklist (Go live & Manage audience). */
-function audiencePicker(app: AppContext, mode: AudienceMode, selected: Set<string>, onChange: () => void) {
+function audiencePicker(
+  app: AppContext,
+  mode: AudienceMode,
+  selected: Set<string>,
+  onChange: () => void,
+  text = { legend: 'Who can watch?', everyone: 'Anyone in this room can join', selected: 'Only the people you pick receive the stream' },
+) {
   const state = { mode, ids: new Set(selected) };
   const users = app.presence.contacts();
   const list = h(
@@ -380,9 +386,9 @@ function audiencePicker(app: AppContext, mode: AudienceMode, selected: Set<strin
   const el = h(
     'fieldset',
     { class: 'audience-fieldset' },
-    h('legend', {}, 'Who can watch?'),
-    radio('everyone', 'Everyone', 'Anyone in this room can join'),
-    radio('selected', 'Selected participants', 'Only the people you pick receive the stream'),
+    h('legend', {}, text.legend),
+    radio('everyone', 'Everyone', text.everyone),
+    radio('selected', 'Selected participants', text.selected),
     list,
   );
   return { el, state };
@@ -408,6 +414,35 @@ export function openGoLive(app: AppContext): Modal {
       h('strong', {}, 'Mesh streaming limits. '),
       `Every viewer receives a separate copy of your stream straight from your device, so your upload is roughly bitrate × viewers (e.g. 8 viewers × 1 Mbps ≈ 8 Mbps up). Viewers are capped at ${app.config.mesh.maxLiveViewers}. There is no media server.`,
     ),
+    h('div', { class: 'modal-actions' }, start),
+  );
+  return m.open();
+}
+
+/** Open invite: a drop-in group call the invited people can join/leave until it is ended. */
+export function openStartInvite(app: AppContext): Modal {
+  const m = new Modal('Start invite', { className: 'wide-sm' });
+  const title = h('input', { type: 'text', placeholder: `${app.identity.displayName}'s invite`, maxlength: 60 });
+  const media = select<MediaKind>([['video', 'Video call'], ['audio', 'Audio call']], 'video', () => undefined);
+  const start = h('button', { class: 'btn primary' }, 'Start invite');
+  const picker = audiencePicker(
+    app,
+    'everyone',
+    new Set(),
+    () => {
+      start.disabled = picker.state.mode === 'selected' && picker.state.ids.size === 0;
+    },
+    { legend: 'Who is invited?', everyone: 'Anyone in this room can join', selected: 'Only the people you pick can join' },
+  );
+  start.addEventListener('click', () => {
+    m.close();
+    void app.invites.startInvite(title.value, media.value as MediaKind, { mode: picker.state.mode, ids: [...picker.state.ids] });
+  });
+  m.setContent(
+    field('Title', title),
+    field('Type', media),
+    picker.el,
+    h('p', { class: 'hint' }, `Invited people see a Join button and can leave and rejoin until you end the invite. Up to ${app.config.mesh.maxParticipants} people at once.`),
     h('div', { class: 'modal-actions' }, start),
   );
   return m.open();

@@ -98,6 +98,8 @@ export class CallManager {
   private inviteParticipants: string[] = [];
   private liveAuthorize: ((deviceId: string) => boolean) | undefined;
   private rejoinParticipants: string[] | null = null;
+  /** Open invite call: who may join (ids undefined = everyone in the room). */
+  private inviteAccess: { ids?: string[] } | null = null;
   private _rejoinOffer: SavedCall | null = null;
 
   constructor(private readonly d: CallDeps) {}
@@ -345,6 +347,22 @@ export class CallManager {
     }
     this.startMesh();
     return streamId;
+  }
+
+  /**
+   * Join (or re-join) an open invite: an ordinary group mesh with callId = inviteId. No ringing –
+   * the invite announcement is the invitation, and people may leave and come back at will.
+   */
+  async joinInvite(o: { callId: string; hostId: string; title: string; media: MediaKind; allowIds?: string[] }): Promise<void> {
+    if (!this.guardIdle()) return;
+    const me = this.d.identity.deviceId;
+    this.call = this.newCall({ callId: o.callId, kind: 'group', media: o.media, role: 'participant', hostId: o.hostId, direction: o.hostId === me ? 'outgoing' : 'incoming', status: 'connecting' });
+    this.call.title = o.title;
+    this.inviteAccess = { ids: o.allowIds };
+    this.emit();
+    await this.acquireMedia(o.media);
+    if (this.call?.callId !== o.callId) return;
+    this.startMesh();
   }
 
   /** Streamer removed a viewer from the audience: close only that viewer's connection. */
@@ -709,8 +727,9 @@ export class CallManager {
     const me = this.d.identity.deviceId;
     // Join allow-lists: 1:1 → exactly the two; group → me, host, known participants/invitees
     // (grown later by call-participants-added and vouched joins); live → audience callback.
-    const allowList =
-      c.kind === 'direct' && c.remoteUser
+    const allowList = this.inviteAccess
+      ? this.inviteAccess.ids && [me, c.hostId, ...this.inviteAccess.ids]
+      : c.kind === 'direct' && c.remoteUser
         ? [me, c.remoteUser.deviceId]
         : c.kind === 'group'
           ? [me, c.hostId, ...(this.inviteSender ? [this.inviteSender.deviceId] : []), ...this.inviteParticipants, ...(this.rejoinParticipants ?? [])]
@@ -838,6 +857,7 @@ export class CallManager {
     this.inviteSender = null;
     this.acceptedSessionId = null;
     this.inviteParticipants = [];
+    this.inviteAccess = null;
     this.clearPendingInvites();
     storage.remove(SAVED_CALL_KEY, 'session');
   }

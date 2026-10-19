@@ -1,4 +1,5 @@
 import { CallHistoryService } from './services/CallHistoryService';
+import { InviteManager } from './calls/InviteManager';
 import { GroupCallManager } from './calls/GroupCallManager';
 import { CallManager } from './calls/CallManager';
 import { isTerminal } from './calls/CallStateMachine';
@@ -37,6 +38,7 @@ export interface AppContext {
   calls: CallManager;
   groups: GroupCallManager;
   live: LiveStreamManager;
+  invites: InviteManager;
   chat: ChatService;
   rooms: RoomService;
   pwa: PwaService;
@@ -62,13 +64,14 @@ export function createApp(): AppContext {
   const calls = new CallManager({ identity, signaling, presence, media, settings, webrtc, network, notifications, push, config });
   const groups = new GroupCallManager(calls, identity);
   const live = new LiveStreamManager(calls, signaling, identity, presence, config, push);
+  const invites = new InviteManager(calls, signaling, identity);
   const chat = new ChatService(signaling, identity);
   const rooms = new RoomService();
   const pwa = new PwaService();
   pwa.listenForInstall(); // as early as possible – beforeinstallprompt can fire right after load
   const dms = new DirectMessageService(signaling, identity, presence, push);
   const history = new CallHistoryService(calls, identity);
-  return { history, dms, pwa, config, identity, settings, signaling, presence, network, media, devices, webrtc, notifications, push, calls, groups, live, chat, rooms };
+  return { invites, history, dms, pwa, config, identity, settings, signaling, presence, network, media, devices, webrtc, notifications, push, calls, groups, live, chat, rooms };
 }
 
 /**
@@ -114,6 +117,7 @@ export async function joinRoom(app: AppContext, room: RoomContext): Promise<void
   const joined = app.presence.start(room);
   app.calls.start();
   app.live.start();
+  app.invites.start();
   app.dms.start(room);
   app.history.start(room);
   app.rooms.set(room);
@@ -139,6 +143,7 @@ export function leaveRoom(app: AppContext): void {
   const room = app.rooms.current;
   if (!room) return;
   log.info(`Leaving room "${room.roomName}"`);
+  app.invites.stop(); // tells invitees while the room scope is still set
   app.calls.stop();
   app.live.stop();
   app.dms.stop();

@@ -23,6 +23,10 @@ export interface SidebarCallbacks {
   onPane: (pane: SidebarPane) => void;
   /** Start a live stream (Live tab). */
   onGoLive: () => void;
+  /** Open a drop-in invite (Live tab). */
+  onNewInvite: () => void;
+  /** Initiator: end an open invite (asks first). */
+  onEndInvite: () => void;
 }
 
 const OUTCOME_TEXT: Record<CallOutcome, string> = {
@@ -58,6 +62,7 @@ export class Sidebar {
   private tabs = h('div', { class: 'panel-tabs side-tabs', role: 'tablist', 'aria-label': 'Sections' });
   private users = h('ul', { class: 'user-list', 'aria-label': 'Contacts' });
   private streams = h('ul', { class: 'stream-list', 'aria-label': 'Live streams' });
+  private invites = h('ul', { class: 'stream-list invite-list', 'aria-label': 'Invites' });
   private calls = h('ul', { class: 'call-list', 'aria-label': 'Recent calls' });
   private filter = h('input', { type: 'search', placeholder: 'Search', 'aria-label': 'Search contacts', enterkeyhint: 'search' });
   /** The search icon itself expands into the field (same toolbar row). */
@@ -98,7 +103,19 @@ export class Sidebar {
     );
     this.panes = {
       people: h('section', { class: 'side-section', id: 'people', 'aria-label': 'People' }, this.toolbar, this.users),
-      live: h('section', { class: 'side-section', id: 'live', 'aria-label': 'Live now' }, liveHead, this.streams),
+      live: h(
+        'section',
+        { class: 'side-section', id: 'live', 'aria-label': 'Live now' },
+        h(
+          'div',
+          { class: 'pane-head' },
+          h('h2', {}, 'Invites'),
+          h('button', { class: 'icon-btn go-live-btn', type: 'button', 'aria-label': 'Start invite', title: 'Start invite', html: icons.userPlus, onclick: () => this.cb.onNewInvite() }),
+        ),
+        this.invites,
+        liveHead,
+        this.streams,
+      ),
       calls: h('section', { class: 'side-section', id: 'calls', 'aria-label': 'Recent calls' }, h('h2', {}, 'Recent calls'), this.calls),
     };
     this.el = h('aside', { class: 'sidebar' }, this.tabs, this.panes.people, this.panes.live, this.panes.calls, this.selectBar);
@@ -127,7 +144,8 @@ export class Sidebar {
   }
 
   private renderTabs(): void {
-    const live = this.app.live.list().filter((s) => s.hostId !== this.app.identity.deviceId).length;
+    const me = this.app.identity.deviceId;
+    const live = this.app.live.list().filter((s) => s.hostId !== me).length + this.app.invites.list().filter((i) => i.hostId !== me).length;
     const tab = (id: SidebarPane, label: string, badge?: number) =>
       h(
         'button',
@@ -319,6 +337,7 @@ export class Sidebar {
   // ── live ─────────────────────────────────────────────────────────────────
 
   renderStreams(): void {
+    this.renderInvites();
     const streams = this.app.live.list().filter((s) => s.hostId !== this.app.identity.deviceId);
     this.renderTabs();
     if (!streams.length) {
@@ -336,6 +355,33 @@ export class Sidebar {
           h('button', { class: 'btn small', disabled: inCall || s.viewers >= s.maxViewers, onclick: () => this.app.live.join(s.streamId) }, 'Watch'),
         ),
       ),
+    );
+  }
+
+  private renderInvites(): void {
+    const list = this.app.invites.list();
+    if (!list.length) {
+      this.invites.replaceChildren(h('li', { class: 'empty' }, 'No open invites'));
+      return;
+    }
+    const me = this.app.identity.deviceId;
+    const inCall = this.app.calls.inCall;
+    this.invites.replaceChildren(
+      ...list.map((inv) => {
+        const mine = inv.hostId === me;
+        const inIt = this.app.invites.isIn(inv.inviteId);
+        const meta = `${inv.audienceMode === 'selected' ? 'Private · ' : ''}${mine ? 'You' : inv.hostName} · ${inv.media === 'audio' ? 'Audio' : 'Video'} · ${formatDuration(Date.now() - inv.startedAt)}`;
+        return h(
+          'li',
+          { class: 'stream invite' },
+          h('span', { class: 'invite-icon', html: inv.media === 'audio' ? icons.phone : icons.cam, 'aria-hidden': 'true' }),
+          h('div', { class: 'grow' }, h('span', {}, inv.title), h('small', {}, meta)),
+          inIt
+            ? h('span', { class: 'badge-in' }, 'Joined')
+            : h('button', { class: 'btn small primary', disabled: inCall, title: inCall ? 'Leave your current call first' : '', onclick: () => void this.app.invites.join(inv.inviteId) }, 'Join'),
+          mine ? h('button', { class: 'btn small danger', onclick: () => this.cb.onEndInvite() }, 'End') : null,
+        );
+      }),
     );
   }
 

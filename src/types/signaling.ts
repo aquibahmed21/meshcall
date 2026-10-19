@@ -143,6 +143,25 @@ export type LiveStreamMessage =
   | LiveStreamViewerJoinedMessage
   | LiveStreamViewerLeftMessage;
 
+// ── Open invites (drop-in group calls) ──────────────────────────────────────
+/**
+ * An initiator opens a group call that the invited people can join, leave and rejoin at will
+ * until the initiator ends it. Announced in the room lobby (re-sent as a heartbeat); the call
+ * itself is an ordinary group mesh with callId = inviteId.
+ */
+export interface OpenInviteInfo {
+  inviteId: string;
+  title: string;
+  media: MediaKind;
+  audienceMode: AudienceMode;
+  /** Present when audienceMode === 'selected' (the initiator is always allowed). */
+  allowedIds?: string[];
+  startedAt: number;
+  heartbeat?: boolean;
+}
+export type InviteStartedMessage = Envelope<'invite-started', OpenInviteInfo>;
+export type InviteStoppedMessage = Envelope<'invite-stopped', { inviteId: string }>;
+
 // ── In-call text chat ───────────────────────────────────────────────────────
 /**
  * Chat rides on the call's mesh room (`mesh-<callId>`), so every participant already
@@ -182,6 +201,8 @@ export type SignalingMessage =
   | PeerReconnectMessage
   | CallParticipantsAddedMessage
   | LiveStreamMessage
+  | InviteStartedMessage
+  | InviteStoppedMessage
   | ChatSignalMessage
   | DirectMessageSignal
   | DirectMessageAckSignal;
@@ -197,7 +218,7 @@ const TYPES: ReadonlySet<string> = new Set<MessageType>([
   'call-cancel', 'call-hangup', 'mesh-join', 'mesh-welcome', 'mesh-heartbeat', 'mesh-leave', 'mesh-remove',
   'mesh-reject', 'media-state', 'offer', 'answer', 'ice-candidate', 'peer-reconnect', 'call-participants-added', 'chat-message',
   'live-started', 'live-stopped', 'live-audience-updated', 'live-viewer-added', 'live-viewer-removed',
-  'live-viewer-joined', 'live-viewer-left', 'direct-message', 'direct-message-ack',
+  'live-viewer-joined', 'live-viewer-left', 'direct-message', 'direct-message-ack', 'invite-started', 'invite-stopped',
 ]);
 
 /** Structural validation of untrusted wire data. */

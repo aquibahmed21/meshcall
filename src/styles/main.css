@@ -3064,3 +3064,10 @@ body.menu-open .toasts {
 .range-row { display: flex; align-items: center; gap: 10px; }
 .range-row .range { flex: 1; min-width: 0; accent-color: var(--accent, #4f8cff); }
 .range-value { min-width: 3.5em; text-align: right; font-variant-numeric: tabular-nums; }
+
+/* Open invites (Live tab) */
+.invite-list { margin-bottom: 12px; }
+.stream.invite .invite-icon { display: inline-flex; width: 32px; height: 32px; flex: none; align-items: center; justify-content: center; border-radius: 50%; background: var(--accent-soft, rgba(79, 140, 255, 0.15)); color: var(--accent, #4f8cff); }
+.stream.invite .invite-icon svg { width: 18px; height: 18px; }
+.stream.invite .btn + .btn { margin-left: 6px; }
+.badge-in { font-size: 0.75rem; font-weight: 600; color: var(--ok, #22a06b); }

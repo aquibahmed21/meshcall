@@ -6,6 +6,7 @@ A browser VoIP and video app built with Vite, TypeScript, WebRTC and ScaleDrone 
 
 - 1:1 audio and video calls
 - group calls
+- open invites (drop-in group calls people can join, leave and rejoin until the initiator ends them)
 - live streaming
 
 It uses **mesh topology only**: there is no SFU, MCU or media server. Media always flows browser to browser. When direct connectivity is impossible, media goes through a TURN relay.
@@ -31,21 +32,23 @@ To test on phones or other PCs on your LAN, use `npm run dev:lan`. It serves ove
 4. [Presence](#presence)
 5. [1:1 call flow](#11-call-flow)
 6. [Group call flow](#group-call-flow)
-7. [Live stream](#live-stream)
-8. [P2P-first strategy, STUN and TURN fallback](#p2p-first-strategy)
-9. [Join and rejoin behaviour](#join--rejoin-behaviour)
-10. [ICE restart and recovery](#ice-restart--recovery)
-11. [Perfect Negotiation](#perfect-negotiation)
-12. [Push notifications and Service Worker](#push-notifications--service-worker)
-13. [Data usage and bandwidth monitoring](#data-usage--bandwidth-monitoring)
-14. [Weak network handling](#weak-network-handling)
-15. [Direct messages and offline users](#direct-messages-and-offline-users)
-16. [In-call chat, Picture-in-Picture and fullscreen](#in-call-chat-picture-in-picture-and-fullscreen)
-17. [Diagnostics: TURN, STUN and WebRTC debugging](#diagnostics--turn--stun--webrtc-debugging)
-18. [Configuration and security](#configuration--security)
-19. [Browser limitations](#browser-limitations)
-20. [Mesh scalability limitations](#mesh-scalability-limitations)
-21. [Testing](#testing)
+7. [Open invites (drop-in group calls)](#open-invites)
+8. [Live stream](#live-stream)
+9. [P2P-first strategy, STUN and TURN fallback](#p2p-first-strategy)
+10. [Join and rejoin behaviour](#join--rejoin-behaviour)
+11. [ICE restart and recovery](#ice-restart--recovery)
+12. [Perfect Negotiation](#perfect-negotiation)
+13. [Push notifications and Service Worker](#push-notifications--service-worker)
+14. [Data usage and bandwidth monitoring](#data-usage--bandwidth-monitoring)
+15. [Weak network handling](#weak-network-handling)
+16. [Direct messages and offline users](#direct-messages-and-offline-users)
+17. [In-call chat, Picture-in-Picture and fullscreen](#in-call-chat-picture-in-picture-and-fullscreen)
+18. [Diagnostics: TURN, STUN and WebRTC debugging](#diagnostics--turn--stun--webrtc-debugging)
+19. [Configuration and security](#configuration--security)
+20. [Browser limitations](#browser-limitations)
+21. [Mesh scalability limitations](#mesh-scalability-limitations)
+22. [Testing](#testing)
+23. [Developer guide: how calls and peers are connected](#developer-guide-how-calls-and-peers-are-connected), for refactoring or plugging in another VoIP stack
 
 More detail:
 
@@ -196,6 +199,7 @@ src/
 │   ├── CallStateMachine        allowed status transitions
 │   ├── MeshSession             membership protocol + wiring for one call/stream
 │   ├── GroupCallManager        create/add/remove/leave
+│   ├── InviteManager           open invites: announce, Join list, end for everyone
 │   └── LiveStreamManager       go live, discovery, viewer cap
 └── ui/                         UIManager + views (grid, call, chat, sidebar, dialogs, diagnostics)
     ├── layout/CallLayoutManager  grid · speaker · spotlight · sidebar · filmstrip (pure logic)
@@ -250,7 +254,7 @@ The app uses channel `EoIG3R1I4JdyS4L1`, configurable with `VITE_SCALEDRONE_CHAN
 
 | Room | Purpose |
 |---|---|
-| `observable-room-<roomKey>` | room presence (ScaleDrone member list), heartbeats, live-stream announcements |
+| `observable-room-<roomKey>` | room presence (ScaleDrone member list), heartbeats, live-stream and open-invite announcements |
 | `inbox-<roomKey>-<deviceId>` | directed messages within the room: invites, SDP, ICE, welcome, reject… |
 | `mesh-<callId>` | broadcast within a call: join, leave, heartbeat, media state, **chat messages** |
 
@@ -339,6 +343,71 @@ Call statuses are Idle, Calling, Ringing, Connecting, Connected, Reconnecting, E
 7. **Add participant:** sends a new `call-invite` for the same `callId`.
 
 The group is capped at `mesh.maxParticipants` (6), and the host enforces the cap.
+
+## Open invites
+
+An **open invite** is a drop-in group call. One user opens it for everyone in the room or for selected people. Invited people get a **Join** button and can join, leave and rejoin as many times as they like. It stays open until the initiator ends it.
+
+### Using it
+
+1. **Start:** use **Start invite** in the ⋮ menu, or the **+** button next to *Invites* in the Live tab. Pick:
+   - a title (optional);
+   - **Video call** or **Audio call**;
+   - **Everyone** (anyone in the room) or **Selected participants**.
+
+   Starting it also puts the initiator straight into the call.
+2. **Invited people:**
+   - get a toast *"X invited you to …"* with **Join** (when they are in another call, the toast says to join later);
+   - see the invite under **Live → Invites** with a **Join** button, and the Live tab badge counts open invites;
+   - people who come online later see it within 10 s (the next announcement).
+3. **Join / leave / rejoin:** **Join** enters the call; **Leave** leaves only you. Everyone else stays connected, and you can join again at any time while the invite is open.
+4. **End:** only the initiator can end the invite, either with **End** in the Invites list or **End invite** in the call's *More* menu. After a confirmation, the call ends for everyone and the invite disappears from every list.
+
+| Situation | What happens |
+|---|---|
+| Initiator **leaves the call** | The invite stays open and others carry on. The initiator gets a toast with **End invite** and can rejoin from the list. |
+| Initiator **reloads** the page | The invite is restored from `sessionStorage` and announcements resume. The call itself is rejoined through the normal *Rejoin* banner. |
+| Initiator **leaves the room** | The invite is ended (`invite-stopped`), and the call ends for everyone. |
+| Initiator **closes the app / loses the network** | Announcements stop, so the invite disappears from lists after 35 s. People already in the call can continue until they leave. |
+| Not invited (selected mode) | The invite is never listed. If such a device sends `mesh-join` anyway, every participant rejects it. |
+| Already in another call | **Join** is disabled until that call ends. |
+| Call is full | Same cap as group calls (`mesh.maxParticipants` = 6). The initiator rejects extra joins with `mesh-reject: full` while they are in the call. |
+
+### Protocol
+
+```mermaid
+sequenceDiagram
+    participant H as Initiator
+    participant L as Lobby (observable-room)
+    participant P as Invitee
+    participant M as mesh-<inviteId>
+
+    H->>L: invite-started {inviteId, title, media, audienceMode, allowedIds?}
+    Note over H: joinInvite() → group MeshSession (callId = inviteId)
+    H->>M: mesh-join
+    L->>P: invite-started (toast + Join)
+    loop every 10 s
+      H->>L: invite-started {heartbeat: true}
+    end
+    P->>M: mesh-join (on Join)
+    M->>H: mesh-join
+    H->>P: mesh-welcome (inbox)
+    Note over H,P: impolite side offers → normal P2P-first negotiation
+    P->>M: mesh-leave (Leave) … mesh-join again (Rejoin)
+    H->>L: invite-stopped {inviteId}
+    Note over P: in that call → "X ended the invite" (call ends)
+```
+
+- **Messages:**
+  - `invite-started` (payload `OpenInviteInfo`): the first announcement and every heartbeat.
+  - `invite-stopped`: the invite is closed.
+
+  Both go to the room lobby. Receivers accept them **only from the invite's own initiator**; the first sender of an `inviteId` owns it.
+- **The call:** an ordinary **group** call with `callId = inviteId`. There is no `call-invite` / ringing / accept handshake: the announcement is the invitation, and **Join** is `CallManager.joinInvite()` → `startMesh()` → `mesh-join`. The membership, negotiation, recovery and leave paths are exactly those of group calls.
+- **Access** is enforced in media negotiation, not only in the UI:
+  - each participant's `MeshSession` allow-list is `[initiator, ...allowedIds]` (selected mode), or open (`null`) for *Everyone*;
+  - `InviteManager` re-applies it from each announcement through `MeshSession.setAccess()`, which also fixes the list after a participant reloads and rejoins.
+- **Ending:** on `invite-stopped`, anyone in that call is terminated with *"X ended the invite"*. An invite not announced for 35 s is dropped from lists, but the running call is not torn down.
 
 ## Live stream
 
@@ -879,3 +948,410 @@ E2E_URL=http://localhost:5174/ npm run test:e2e
 ```
 
 These scenarios need real devices or networks and are not automated: Wi-Fi ↔ hotspot switching, genuine NAT and firewall fallback, 3G throttling, push delivery to a closed browser, and permission denial. Use Chrome DevTools network throttling, `chrome://webrtc-internals`, and the Diagnostics panel for manual verification.
+
+---
+
+## Developer guide: how calls and peers are connected
+
+This section is written for anyone (human or AI agent) who needs to **refactor the calling stack or plug in a different VoIP implementation** without breaking the existing app. It follows the code path of a call from the button press to media on screen, names every function involved, and lists the contracts and invariants each layer relies on. File paths are relative to `src/`.
+
+### 1. Layers and ownership
+
+```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ UI (ui/UIManager, ui/views/CallView, VideoGrid, Dialogs…)                    │
+│   reads CallState + MediaStreams, calls CallManager / LiveStreamManager      │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ Call control    calls/CallManager.ts        invite/ring/accept/reject/hangup │
+│                 calls/CallStateMachine.ts   allowed status transitions       │
+│                 calls/LiveStreamManager.ts  go live, discovery, audience     │
+│                 calls/InviteManager.ts      open invites (drop-in group)     │
+│                 calls/GroupCallManager.ts   thin facade over CallManager     │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ Membership      calls/MeshSession.ts        who is in THIS call, access rules│
+│                                             join/welcome/heartbeat/leave      │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ Peer links      webrtc/PeerConnectionManager.ts  one PeerSession per remote  │
+│                 webrtc/PeerSession.ts       one RTCPeerConnection, Perfect   │
+│                                             Negotiation, ICE queueing        │
+│                 webrtc/IceStrategy.ts       CandidateGate (P2P window)       │
+│                 webrtc/ConnectionRecoveryManager.ts  ICE restart / recreate  │
+│                 webrtc/WebRTCManager.ts     RTCConfiguration factory         │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ Local media     media/MediaManager.ts       getUserMedia, mute, screen, swap │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ Transport       services/SignalingService.ts  ScaleDrone pub/sub, envelopes, │
+│                                             dedupe, outbox, liveness         │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+Rules that hold across all layers:
+
+- **Downward calls, upward events.** A layer calls methods on the layer below and listens to its `events` (`core/emitter.ts`, a typed `Emitter`). Nothing below the UI touches the DOM.
+- **Everything is created once in `app.ts` (`createApp`)** and injected explicitly. There are no singletons inside the calling stack (only `ui/BackStack` is a UI singleton).
+- **One call at a time.** `CallManager` holds at most one `CallState` and one `MeshSession`. A *call*, a *group call* and a *live stream* are all the same object with a different `kind`.
+- **A 1:1 call is a mesh of two.** There is no separate 1:1 media path; `MeshSession` handles every kind, and only its access rules and transceiver directions differ.
+
+### 2. Identifiers (get these right and everything else follows)
+
+| Id | Created by | Lifetime | Used for |
+|---|---|---|---|
+| `deviceId` | `IdentityService` (localStorage) | permanent per browser profile | user identity, inbox address, `senderId`/`receiverId`, presence key |
+| `sessionId` | `IdentityService` (per page load) | one page load | detects reloads (= rejoin), `receiverSessionId` targeting, politeness tie-break |
+| `roomId` / `roomKey` | `RoomService` (normalised name / short hash) | while in the room | message scoping (`roomId` on every envelope), ScaleDrone room names |
+| `callId` | `uuid()` in `CallManager` (`streamId` for live) | one call/stream | `mesh-<callId>` room, `callId` on every call message, push payloads, history |
+| `pcId` | `uuid()` per `PeerSession` | one `RTCPeerConnection` | negotiation routing (`pcId` / `targetPcId`), stale-message rejection, orphan detection |
+| `messageId` | `uuid()` per envelope (or reused for retries) | one message | de-duplication (`BoundedSet` of 4000) |
+
+**Politeness** (`isPolite` in `webrtc/PeerConnectionManager.ts`): `"${myDeviceId}|${mySessionId}" > "${theirDeviceId}|${theirSessionId}"` → I am polite. The **impolite** side (the smaller string) creates the connection and sends the first offer. Because the session is part of the key, a reload can flip roles; that is intended, since a reload always builds a fresh connection.
+
+### 3. Transport: what a message goes through
+
+**Sending** (`SignalingService`):
+
+- `send(receiverId, type, payload, {callId, peerId, receiverSessionId, messageId})` publishes a *directed* envelope to `inbox-<roomKey>-<receiverId>`.
+- `broadcast(roomName, type, payload, opts)` publishes to any room (`mesh-<callId>`, `observable-room-<roomKey>`), with `receiverId: '*'`.
+- `envelope()` stamps `v`, `messageId`, `timestamp`, `senderId`, `senderSessionId`, `senderName`, `roomId`, `callId`, `peerId`.
+- While disconnected, messages go to an outbox (max 300, dropped after 20 s) and are flushed on reconnect.
+
+**Receiving**: each incoming ScaleDrone message passes these filters **in this order**, and is dropped at the first that fails:
+
+1. `isSignalingMessage()`: structural validation and the protocol version `v === 2`.
+2. Our own session (`senderSessionId === mine`): this is the echo the liveness watchdog waits for; it is never emitted as a message.
+3. A different `roomId` from the current room scope.
+4. `receiverId` is neither `'*'` nor my `deviceId`.
+5. `receiverSessionId` is set and is not my `sessionId` (lets a reply reach only the tab that asked).
+6. Already-seen `messageId`.
+
+Survivors are emitted as `signaling.events 'message'`. Listeners:
+
+- `CallManager.onMessage`: call-control types (`call-*`, `call-participants-added`) are handled there. **Every other message whose `callId` equals the current mesh's `callId` is forwarded to `MeshSession.handleMessage`.**
+- `PresenceService`, `LiveStreamManager`, `ChatService`, `DirectMessageService` each pick their own types.
+
+ScaleDrone rooms subscribed (`SignalingService.subscribe(name, handlers)` survives client re-creation):
+
+| Room | Subscribed by | When |
+|---|---|---|
+| `observable-room-<roomKey>` | `PresenceService.start` | joining a room (`joinRoom` in `app.ts`) |
+| `inbox-<roomKey>-<myDeviceId>` | `CallManager.start` | joining a room |
+| `mesh-<callId>` | `MeshSession.join` | entering a call/stream; unsubscribed in `MeshSession.leave` |
+
+### 4. Message catalogue (calling-related)
+
+| Type | Channel | From → To | Handled in | Effect |
+|---|---|---|---|---|
+| `call-invite` | inbox | caller/host → invitee | `CallManager.onInvite` | creates incoming `CallState` (`ringing`), replies `call-ringing`, rings, shows notification; replies `call-reject{busy}` if in a call; ignores expired (`expiresAt` + 60 s skew) |
+| `call-ringing` | inbox | invitee → caller | `onRinging` | caller `calling → ringing`; marks a group invite as acked |
+| `call-accept` | inbox | invitee → caller | `onAccept` | 1:1: caller sends `call-cancel{answered-elsewhere}` to the callee's other tabs, goes `connecting`, `startMesh()`. Group: clears the pending invite and widens the allow-list. Unknown call: replies `call-hangup{ended}` |
+| `call-reject` | inbox | invitee → caller | `onReject` | 1:1 → `busy` / `rejected`; group → toast |
+| `call-cancel` | inbox | caller → invitee | `onCancel` | stops ringing (missed call / answered elsewhere) |
+| `call-hangup` | inbox | either → other (1:1) | `onHangup` | ends the 1:1 call |
+| `call-participants-added` | mesh | participant → all | `onParticipantsAdded` | 1:1 → group conversion, allow-list widened |
+| `mesh-join` | mesh | joiner → all | `MeshSession.onMember` | access check, upsert participant, reply `mesh-welcome`, impolite side connects |
+| `mesh-welcome` | inbox | member → joiner | `onMember` | joiner learns existing members; impolite side connects |
+| `mesh-heartbeat` | mesh | everyone, every 10 s | `onMember` | heals missed joins; carries `peers{remoteId→pcId}` for orphan detection |
+| `mesh-leave` | mesh | leaver → all | `onLeave` | closes only that participant's connection |
+| `mesh-remove` | mesh | host → all | `onRemove` | target leaves; others ban and drop it |
+| `mesh-reject` | inbox | authoritative member → joiner | `handleMessage` | joiner fails with *full* / *not allowed* (ignored unless sent by the host for group/live) |
+| `media-state` | mesh | participant → all | `handleMessage` | mute/camera/screen icons (debounced 150 ms) |
+| `offer` / `answer` / `ice-candidate` | inbox | peer → peer | `PeerConnectionManager.handleNegotiation` → `PeerSession.process` | SDP/ICE, routed by `pcId`/`targetPcId` |
+| `peer-reconnect` | inbox | peer → peer | `PeerSession.process` | informational: the remote re-created its connection |
+| `live-*` | lobby / inbox | streamer ↔ viewers | `LiveStreamManager` | discovery, audience, ringing invite into a stream |
+| `invite-started` | lobby | initiator → room, every 10 s | `InviteManager.onMessage` | lists the open invite for invited users, toast with Join, re-applies the call's access list |
+| `invite-stopped` | lobby | initiator → room | `InviteManager.onMessage` | removes the invite; terminates the call for anyone in it |
+
+All payload shapes are in `types/signaling.ts`.
+
+### 5. End-to-end trace: a 1:1 video call
+
+Caller **A**, callee **B**, both already in the same room (`joinRoom` done, inbox subscribed).
+
+**A presses "Video call"** → `UIManager.callUser` → `CallManager.startDirectCall(B, 'video')`:
+
+1. `guardIdle()` refuses if already in a call or signaling is down.
+2. `newCall({status:'calling', direction:'outgoing', kind:'direct'})`, `remoteUser = B`, then `emit()`, so the UI shows "Calling…".
+3. `acquireMedia('video')` → `MediaManager.acquire()` (getUserMedia). The local preview is `media.stream`.
+4. `sendInvite(B, 'direct')` sends `call-invite` to B's inbox with `expiresAt = now + ringMs`.
+5. Outgoing ringtone starts, and presence goes `busy`.
+6. If B is not online: `sendPush(B)` → `PushNotificationService.notifyIncomingCall` (targeted `POST /notify`, never broadcast).
+7. Timers start: `noAckTimer` (8 s, then push or fail) and `ringTimer` (45 s, then `call-cancel{timeout}` and "No answer").
+
+**B receives `call-invite`** → `onInvite`:
+
+1. Validates the invite (duplicate / expired / busy) and records `inviteSender = {deviceId: A, sessionId: A's}`.
+2. Creates `CallState{status:'ringing', direction:'incoming'}`.
+3. Replies `call-ringing` with `receiverSessionId` = A's session.
+4. Starts the ringtone and system notification, and a ring timeout of 50 s.
+
+**A receives `call-ringing`** → `calling → ringing`.
+
+**B presses Accept** → `acceptIncoming()`:
+
+1. `setStatus('connecting')` and `acquireMedia`.
+2. Sends `call-accept` to A's session, then re-sends it every 3 s (max 5) until A shows up in the mesh.
+3. `startMesh()`.
+
+**A receives `call-accept`** → `onAccept`:
+
+1. Stops ringing and sends `call-cancel{answered-elsewhere, answeredBySessionId}` so B's other tabs stop ringing.
+2. Goes `connecting`, then `startMesh()`.
+
+**`startMesh()`** (both sides) builds the `MeshSession`:
+
+- **Options:** `allowList = [A, B]` (1:1), `role 'participant'`.
+- **Event wiring:** `participants` → `recomputeStatus`, plus `left`, `removed`, `rejected` and `stats`.
+- **Join:** calls `mesh.join()`.
+- **Timeout:** starts `connectTimer` (25 s, after which the call fails with "Could not establish a connection").
+
+**`MeshSession.join()`**:
+
+1. Subscribes to `mesh-<callId>`. On open it broadcasts `mesh-join` with `{role, callKind, media, peers, hostId}`.
+2. Starts the 10 s heartbeat, `StatsMonitor` (2 s) and active-speaker detection.
+3. Wires media events: `media 'track'` → `peers.replaceTrack`, and `media 'state'` → `media-state` broadcast.
+
+**Each side receives the other's `mesh-join`** (or the `mesh-welcome` sent in reply) → `onMember`:
+
+1. Runs the access check `allowed()`, then `upsert` of the participant.
+2. On a `mesh-join` it replies `mesh-welcome` (directed).
+3. **If there is no `PeerSession` for that device and I am impolite** → `peers.connectAsOfferer(remote)`. The polite side does nothing and waits for the offer.
+
+**Impolite side** → `PeerConnectionManager.create()` → `new PeerSession(...)`:
+
+1. `WebRTCManager.createPeerConnection()` with `iceTransportPolicy:'all'`, `bundlePolicy:'max-bundle'`, `rtcpMuxPolicy:'require'` and `iceCandidatePoolSize:2`.
+2. A `CandidateGate` is created for the P2P window, and handlers are wired (`wire()`).
+3. `startAsOfferer()` calls `addTransceiver(track ?? kind, {direction, streams:[media.stream]})` for `audio` and `video`. Both transceivers always exist, even without a track, so turning the camera on later never renegotiates.
+4. `negotiationneeded` → `negotiate()` → `setLocalDescription()` → `sendOffer()` sends `offer{description, pcId, targetPcId:null, iceRestart}` to the peer's inbox with `receiverSessionId`.
+5. A negotiation watchdog starts: 10 s → re-send (×2) → `stalled` → `ConnectionRecoveryManager` re-creates.
+
+**Polite side receives `offer`** → `MeshSession.handleMessage`, `isNegotiationMessage`:
+
+1. The access check is repeated (`allowed`, `shouldConnect`), and the participant is upserted if needed.
+2. `PeerConnectionManager.handleNegotiation`:
+   - drops messages from **retired** remote `pcId`s;
+   - session changed / new remote `pcId` with an offer → closes the old session and makes a fresh one;
+   - a candidate with no session yet → **parked** as an orphan (30 s TTL) and replayed later.
+3. No session → `create(remote)` (polite), then `session.handleSignal(msg)` → `SerialQueue` → `process()`.
+4. `handleDescription()` runs Perfect Negotiation (collision checks), `setRemoteDescription`, records `remotePcId`, then `attachLocalMedia()` (binds our tracks to the transceivers the offer created and sets their direction).
+5. `setLocalDescription()` → sends `answer{pcId, targetPcId: offerer's pcId}`, then `flushPending()` applies candidates that arrived early.
+
+**Offerer receives `answer`** → `handleDescription` → `setRemoteDescription`; the watchdog is cleared and pending candidates are flushed.
+
+**ICE** (both sides, in parallel with the above):
+
+1. `onicecandidate` → `CandidateGate.offer()`.
+2. Host and srflx candidates are sent immediately as `ice-candidate{candidate, pcId, targetPcId}`. Relay candidates are **held** until a direct path connects (then sent as standby), 3 s pass, ICE fails, or gathering ends with no direct candidate.
+3. The receiver's `handleRemoteCandidate` queues candidates by `pcId` if they arrive before the SDP or carry a different ICE ufrag (an ICE restart in flight). It de-duplicates and calls `addIceCandidate`; errors are swallowed.
+
+**Media arrives**: `ontrack` → the track is added to `PeerConnectionManager.remoteStream(remoteDeviceId)`.
+
+- That is **one `MediaStream` per remote device, kept across re-creations**, so a reconnect never replaces the stream object the UI holds.
+- `PeerSession` emits `track` → `peerTrack` → `MeshSession 'participants'`.
+
+**Connected**:
+
+1. `onconnectionstatechange('connected')` → `patchState` → `peerState` event.
+2. `MeshSession` copies the state into `ParticipantState.peer` and applies encodings (`AdaptiveQualityManager.applyTo`).
+3. `CallManager.recomputeStatus()` sees a connected peer → `setStatus('connected')`, stamps `connectedAt`, and clears `connectTimer`.
+
+**UI**: `CallView` renders a tile per participant:
+
+- remote tiles use `session.remoteStream(deviceId)`, the local tile `app.media.stream`;
+- the connection path badge comes from `StatsMonitor` (`getStats()` selected pair, never from config).
+
+**Hang-up** → `CallManager.hangup()` → `finish('ended')`:
+
+1. Sends `call-hangup` to the remote's accepted session (1:1).
+2. `teardown()` clears timers, stops the ringtone, calls `mesh.leave()` (broadcasts `mesh-leave`, then disposes recovery, stats and every `PeerSession`, and unsubscribes `mesh-<callId>`), then `media.release()` (stops camera and mic), sets presence not busy, and clears the saved call.
+3. The status goes `ended` and the ended screen shows for 2.5 s → `reset()` → `CallState = null`.
+
+### 6. How group calls, open invites and live streams differ
+
+Group, open-invite and live calls use the same pipeline; only these knobs change (all set in `CallManager.startMesh` / `MeshSession`):
+
+| | 1:1 (`direct`) | Group (`group`) | Open invite (`group`) | Live: broadcaster | Live: viewer |
+|---|---|---|---|---|---|
+| Call-control handshake | invite → ringing → accept | host invites each user; invitee accepts | none: lobby announcement + Join (`joinInvite`) | none (`startLive`) | none (`joinLive`) |
+| Status after `startMesh` | `connecting` until a peer connects | `connected` immediately ("Waiting for participants") | same as group | `connected` ("Live – waiting for viewers") | `connecting` until the broadcaster connects |
+| Access rule (`allowed`) | `allowList = [me, them]` | allow-list plus *vouched* joiners (`invitedBy` on the list) plus welcomes | `[initiator, ...allowedIds]`, or open (`null`) for *Everyone* (`setAccess`) | `authorize(deviceId)` callback = audience | only `hostId` |
+| Who connects to whom (`shouldConnect`) | both | everyone ↔ everyone | everyone ↔ everyone | ↔ viewers only | ↔ broadcaster only |
+| `PeerConnectionManager {send, receive}` | true / true | true / true | true / true | true / false (`sendonly`) | false / true (`recvonly`) |
+| Caps | 2 | `mesh.maxParticipants` = 6 (host rejects `full`) | same as group (initiator rejects while in the call) | `mesh.maxLiveViewers` = 8 | n/a |
+| Ends when | the other side leaves or hangs up | you leave (others leaving just drops tiles) | for you: you leave (rejoin any time); for everyone: initiator ends the invite (`invite-stopped`) | you stop | the broadcaster leaves → "Stream ended" |
+
+**1:1 → group conversion:**
+
+1. `addParticipants()` broadcasts `call-participants-added`, then `mesh.allow()`, then `call-invite{group}` to each new user.
+2. Every client calls `convertToGroup()`, which changes **metadata and access policy only**. The existing `RTCPeerConnection` is never touched; only new links are negotiated.
+
+**Open invites (drop-in group calls)** (`calls/InviteManager.ts`):
+
+- **Open:** the initiator opens an invite for everyone or for selected people. It is announced in the lobby as `invite-started` (payload `OpenInviteInfo`, re-sent every 10 s) and closed with `invite-stopped`. Only the initiator's own messages are accepted for an invite.
+- **The call:** a plain group mesh with `callId = inviteId`, started through `CallManager.joinInvite()`. There is no invite, ring or accept handshake: joining is just `mesh-join`.
+- **Leave and rejoin:** leaving is a normal group leave (`mesh-leave`), so people can leave and rejoin any number of times.
+- **Access:**
+  - every participant's `MeshSession` allow-list is `[initiator, ...selected]`, or open for *everyone*;
+  - it is re-applied from each announcement through `MeshSession.setAccess()`;
+  - non-invited users never list the invite, and their joins are rejected.
+- **Ending:**
+  - the initiator ending the invite (or leaving the room) terminates the call for everyone;
+  - if the initiator only leaves the call, the invite stays open;
+  - the initiator's invite survives a reload (sessionStorage);
+  - if the initiator closes the app, the invite expires 35 s after the last announcement.
+
+### 7. Local media contract
+
+`PeerSession` depends only on the `LocalMediaSource` interface (`webrtc/PeerSession.ts`):
+
+```ts
+interface LocalMediaSource {
+  readonly stream: MediaStream;                              // used for addTransceiver({streams}) / setStreams
+  getSendTrack(kind: 'audio' | 'video'): MediaStreamTrack | null; // what to send right now
+}
+```
+
+`MediaManager` implements it:
+
+- `getSendTrack('video')` returns the screen track while sharing, otherwise `null` while the camera is off, otherwise the camera or effects track.
+- Every change emits `media.events 'track' {kind, track}`, and `MeshSession` reacts with `PeerConnectionManager.replaceTrack()`, which calls `RTCRtpSender.replaceTrack` on every peer.
+- **This covers mute, camera on/off, device switch, camera flip, screen share and effects, with no renegotiation.**
+- Audio mute uses `track.enabled = false`.
+
+Bitrate, resolution and frame rate are changed with `RTCRtpSender.setParameters`:
+
+- calls go through `PeerSession.setEncoding`, driven by `AdaptiveQualityManager`;
+- the desired values are remembered and re-applied after every reconnect.
+
+### 8. Recovery: who fixes what
+
+| Problem | Detected by | Fix |
+|---|---|---|
+| ICE `disconnected` | `ConnectionRecoveryManager.onPeerState` | 3 s grace → `PeerSession.restartIce()` |
+| ICE `failed` | same | immediate ICE restart; after 3 restarts → `connectAsOfferer` (new `RTCPeerConnection`, new `pcId`, `peer-reconnect` sent); circuit breaker at 4 re-creations per peer per minute |
+| Offer or answer lost | `PeerSession` negotiation watchdog | re-send the offer twice → `stalled` → re-create |
+| Remote reloaded (new `sessionId`) | `MeshSession.onMember` / `handleNegotiation` | close the old session and keep the remote stream object; a fresh connection is built |
+| Remote re-created its PC (new `pcId` in an offer) | `PeerConnectionManager.handleNegotiation` | close the old session and answer on a fresh one |
+| One-sided connection (remote doesn't know our `pcId`) | heartbeat `peers` map in `onMember` | impolite side re-creates |
+| Network change or wake from sleep | `NetworkMonitor` → `CallManager` → `mesh.onNetworkChange` | ICE restart on every peer (the P2P window is re-armed) |
+| Signaling socket dead | `SignalingService` echo watchdog | re-create the ScaleDrone client → `reconnected` → `mesh-join` re-announce plus restart of unhealthy peers |
+| Participant silent and media dead | `MeshSession.tick` (35 s) | drop that participant only |
+| 1:1 peer stays disconnected | `CallManager.recomputeStatus` | `reconnecting` → `failed` after 45 s |
+
+### 9. What the UI consumes (the public surface)
+
+If you rewrite the transport or the WebRTC layer, keep this surface and the UI keeps working:
+
+- **`app.calls` (`CallManager`)**
+  - **Methods:**
+    - `startDirectCall(userId, media)`, `startGroupCall(ids, media, name?)`
+    - `acceptIncoming()`, `rejectIncoming()`, `hangup()`
+    - `addParticipants(ids)`, `removeParticipant(id)`
+    - `toggleMute()`, `toggleCamera()`, `toggleScreenShare()`
+    - `rejoin(saved)`, `retryDirect(id)`
+  - **Getters:** `state`, `session` (the `MeshSession`), `inCall`, `pendingInviteIds`, `rejoinOffer`.
+  - **Events:**
+    - `state` (`CallState | null`, emitted on every change)
+    - `toast`
+    - `stats` (`{report, usage}`)
+    - `rejoinAvailable`
+- **`app.calls.session` (`MeshSession`):**
+  - `remoteStream(deviceId)` (a stable `MediaStream`), `participants` (`Map<deviceId, ParticipantState>`), `statsReport`;
+  - events `activeSpeaker` and `peerState`.
+- **`app.media` (`MediaManager`):** `stream` (local preview), `state`, the `state` event, and device and quality methods.
+- **`app.live` (`LiveStreamManager`):**
+  - `goLive`, `join`, `watch`, `callViewer`, `updateAudience`;
+  - events `streams`, `state`, `invite`.
+- **`app.invites` (`InviteManager`):**
+  - `startInvite(title, media, {mode, ids})`, `join(inviteId)`, `endInvite()`;
+  - `list()`, `hostedInvite`, `isIn(inviteId)`, `isHostOf(callId)`, `canJoin(inv)`;
+  - events `change` (the list), `new` (an invite for us appeared), `hostLeft` (the initiator left their own invite's call).
+- **Data shapes:** `CallState`, `ParticipantState` and `PeerConnectionState` in `types/state.ts`. Status transitions must stay valid per `CallStateMachine.ts`, because the UI and call history (`CallHistoryService.callOutcome`) classify calls from `status` + `statusDetail` + `connectedAt`.
+
+### 10. Invariants you must keep
+
+1. **Validate access on every negotiation message, not just on join.** Media must never be negotiated with an unauthorised device (`MeshSession.allowed` + `shouldConnect`). Hiding a tile is not protection.
+2. **Exactly one side sends the first offer** (the impolite one). Perfect Negotiation handles any later collision; don't add a second "initial offer" path.
+3. **Every negotiation message carries `pcId` and `targetPcId`.** Without them a late answer or candidate from an old connection would corrupt a new one.
+4. **Never assume `pc.connectionState` means the call is good.** The call status is derived (`recomputeStatus`). Signaling down ≠ call down, and media can flow without signaling.
+5. **Remote `MediaStream` objects are stable per device.** Add and remove tracks on them; never hand the UI a new stream on reconnect.
+6. **Never cache "needs TURN".** Every new connection, ICE restart and rejoin starts direct-first (the `CandidateGate` is re-armed per ICE generation).
+7. **Everything that waits has a timeout** (ring, no-ack, accept→connect, negotiation, reconnect). Add one for any new waiting state.
+8. **Push is targeted only** (`POST /notify` for one `deviceId`). Never `/notifyAll` for calls or messages.
+9. **Secrets never enter the bundle.** TURN credentials come from `VITE_*` build variables (which are public by nature); the VAPID private key stays on the push server.
+10. **Teardown releases everything:** peer connections, the mesh room subscription, timers, camera and microphone (`CallManager.teardown`). The e2e hang-up test checks that camera, microphone and peer connections are released.
+
+### 11. Recipes
+
+**Replace ScaleDrone with another signaling transport** (WebSocket server, Firebase, MQTT, Socket.IO…):
+
+- Re-implement `SignalingService` with the same public API:
+  - `subscribe(roomName, {onOpen, onMembers, onMemberJoin, onMemberLeave})` returning an unsubscribe function;
+  - `send(...)`, `broadcast(...)`, `setRoom(...)`, `start()`, `stop()`, `reconnectNow()`;
+  - `status` / `isConnected` / `currentRoom`;
+  - events `status`, `message`, `reconnected`, `echo`.
+- Keep `envelope()` and the six receive filters exactly. The rest of the app relies on de-duplication, room scoping and `receiverSessionId`.
+- Room semantics to reproduce:
+  - **inbox** = point-to-point;
+  - **mesh / lobby** = fan-out;
+  - **presence lobby** = a member list with join/leave events (`PresenceService` uses `onMembers` / `onMemberJoin` / `onMemberLeave`).
+- If your server does not echo publishes back to the sender, replace the echo watchdog with ping/pong.
+
+**Replace the mesh with an SFU** (LiveKit, mediasoup, Janus…):
+
+- Keep `CallManager` (invite / ring / accept, state machine, push, history) and replace what `startMesh()` creates.
+- Write an `SfuSession` with the same surface `CallManager` and the UI use from `MeshSession`:
+  - methods `join()`, `leave(reason)`, `handleMessage(msg)`, `allow(ids)`, `convertToGroup(ids)`, `removeParticipant(id)`, `onNetworkChange(reason)`, `retryDirect(id)`, `remoteStream(deviceId)`;
+  - members `participants`, `callId`, `statsReport`;
+  - events `participants`, `left`, `removed`, `rejected`, `stats`, `activeSpeaker`, `peerState`, `converted`.
+- Map SFU participants to `ParticipantState`, using `deviceId` as the participant identity so presence and history still match.
+- `PeerConnectionState` can describe your single SFU transport.
+- `mesh.maxParticipants` / `maxLiveViewers` then become SFU limits.
+
+**Interoperate with a native or other client:** implement the wire protocol in `types/signaling.ts`:
+
+- envelope `v: 2`;
+- ScaleDrone room names from §3;
+- transceiver order `audio`, then `video`, with `max-bundle`;
+- the politeness rule from §2;
+- `mesh-join` on entering `mesh-<callId>` and a heartbeat every ≤10 s;
+- answer `mesh-join` with `mesh-welcome`.
+
+A client that skips heartbeats is dropped after 35 s once its media dies.
+
+**Add a new signaling message:**
+
+1. Add the type to the `SignalingMessage` union **and** to the `TYPES` set in `types/signaling.ts` (unknown types are rejected by `isSignalingMessage`).
+2. Send it with `signaling.send` / `broadcast`, and pass `callId` if it belongs to a call.
+3. Handle it:
+   - call-level messages: add a `case` in `CallManager.onMessage`;
+   - mesh-level messages: add a `case` in `MeshSession.handleMessage`;
+   - otherwise: listen on `signaling.events 'message'` in your own service.
+
+**Add a DataChannel** (file transfer, reactions…):
+
+- Create it in `PeerSession.startAsOfferer()` (before the offer, so it is in the first SDP) and listen to `pc.ondatachannel` in `wire()`.
+- Expose it through `PeerConnectionManager`, and treat it as per-`pcId`: it is replaced whenever the connection is re-created.
+- In-call chat deliberately does **not** use a DataChannel. It rides on `mesh-<callId>` so it survives media failures.
+
+**Change STUN/TURN or the P2P policy:**
+
+- Servers come from `VITE_STUN_SERVER` / `VITE_TURN_*` (`config.ts`, `buildIceServers`, `orderStunUrls`).
+- The P2P window comes from `VITE_DIRECT_P2P_TIMEOUT_MS`; `VITE_ICE_FALLBACK_MODE=native` disables the gate.
+- Diagnostic modes `relay-only` / `no-relay` are set in Settings → Call → Connection (`WebRTCManager.buildConfiguration`).
+
+### 12. Where to change X
+
+| I want to… | Look at |
+|---|---|
+| change ring/connect/reconnect timeouts or mesh caps | `config.ts` (`timeouts`, `mesh`) |
+| change call status rules | `calls/CallStateMachine.ts`, `CallManager.setStatus/finish/recomputeStatus` |
+| change who may join or see media | `MeshSession.allowed`, `shouldConnect`; live audience: `LiveStreamManager.isAllowed`; open invites: `InviteManager.accessOf` / `MeshSession.setAccess` |
+| change open invites (announce interval, expiry, end rules) | `calls/InviteManager.ts` (`ANNOUNCE_MS`, `EXPIRE_MS`), `CallManager.joinInvite`; UI: `Sidebar.renderInvites`, `Dialogs.openStartInvite`, `UIManager.endInvite` |
+| change SDP/ICE handling | `webrtc/PeerSession.ts` (`negotiate`, `handleDescription`, `handleRemoteCandidate`) |
+| change when TURN is used | `webrtc/IceStrategy.ts` (`CandidateGate`), `config.ice` |
+| change recovery behaviour | `webrtc/ConnectionRecoveryManager.ts` |
+| change bitrate/resolution adaptation | `webrtc/AdaptiveQualityManager.ts`, `AdaptiveLadder.ts`, `media/QualityPresets.ts` |
+| change camera/mic capture or effects | `media/MediaManager.ts`, `media/VideoEffects.ts` |
+| change speaker / earpiece / volume boost | `media/AudioRoute.ts`, `ui/views/VideoGrid.ts` (`update`, remote-audio block) |
+| change offline call push | `CallManager.sendPush`, `services/PushNotificationService.ts`, `push/PushBackend.ts`, `public/sw.js` |
+| change what the call screen shows | `ui/views/CallView.ts`, `VideoGrid.ts`, `ui/layout/CallLayoutManager.ts` |
+| read the logs of a real call | browser console: tags `[Call] [Mesh] [WebRTC] [ICE] [Recovery] [Signaling]`; Diagnostics panel; `chrome://webrtc-internals` |

@@ -225,6 +225,12 @@ export class MeshSession {
     }
   }
 
+  /** Open invites: null = anyone in the room may join; a list widens the allow-list. */
+  setAccess(ids: string[] | null): void {
+    if (ids === null) this.allowList = null;
+    else this.allow(ids);
+  }
+
   /**
    * Live broadcaster: stop sending to a viewer. Closes only that viewer's RTCPeerConnection
    * (media stops immediately) and bars reconnection until reinstated.
