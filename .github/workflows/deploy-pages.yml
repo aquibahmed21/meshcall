@@ -46,7 +46,6 @@ jobs:
         # Optional runtime config from repository Settings → Variables (Actions).
         # NOTE: VITE_* values are compiled into the public bundle – never put long-lived secrets here.
         env:
-          VITE_SERVER_URL: ${{ vars.VITE_SERVER_URL }}
           VITE_STUN_SERVER: ${{ vars.VITE_STUN_SERVER }}
           VITE_TURN_SERVER: ${{ vars.VITE_TURN_SERVER }}
           VITE_TURN_USERNAME: ${{ vars.VITE_TURN_USERNAME }}
