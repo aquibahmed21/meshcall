@@ -39,6 +39,7 @@
     "vitest": "^3.2.0"
   },
   "dependencies": {
+    "@capacitor-community/contacts": "^8.0.0",
     "@capacitor/android": "^8.6.0",
     "@capacitor/app": "^8.1.2",
     "@capacitor/core": "^8.6.0",

@@ -8,6 +8,7 @@ import { CONFIG, type AppConfig } from './config';
 import { DeviceManager } from './media/DeviceManager';
 import { MediaManager } from './media/MediaManager';
 import { ChatService } from './services/ChatService';
+import { ContactsService } from './services/ContactsService';
 import { DirectMessageService } from './services/DirectMessageService';
 import { DeviceLinkService } from './services/DeviceLinkService';
 import { FileTransferService } from './services/FileTransferService';
@@ -49,6 +50,7 @@ export interface AppContext {
   files: FileTransferService;
   links: DeviceLinkService;
   history: CallHistoryService;
+  contacts: ContactsService;
 }
 
 const log = createLogger('Room');
@@ -82,7 +84,9 @@ export function createApp(): AppContext {
   const links = new DeviceLinkService(signaling, identity);
   calls.isLinked = (id) => links.isLinked(id);
   const history = new CallHistoryService(calls, identity);
-  return { links, files, invites, history, dms, pwa, config, identity, settings, signaling, presence, network, media, devices, webrtc, notifications, push, calls, groups, live, chat, rooms };
+  const contacts = new ContactsService(identity);
+  contacts.setServerUrl(config.serverUrl);
+  return { links, files, invites, history, dms, pwa, config, identity, settings, signaling, presence, network, media, devices, webrtc, notifications, push, calls, groups, live, chat, rooms, contacts };
 }
 
 /**

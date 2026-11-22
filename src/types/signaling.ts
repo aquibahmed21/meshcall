@@ -53,6 +53,8 @@ export interface PresencePayload {
   callId?: string;
   /** The phone itself is in an operator / WhatsApp-style call. */
   phone?: boolean;
+  /** Registered phone number of this user (for contacts-based routing). */
+  phoneNumber?: string;
 }
 export type PresenceHeartbeatMessage = Envelope<'presence-heartbeat', PresencePayload>;
 export type PresenceLeaveMessage = Envelope<'presence-leave', PresencePayload>;

@@ -1,13 +1,12 @@
-import { confirmDialog } from './ui/views/ConfirmDialog';
 import './styles/main.css';
-import { createApp, joinRoom, leaveRoom, startApp } from './app';
+import { createApp, joinRoom, startApp } from './app';
 import { CONFIG, resolveServerUrl } from './config';
 import { createLogger, logHub } from './core/logger';
 import { renderOnboarding } from './ui/views/Onboarding';
 import { renderPermissionsScreen } from './ui/views/PermissionsPanel';
 import { isHeadless, isNative, native } from './native/native';
-import { renderRoomScreen } from './ui/views/RoomScreen';
-import { validateRoomName, type RoomContext } from './services/RoomService';
+import { ContactsScreen } from './ui/views/ContactsScreen';
+import { validateRoomName } from './services/RoomService';
 import { h } from './ui/dom';
 import type { LaunchContext } from './push/payloads';
 import { UIManager } from './ui/UIManager';
@@ -41,11 +40,14 @@ async function boot(): Promise<void> {
   };
 
   let ui: UIManager | null = null;
-  // A notification click may carry the room of the call (?room=…) → prefill, never auto-join.
-  const params = new URLSearchParams(location.search);
-  let prefill = params.get('room') ?? undefined;
-  /** Notification context that can only be acted on after joining its room. */
-  let pendingContext: LaunchContext | undefined;
+
+  /** Fixed hidden room every user auto-joins (WhatsApp-style: no room name entry). */
+  const FIXED_ROOM_NAME = 'voip';
+  const fixedRoom = (() => {
+    const v = validateRoomName(FIXED_ROOM_NAME);
+    if (!v.ok) throw new Error('Invalid fixed room name');
+    return v.room;
+  })();
 
   /** Ring someone back once their presence is known (wait briefly after joining a room). */
   const callBack = async (ctx: { callerId?: string; callType?: string }) => {
@@ -54,22 +56,20 @@ async function boot(): Promise<void> {
     ui?.callUser(ctx.callerId, ctx.callType === 'video' ? 'video' : 'audio');
   };
 
-  /** Everything that happens once a room is joined (UI, permissions overlay, notification action). */
-  const afterJoin = (room: { roomName: string }, ctx: LaunchContext | undefined) => {
-    prefill = undefined;
-    document.title = `${room.roomName} – MeshCall`;
+  /** Show the main UIManager after joining the fixed room. */
+  const showMainUI = (ctx?: LaunchContext) => {
+    document.title = 'MeshCall';
     if (!ui) {
       ui = new UIManager(app, mount, {
         onLeaveRoom: () => {
-          app.rooms.clearActive(); // explicit leave → next launch asks for a room
-          leaveRoom(app);
-          showRoomScreen();
+          // In WhatsApp mode there's nothing to “leave” to — just go back to contacts.
+          showContactsScreen();
         },
       });
     } else {
       ui.attach(mount);
     }
-    // Android, first time in a room: now ask for permissions + battery exemption (as an overlay).
+    // Android, first time: ask for permissions + battery exemption.
     if (isNative && !isHeadless && !native.setupDone) {
       const overlay = document.createElement('div');
       overlay.className = 'perm-overlay';
@@ -82,119 +82,95 @@ async function boot(): Promise<void> {
     else if (ctx?.kind === 'chat-message') ui?.openConversation(ctx.senderId, ctx.messageId);
   };
 
-  /** Re-enter a room we are already "logged in" to: no room screen, no extra tap. */
-  let entering: Promise<void> | null = null;
-  const directJoin = (room: RoomContext, ctx?: LaunchContext): Promise<void> => {
-    // Already on its way in (e.g. a notification action arrived while booting): just hand over the context.
-    if (entering) {
-      if (ctx) pendingContext = ctx;
-      return entering;
-    }
-    entering = doDirectJoin(room, ctx).finally(() => (entering = null));
-    return entering;
-  };
-  const doDirectJoin = async (room: RoomContext, ctx?: LaunchContext) => {
-    document.title = `${room.roomName} – MeshCall`;
-    mount.replaceChildren(h('div', { class: 'boot-splash', role: 'status' }, 'Connecting…'));
-    try {
-      await joinRoom(app, room);
-    } catch (err) {
-      prefill = room.roomName;
-      return showRoomScreen(err instanceof Error ? err.message : 'Unable to join the room');
-    }
-    const pending = pendingContext ?? ctx;
-    pendingContext = undefined;
-    afterJoin(room, pending);
-  };
-
-  const showRoomScreen = (error?: string, info?: string, autoJoin = false) => {
-    document.title = 'MeshCall – Join a room';
-    renderRoomScreen(mount, {
-      userName: app.identity.displayName,
-      prefill,
-      error,
-      info,
-      autoJoin,
-      recent: app.rooms.recent(),
-      onJoin: async (room) => {
-        await joinRoom(app, room);
-        const ctx = pendingContext;
-        pendingContext = undefined;
-        afterJoin(room, ctx);
+  /** Show the contacts screen (and join the fixed room in the background if not yet joined). */
+  let contactsScreen: ContactsScreen | null = null;
+  const showContactsScreen = () => {
+    document.title = 'MeshCall';
+    if (contactsScreen) return; // already shown
+    contactsScreen = new ContactsScreen({
+      app,
+      contacts: app.contacts,
+      onCall: (contact, media) => {
+        contactsScreen?.destroy();
+        contactsScreen = null;
+        const deviceId = app.presence.deviceIdForPhone(contact.phone);
+        if (deviceId) {
+          showMainUI();
+          ui?.callUser(deviceId, media);
+        } else {
+          showMainUI();
+          ui?.toast?.('warn', `${contact.name} is not currently online`);
+        }
+      },
+      onMessage: (contact) => {
+        contactsScreen?.destroy();
+        contactsScreen = null;
+        const deviceId = app.presence.deviceIdForPhone(contact.phone);
+        if (deviceId) {
+          showMainUI();
+          ui?.openConversation(deviceId);
+        } else {
+          showMainUI();
+          ui?.toast?.('warn', `${contact.name} is not currently online`);
+        }
       },
     });
+    mount.replaceChildren(contactsScreen.el);
+    void contactsScreen.init();
+  };
+
+  /** Auto-join the fixed room (silent – user never sees room name). */
+  let joining: Promise<void> | null = null;
+  const autoJoinFixed = (): Promise<void> => {
+    if (joining) return joining;
+    if (app.rooms.current?.roomId === fixedRoom.roomId) return Promise.resolve();
+    mount.replaceChildren(h('div', { class: 'boot-splash', role: 'status' }, 'Connecting…'));
+    joining = joinRoom(app, fixedRoom)
+      .then(() => {
+        app.rooms.saveActive(fixedRoom);
+        log.info('Auto-joined fixed room');
+      })
+      .catch((err) => {
+        log.warn('Fixed room join failed', err instanceof Error ? err.message : String(err));
+      })
+      .finally(() => { joining = null; });
+    return joining;
   };
 
   /**
-   * A notification was clicked (or a push arrived while the app was visible). Rooms are
-   * isolated, so another room is only ever entered with the user's consent (switch offer or
-   * prefilled room screen).
-   *   incoming-call → the call rings with Accept/Reject (never auto-accepted)
-   *   chat-message  → that conversation opens with the message highlighted
+   * Handle push/click notifications. With the fixed-room model the room is always the
+   * same, so we just apply the action directly.
    */
   const handleLaunchContext = (ctx: LaunchContext, source: 'click' | 'push') => {
     if (ctx.kind === 'chat-message' && ctx.replyText) {
-      // Inline reply from the notification: send it without opening the app.
       const text = ctx.replyText.trim();
-      if (text && app.rooms.current) {
-        app.dms.send(ctx.senderId, text);
-        app.dms.markRead(ctx.senderId);
-      }
+      if (text && app.rooms.current) { app.dms.send(ctx.senderId, text); app.dms.markRead(ctx.senderId); }
       return;
     }
     if (ctx.kind === 'incoming-call' && ctx.replyText && ctx.callerId) {
       const text = ctx.replyText.trim();
-      if (text && app.rooms.current) {
-        app.dms.send(ctx.callerId, text);
-        app.dms.markRead(ctx.callerId);
-      }
+      if (text && app.rooms.current) { app.dms.send(ctx.callerId, text); app.dms.markRead(ctx.callerId); }
       return;
     }
     if (ctx.kind === 'incoming-call' && ctx.missed && ctx.action !== 'callback') return;
     if (ctx.kind === 'incoming-call' && ctx.action === 'decline') return app.calls.declineFromNotification(ctx.callId);
     if (ctx.kind === 'incoming-call' && ctx.action === 'callback') {
-      // "Call back" on a missed-call notification: ring them again (in their room).
-      const t = ctx.roomName ? validateRoomName(ctx.roomName) : null;
-      const cur = app.rooms.current;
-      if (cur && (!t?.ok || t.room.roomId === cur.roomId)) return void callBack(ctx);
-      if (!t?.ok) return;
-      if (cur) leaveRoom(app);
-      prefill = t.room.roomName;
-      pendingContext = ctx;
-      return showRoomScreen(undefined, `Join “${t.room.roomName}” to call ${ctx.callerName ?? 'them'} back`, !cur);
+      if (ui) return void callBack(ctx);
+      contactsScreen?.destroy(); contactsScreen = null;
+      showMainUI(ctx);
+      return;
     }
-    const target = ctx.roomName ? validateRoomName(ctx.roomName) : null;
-    const current = app.rooms.current;
-    const sameRoom = !!current && (!target?.ok || target.room.roomId === current.roomId);
     const apply = () => {
       if (ctx.kind === 'incoming-call') {
-        // Live stream invitation: the streamer rings us again as soon as we are online in the room.
         if (ctx.callType === 'live') { if (ctx.action === 'accept') app.live.acceptInvite(ctx.callId); }
         else (ctx.action === 'accept' ? app.calls.acceptFromNotification(ctx.callId, ctx.callerName, ctx.callerId) : app.calls.expectCall(ctx.callId, ctx.callerName));
       } else if (source === 'click') ui?.openConversation(ctx.senderId, ctx.messageId);
       else ui?.toast('info', `New message from ${ctx.senderName ?? 'someone'}`, { label: 'Open', run: () => ui?.openConversation(ctx.senderId, ctx.messageId) });
     };
-    if (sameRoom) return apply();
-    if (!target?.ok) return;
-    const who = (ctx.kind === 'incoming-call' ? ctx.callerName : ctx.senderName) ?? 'Someone';
-    const info = ctx.kind === 'incoming-call' && ctx.callType === 'live' ? `${who} invites you to a live stream in “${target.room.roomName}”. Join the room to watch.` : ctx.kind === 'incoming-call' ? `${who} is calling you in “${target.room.roomName}”. Join the room to answer.` : `${who} sent you a message in “${target.room.roomName}”. Join the room to read it.`;
-    const go = () => {
-      if (current) leaveRoom(app);
-      prefill = target.room.roomName;
-      pendingContext = ctx;
-      // Not in any room yet (app was closed) and the user tapped a call/message notification →
-      // that tap is the consent: join its room straight away so the call can be answered in time.
-      if (!current && source === 'click') return void directJoin(target.room, ctx);
-      showRoomScreen(undefined, info, false);
-    };
-    if (!current || !ui) return go();
-    ui.toast('info', ctx.kind === 'incoming-call' ? `${who} is calling you in room “${target.room.roomName}”` : `New message from ${who} in room “${target.room.roomName}”`, {
-      label: 'Switch room',
-      run: async () => {
-        if (app.calls.inCall && !(await confirmDialog({ title: 'Switch room?', message: 'This ends your current call.', confirmLabel: 'Switch', danger: true }))) return;
-        go();
-      },
-    });
+    if (ui) return apply();
+    // Not showing UI yet – switch to it and apply the action.
+    contactsScreen?.destroy(); contactsScreen = null;
+    showMainUI(ctx);
   };
   app.notifications.events.on('click', (ctx) => handleLaunchContext(ctx, 'click'));
   app.notifications.events.on('pushCall', (ctx) => handleLaunchContext(ctx, 'push'));
@@ -204,6 +180,7 @@ async function boot(): Promise<void> {
   app.signaling.events.on('authFailed', () => {
     app.identity.clearAuth();
     app.signaling.stop();
+    contactsScreen?.destroy(); contactsScreen = null;
     renderOnboarding(mount, app.config.serverUrl, (result) => {
       app.identity.setAuth(result.token, result.name, result.phone);
       void app.signaling.start();
@@ -213,20 +190,19 @@ async function boot(): Promise<void> {
   const launch = async () => {
     await startApp(app);
     let launchCtx = await app.pwa.consumeLaunchContext();
-    if (launchCtx?.kind === 'incoming-call' && launchCtx.missed && launchCtx.action !== 'callback') launchCtx = null; // plain tap on a missed-call notification just opens the app
+    if (launchCtx?.kind === 'incoming-call' && launchCtx.missed && launchCtx.action !== 'callback') launchCtx = null;
     log.info(`Launch context: ${launchCtx ? launchCtx.kind + '/' + launchCtx.action : 'none'}`);
     log.info(`Started as ${app.identity.displayName} (${app.identity.deviceId.slice(0, 8)})`);
-    const saved = app.rooms.savedActive();
-    const ctxRoom = launchCtx?.roomName ? validateRoomName(launchCtx.roomName) : null;
-    if (saved && !prefill && (!launchCtx || !ctxRoom?.ok || ctxRoom.room.roomId === saved.roomId)) {
-      // Already logged in to this room: go straight in – never show the room screen again.
-      void directJoin(saved, launchCtx ?? undefined);
-    } else if (launchCtx) handleLaunchContext(launchCtx, 'click');
-    else if (saved && !prefill) {
-      // The app was closed/reloaded while in a room → reopen it (same join path as the Join button).
-      prefill = saved.roomName;
-      showRoomScreen(undefined, undefined, true);
-    } else showRoomScreen();
+
+    // Always join the fixed room first.
+    await autoJoinFixed();
+
+    if (launchCtx) {
+      handleLaunchContext(launchCtx, 'click');
+    } else {
+      // Default: show the contacts screen.
+      showContactsScreen();
+    }
   };
 
   if (!app.identity.isLoggedIn) {

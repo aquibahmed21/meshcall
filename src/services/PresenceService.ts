@@ -18,6 +18,8 @@ const MAX_KNOWN = 200;
 interface UserRecord {
   deviceId: string;
   name: string;
+  /** Phone number of this user (populated from presence heartbeat clientData). */
+  phoneNumber: string;
   /** ScaleDrone clientIds currently present in the lobby for this device. */
   clients: Map<string, string>; // clientId → sessionId
   lastHeartbeat: number;
@@ -268,10 +270,11 @@ export class PresenceService {
   private addMember(m: Member, announce: boolean): void {
     const d = m.clientData;
     if (!d?.deviceId || d.deviceId === this.identity.deviceId) return;
-    const u = this.users.get(d.deviceId) ?? this.blank(d.deviceId, d.name, Date.now());
+    const u = this.users.get(d.deviceId) ?? this.blank(d.deviceId, d.name, Date.now(), d.phone ?? '');
     const wasOnline = u.clients.size > 0;
     u.clients.set(m.id, d.sessionId);
     if (d.name) u.name = d.name;
+    if (d.phone) u.phoneNumber = d.phone;
     u.lastSeen = Date.now();
     u.leftAt = null;
     this.users.set(d.deviceId, u);
@@ -316,6 +319,7 @@ export class PresenceService {
       u.phone = p.payload.phone === true;
       u.away = p.payload.away === true;
       u.dnd = p.payload.dnd === true;
+      if (p.payload.phoneNumber) u.phoneNumber = p.payload.phoneNumber;
       if (u.clients.size === 0 && u.leftAt !== null) u.leftAt = null; // heard from them again
     } else {
       u.explicitLeaveSessions.add(p.senderSessionId);
@@ -347,17 +351,18 @@ export class PresenceService {
   private sendHeartbeat(): void {
     if (!this.identity.isRegistered) return;
     if (!this.room) return;
-    this.signaling.broadcast(lobbyRoom(this.room.roomKey), 'presence-heartbeat', { busy: this.busy, pushEnabled: this.pushEnabled, away: this.isAway(), dnd: this.dnd(), ...(this.callId ? { callId: this.callId } : {}), phone: this.phone });
+    this.signaling.broadcast(lobbyRoom(this.room.roomKey), 'presence-heartbeat', { busy: this.busy, pushEnabled: this.pushEnabled, away: this.isAway(), dnd: this.dnd(), ...(this.callId ? { callId: this.callId } : {}), phone: this.phone, phoneNumber: this.identity.phone });
   }
 
   private sendLeave(): void {
     if (this.room && this.signaling.isConnected) this.signaling.broadcast(lobbyRoom(this.room.roomKey), 'presence-leave', { busy: false, pushEnabled: this.pushEnabled });
   }
 
-  private blank(deviceId: string, name: string, lastSeen: number): UserRecord {
+  private blank(deviceId: string, name: string, lastSeen: number, phoneNumber = ''): UserRecord {
     return {
       deviceId,
       name,
+      phoneNumber,
       clients: new Map(),
       lastHeartbeat: 0,
       lastSeen,
@@ -369,6 +374,19 @@ export class PresenceService {
       phone: false,
       pushEnabled: false,
     };
+  }
+
+  /** Return the deviceId of the first online user whose phone matches, or null. */
+  deviceIdForPhone(phone: string): string | null {
+    for (const u of this.users.values()) {
+      if (u.phoneNumber === phone && u.clients.size > 0) return u.deviceId;
+    }
+    return null;
+  }
+
+  /** Return the phone number stored for a deviceId, or empty string. */
+  phoneOf(deviceId: string): string {
+    return this.users.get(deviceId)?.phoneNumber ?? '';
   }
 
   private persist(): void {

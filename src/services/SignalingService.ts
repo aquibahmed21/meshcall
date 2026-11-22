@@ -21,6 +21,7 @@ export type SignalingStatus = 'idle' | 'connecting' | 'connected' | 'reconnectin
 export interface ClientData {
   deviceId: string;
   name: string;
+  phone: string;
   sessionId: string;
 }
 
@@ -373,6 +374,7 @@ export class SignalingService {
     const clientData: ClientData = {
       deviceId: this.identity.deviceId,
       name: this.identity.displayName,
+      phone: this.identity.phone,
       sessionId: this.identity.sessionId,
     };
     this.socket.emit('join_room', { room: name, clientData }, (ack: { ok: boolean }) => {
