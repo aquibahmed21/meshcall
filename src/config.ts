@@ -13,6 +13,12 @@ const env = import.meta.env;
 /** Default signaling server URL (the self-hosted Express server). Override with VITE_SERVER_URL. */
 export const DEFAULT_SERVER_URL = 'http://localhost:3000';
 
+/**
+ * Static pointer URL — a fixed GitHub Pages JSON file that always contains the latest tunnel URL.
+ * Override with VITE_POINTER_URL for a different pointer site.
+ */
+export const POINTER_URL = (env.VITE_POINTER_URL || 'https://aquibahmed21.github.io/server/server-url.json').replace(/\/+$/, '');
+
 /** Existing Web Push backend (see src/push/PushBackend.ts). Override with VITE_PUSH_SERVER_URL. */
 export const PUSH_SERVER_URL = 'https://web-push-3zaz.onrender.com';
 
@@ -134,4 +140,25 @@ export const CONFIG: AppConfig = {
 /** Human-readable, credential-free summary of ICE configuration for diagnostics. */
 export function describeIceServers(servers: RTCIceServer[] = CONFIG.iceServers): string[] {
   return servers.flatMap((s) => (Array.isArray(s.urls) ? s.urls : [s.urls]));
+}
+
+/**
+ * Resolve the signaling server URL at runtime.
+ * - If VITE_SERVER_URL was set at build time (local dev), use it directly.
+ * - Otherwise fetch the current tunnel URL from the static pointer site.
+ *   The pointer JSON is { server_url: "https://..." } and is updated by the server on each restart.
+ */
+export async function resolveServerUrl(): Promise<string> {
+  if (env.VITE_SERVER_URL) return env.VITE_SERVER_URL.replace(/\/+$/, '');
+  try {
+    const res = await fetch(POINTER_URL, { cache: 'no-store' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const json = (await res.json()) as { server_url?: string };
+    if (typeof json.server_url === 'string' && json.server_url) {
+      return json.server_url.replace(/\/+$/, '');
+    }
+  } catch (err) {
+    log.warn('Could not fetch pointer URL, falling back to default:', err);
+  }
+  return DEFAULT_SERVER_URL;
 }

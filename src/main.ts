@@ -1,7 +1,7 @@
 import { confirmDialog } from './ui/views/ConfirmDialog';
 import './styles/main.css';
 import { createApp, joinRoom, leaveRoom, startApp } from './app';
-import { CONFIG } from './config';
+import { CONFIG, resolveServerUrl } from './config';
 import { createLogger, logHub } from './core/logger';
 import { renderOnboarding } from './ui/views/Onboarding';
 import { renderPermissionsScreen } from './ui/views/PermissionsPanel';
@@ -239,4 +239,7 @@ async function boot(): Promise<void> {
   }
 }
 
-void boot();
+resolveServerUrl().then((url) => {
+  CONFIG.serverUrl = url;
+  void boot();
+});
