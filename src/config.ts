@@ -10,8 +10,8 @@ import { createLogger } from './core/logger';
 const log = createLogger('Config');
 const env = import.meta.env;
 
-/** Default ScaleDrone channel (a channel ID is an identifier, not a secret). */
-export const SCALEDRONE_CHANNEL_ID = 'EoIG3R1I4JdyS4L1';
+/** Default signaling server URL (the self-hosted Express server). Override with VITE_SERVER_URL. */
+export const DEFAULT_SERVER_URL = 'http://localhost:3000';
 
 /** Existing Web Push backend (see src/push/PushBackend.ts). Override with VITE_PUSH_SERVER_URL. */
 export const PUSH_SERVER_URL = 'https://web-push-3zaz.onrender.com';
@@ -29,7 +29,7 @@ export function orderStunUrls(configured: string[]): string[] {
 export type IceFallbackMode = 'gated' | 'native';
 
 export interface AppConfig {
-  scaledroneChannelId: string;
+  serverUrl: string;
   iceServers: RTCIceServer[];
   hasTurn: boolean;
   hasStun: boolean;
@@ -97,7 +97,7 @@ function buildIceServers(): { servers: RTCIceServer[]; hasTurn: boolean; hasStun
 const ice = buildIceServers();
 
 export const CONFIG: AppConfig = {
-  scaledroneChannelId: env.VITE_SCALEDRONE_CHANNEL_ID || SCALEDRONE_CHANNEL_ID,
+  serverUrl: (env.VITE_SERVER_URL || DEFAULT_SERVER_URL).replace(/\/+$/, ''),
   iceServers: ice.servers,
   hasTurn: ice.hasTurn,
   hasStun: ice.hasStun,

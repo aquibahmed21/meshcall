@@ -2,7 +2,7 @@
 
 ![MeshCall](public/banner.png)
 
-A browser VoIP and video app built with Vite, TypeScript, WebRTC and ScaleDrone signaling. It supports:
+A browser VoIP and video app built with Vite, TypeScript, WebRTC and a self-hosted Socket.IO signaling server. It supports:
 
 - 1:1 audio and video calls
 - group calls
@@ -11,8 +11,15 @@ A browser VoIP and video app built with Vite, TypeScript, WebRTC and ScaleDrone 
 
 It uses **mesh topology only**: there is no SFU, MCU or media server. Media always flows browser to browser. When direct connectivity is impossible, media goes through a TURN relay.
 
+**Prerequisites:** the Express + Socket.IO signaling server (`02-express-server/`) must be running.
+
 ```bash
-cp .env.example .env      # dev servers are pre-filled
+# 1 – start the signaling server
+cd ../02-express-server && npm install && npm start
+
+# 2 – build and run the app
+cd meshcall
+cp .env.example .env      # set VITE_SERVER_URL to the server address
 npm install
 npm run dev               # http://localhost:5173
 npm run build             # type-check + production bundle in dist/
@@ -21,6 +28,10 @@ npm test                  # unit tests (vitest)
 
 To test on phones or other PCs on your LAN, use `npm run dev:lan`. It serves over HTTPS with a self-signed certificate. HTTPS is required because camera, microphone, Service Worker and Push all need a secure context.
 
+### Authentication
+
+On first launch users register with a **mobile number, password, and display name**. Returning users sign in with their mobile number and password. The server issues a 30-day JWT stored in localStorage; it is passed to Socket.IO as the connection credential. If the token expires, the app shows the sign-in screen automatically.
+
 ---
 
 ## Contents
@@ -28,7 +39,7 @@ To test on phones or other PCs on your LAN, use `npm run dev:lan`. It serves ove
 0. [Rooms, layouts, 1:1 → group, live audience](#rooms-layouts-11--group-live-audience)
 1. [Architecture](#architecture)
 2. [Mesh topology](#mesh-topology)
-3. [Signaling](#signaling-scaledrone)
+3. [Signaling (Socket.IO)](#signaling)
 4. [Presence](#presence)
 5. [1:1 call flow](#11-call-flow)
 6. [Group call flow](#group-call-flow)
@@ -64,10 +75,10 @@ More detail:
 - **A page load asks for a room unless a room was active when the app was closed**, in which case that room is reopened (see *Reopening the last room* below). Recently used names are offered as chips that only fill the input; you still have to press Join. A notification click may prefill the room (`?room=`), but still needs Join.
 - **Validation:** room names are trimmed, internal whitespace is collapsed, and Unicode is NFKC-normalised. They must be at most 64 characters, using only letters, digits, spaces and `- _ . '`.
 - **`roomId`:** the lower-cased, dash-joined name, e.g. "Engineering Team" → `engineering-team`. It is stamped on every signaling message.
-- **`roomKey`:** a 64-bit FNV hash of the `roomId`, used to build ScaleDrone room names: `observable-room-<key>` and `inbox-<key>-<deviceId>`.
+- **`roomKey`:** a 64-bit FNV hash of the `roomId`, used to build signaling room names: `observable-room-<key>` and `inbox-<key>-<deviceId>`.
 - **Identity:** always the `deviceId`, never the room or display name.
 - **Isolation, in two layers:**
-  1. Each room uses different ScaleDrone rooms.
+  1. Each room uses different Socket.IO rooms on the signaling server.
   2. `SignalingService` drops every incoming message whose `roomId` isn't the current room. Protocol v2 requires `roomId`, so v1 clients are ignored.
 
   Calls are further isolated by `callId`, and streams by `streamId` (the stream's `callId`).
@@ -77,7 +88,7 @@ More detail:
 flowchart LR
   A[Page load] --> R[Room screen] --> J[joinRoom: scope signaling → room presence → room inbox → live discovery → wait for member list, 15 s]
   J -->|ok| U[Users & calls]
-  J -->|timeout / ScaleDrone down| R
+  J -->|timeout / signaling server down| R
   U -->|Leave Room| L[end call/stream · close peer connections · stop media · unsubscribe · clear presence/streams/chat · drop room scope] --> R
 ```
 
@@ -156,7 +167,7 @@ sequenceDiagram
 | `live-viewer-left` | viewer → streamer (also sent on page unload, so the upload slot is freed immediately) |
 
   All of them carry `roomId`, `callId` = `streamId`, `senderId`, `messageId` and `timestamp`, plus `targetUserId` where it applies. Audience-changing messages are accepted only from the stream's own streamer.
-- **Signaling confidentiality:** ScaleDrone without JWT is not confidential, so stream titles and allowed ids are visible to room members. The access control applies to the **media**.
+- **Signaling confidentiality:** The signaling server without TLS is not confidential, so stream titles and allowed ids are visible to room members. The access control applies to the **media**.
 - **Viewer reconnect:** the viewer is re-authorised on join. Allowed viewers get a fresh P2P-first connection; revoked viewers are refused.
 
 ## Architecture
@@ -167,10 +178,10 @@ src/
 ├── app.ts                      composition root (creates + wires every service)
 ├── config.ts                   env-driven config, ICE servers (no secrets in code)
 ├── core/                       logger, typed emitter, async helpers, storage, formatting
-├── types/                      signaling protocol, call/peer state, ScaleDrone typings
+├── types/                      signaling protocol, call/peer state, socket types
 ├── services/
 │   ├── IdentityService         persistent deviceId + display name, per-load sessionId
-│   ├── SignalingService        ScaleDrone transport, dedupe, outbox, liveness watchdog
+│   ├── SignalingService        Socket.IO transport, dedupe, outbox, liveness watchdog
 │   ├── PresenceService         online/offline/connecting/unknown via observable lobby
 │   ├── NetworkMonitor          online/offline, connection type, sleep/wake, resume
 │   ├── NotificationService     in-app system notifications + SW click bridge
@@ -227,7 +238,7 @@ flowchart LR
   CM --> MEDIA[MediaManager]
   NET[NetworkMonitor] --> CM --> MS --> REC
   CM --> PUSH[PushNotificationService]
-  SIG <-->|WebSocket| SD[(ScaleDrone)]
+  SIG <-->|WebSocket| SD[(Socket.IO server)]
   PS <-->|SRTP / DTLS| PEER[(Remote browsers)]
 ```
 
@@ -248,13 +259,13 @@ The design follows three rules:
 
 Each participant keeps one `RTCPeerConnection` per remote participant, so a group of N has N·(N−1)/2 links. In a live stream only broadcaster↔viewer links exist. Viewers never connect to each other.
 
-## Signaling (ScaleDrone)
+## Signaling
 
-The app uses channel `EoIG3R1I4JdyS4L1`, configurable with `VITE_SCALEDRONE_CHANNEL_ID`.
+The app connects to the self-hosted Express + Socket.IO server configured with `VITE_SERVER_URL` (default `http://localhost:3000`). Every connection is authenticated with a JWT obtained at registration/login.
 
 | Room | Purpose |
 |---|---|
-| `observable-room-<roomKey>` | room presence (ScaleDrone member list), heartbeats, live-stream and open-invite announcements |
+| `observable-room-<roomKey>` | room presence (member list via Socket.IO), heartbeats, live-stream and open-invite announcements |
 | `inbox-<roomKey>-<deviceId>` | directed messages within the room: invites, SDP, ICE, welcome, reject… |
 | `mesh-<callId>` | broadcast within a call: join, leave, heartbeat, media state, **chat messages** |
 
@@ -276,12 +287,12 @@ Negotiation messages also carry `pcId` and `targetPcId`. These let a peer discar
 
 - **Validation:** messages are structurally validated, and our own echoes are filtered out.
 - **Outbox:** messages are queued while disconnected and flushed on reconnect. Anything older than 20 s is dropped.
-- **Reconnect:** ScaleDrone's own auto-reconnect handles most drops. If ScaleDrone gives up, the client is re-created with exponential backoff.
-- **Liveness watchdog:** ScaleDrone echoes our publishes back to us. If a publish is not echoed within 20 s, the socket is presumed dead and the client is re-created. This catches Wi-Fi changes and sleep, where a WebSocket often never errors.
+- **Reconnect:** on any disconnect the socket is re-created with exponential backoff (1 s → 30 s).
+- **Liveness watchdog:** the server echoes our own publishes back to us. If a publish is not echoed within 45 s, the socket is presumed dead and re-created. This catches Wi-Fi switches and sleep, where a WebSocket often never errors.
 
 ## Presence
 
-Presence uses the ScaleDrone *observable* lobby. Its member list and join/leave events are authoritative. Heartbeats every 20 s carry the display name, a busy flag and push capability.
+Presence uses the Socket.IO *observable* lobby room. Its member list and join/leave events are authoritative. Heartbeats every 20 s carry the display name, a busy flag and push capability.
 
 | State | Meaning |
 |---|---|
@@ -297,7 +308,7 @@ A single missed heartbeat never marks a user offline. On `pagehide` the app send
 ```mermaid
 sequenceDiagram
     participant A as User A (caller)
-    participant S as ScaleDrone
+    participant S as Signaling server
     participant B as User B (callee)
 
     A->>S: call-invite (inbox-B)
@@ -539,7 +550,7 @@ flowchart TD
   - At build time a small Vite plugin stamps `sw.js` with a unique `BUILD_ID` and the exact list of emitted files, so each release precaches its own hashed JS/CSS, HTML, icons and manifest.
   - Pages are network-first (4 s), falling back to the cached shell, then to an offline page.
   - Hashed assets are cache-first.
-  - Cross-origin requests (ScaleDrone, the push relay) are never intercepted.
+  - Cross-origin requests (signaling server, the push relay) are never intercepted.
   - In `vite dev` it runs in pass-through mode, so HMR is unaffected.
 - **Offline:** the installed app still opens without a network (you get the room screen, with signaling "unavailable"). When the network returns, signaling reconnects by itself.
 - **Updates never interrupt a call:**
@@ -619,7 +630,7 @@ payload delivered = { title, body, data }   data = incoming-call | chat-message 
 - **`notificationclose`:** dismissing is not declining; the page is informed.
 - **`pushsubscriptionchange`:** the page re-registers the new subscription.
 
-**Limitation:** a Service Worker cannot hold a WebRTC call. Push only shows the notification. The chain is: user opens MeshCall → app starts → ScaleDrone connects → room joined → the caller re-sends the invite → WebRTC negotiation.
+**Limitation:** a Service Worker cannot hold a WebRTC call. Push only shows the notification. The chain is: user opens MeshCall → app starts → Socket.IO connects → room joined → the caller re-sends the invite → WebRTC negotiation.
 
 **CORS:** the backend allows `https://aquibahmed21.github.io` and `http://localhost:5173` (verified). Any other deployment origin must be added to the backend's CORS configuration. The frontend never tries to bypass CORS.
 
@@ -636,9 +647,9 @@ payload delivered = { title, body, data }   data = incoming-call | chat-message 
 
 | Recipient presence | Delivery |
 |---|---|
-| **online** | ScaleDrone, to the recipient's room inbox → the recipient's app sends `direct-message-ack` → **Delivered** |
+| **online** | Signaling server, to the recipient's room inbox → the recipient's app sends `direct-message-ack` → **Delivered** |
 | offline / **unknown** (unknown is never treated as online) | `PushNotificationService.sendToUser()`, a **targeted** push; never `/notifyAll` |
-| … with the current backend (`'unsupported'`) | **Waiting for recipient**: queued on this device with an explanation, and sent through ScaleDrone automatically when the recipient comes online |
+| … with the current backend (`'unsupported'`) | **Waiting for recipient**: queued on this device with an explanation, and sent through the signaling server automatically when the recipient comes online |
 
 - **Message states:**
   - Sending / Sent (published, no ack yet) / **Delivered** (the recipient's app acknowledged it);
@@ -669,7 +680,7 @@ POST /notify      { targetDeviceId, title, body, data }   deliver to that device
       → 202 {accepted:true} | 404 {error:'no subscription for device'} | 401/403
 ```
 
-- **Authentication:** the sender must be authenticated, for example with the same JWT as ScaleDrone, and rate-limited, so nobody can push to arbitrary devices.
+- **Authentication:** the sender must be authenticated, for example with a JWT (same server), and rate-limited, so nobody can push to arbitrary devices.
 - **Response:** `/notify` should also return whether the device has a subscription, so the UI can show *push enabled* reliably.
 - **Frontend change:** a `PushBackend` adapter with `capabilities.targetedDelivery = true`. `sendToUser`, the call dialog and messaging then work without other changes.
 - **Current frontend behaviour:** because the backend does not have this, the frontend shows no "push enabled" badge (it is not reliably known) and returns `'unsupported'` from `sendToUser`.
@@ -715,7 +726,7 @@ These features sit entirely in the UI and signaling layers. The ICE strategy, Pe
 
 ### Chat
 
-Chat goes over **ScaleDrone**, not a WebRTC DataChannel:
+Chat goes over the **signaling server**, not a WebRTC DataChannel:
 
 - Every participant is already subscribed to `mesh-<callId>`, so chat adds no subscription, no peer connection and no new failure mode to the media path.
 - It also works for peers whose media is currently down (for example, a peer that is reconnecting).
@@ -737,7 +748,7 @@ interface ChatMessage {
 
 - **Isolation:** `ChatService` is bound to one `callId`. A message carrying any other `callId`, or arriving while no call is bound, is ignored. Chat is bound while the call is *connecting*, *connected* or *reconnecting*, so a WebRTC outage does **not** clear it. It is cleared once the call ends (messages, unread count and processed ids), so the next call always starts clean.
 - **De-duplication and ordering:** `processedMessageIds` means each message is shown once. Messages are kept sorted by `(timestamp, messageId)`, so out-of-order arrival is fine. Ordering is by the sender's clock, so small clock skew between devices can reorder near-simultaneous messages.
-- **Delivery:** our own message appears immediately as *Sending…*. It flips to sent when ScaleDrone echoes our publish back. With no echo within 12 s it becomes *Not delivered · Retry*. A retry uses the same `messageId`, so peers that already received it drop the duplicate.
+- **Delivery:** our own message appears immediately as *Sending…*. It flips to sent when the server echoes our publish back. With no echo within 12 s it becomes *Not delivered · Retry*. A retry uses the same `messageId`, so peers that already received it drop the duplicate.
 - **Composer:**
   - **Enter** sends; **Shift+Enter** inserts a newline; IME composition is respected.
   - Empty or whitespace-only messages are not sent.
@@ -854,7 +865,7 @@ Results use `IceServerTestResult` (`src/webrtc/IceServerProbe.ts`). Normal calls
 
 | Variable | Purpose |
 |---|---|
-| `VITE_SCALEDRONE_CHANNEL_ID` | ScaleDrone channel |
+| `VITE_SERVER_URL` | Signaling server URL (Socket.IO) |
 | `VITE_STUN_SERVER` | comma-separated STUN URLs |
 | `VITE_TURN_SERVER`, `VITE_TURN_USERNAME`, `VITE_TURN_CREDENTIAL` | TURN relay |
 | `VITE_DIRECT_P2P_TIMEOUT_MS` | P2P window before relay candidates are released (default 3000) |
@@ -870,7 +881,7 @@ Other security notes:
 
 - Credentials are never logged; the logger redacts `credential` and similar keys.
 - Serve the app over HTTPS.
-- ScaleDrone is used without JWT authentication here, so any client that knows the channel can publish, including spoofing a `senderId`. In production, enable ScaleDrone JWT authentication and put the push relay behind the same authentication.
+- The signaling server validates every connection with a JWT. Put the server behind HTTPS in production and keep JWT_SECRET in an env var.
 
 ## Browser limitations
 
@@ -905,7 +916,7 @@ With N participants, every client encodes and uploads **N−1 streams** and deco
 ```bash
 npm test                       # unit tests (candidate gate, path classification, stats parsing,
                                #   data usage, hysteresis, recovery re-entrancy, state machine…)
-npm run dev &                  # then, with a real ScaleDrone channel:
+npm run dev &                  # configure VITE_SERVER_URL in .env
 npm run test:e2e               # two/three-browser end-to-end suite (headless Chrome, fake media)
 npm run test:resilience        # glare, offline→online, signaling reconnect, peer vanishes
 npm run test:screens           # responsive screenshots → tests/e2e/artifacts/
@@ -980,7 +991,7 @@ This section is written for anyone (human or AI agent) who needs to **refactor t
 ├──────────────────────────────────────────────────────────────────────────────┤
 │ Local media     media/MediaManager.ts       getUserMedia, mute, screen, swap │
 ├──────────────────────────────────────────────────────────────────────────────┤
-│ Transport       services/SignalingService.ts  ScaleDrone pub/sub, envelopes, │
+│ Transport       services/SignalingService.ts  Socket.IO pub/sub, envelopes, │
 │                                             dedupe, outbox, liveness         │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -998,7 +1009,7 @@ Rules that hold across all layers:
 |---|---|---|---|
 | `deviceId` | `IdentityService` (localStorage) | permanent per browser profile | user identity, inbox address, `senderId`/`receiverId`, presence key |
 | `sessionId` | `IdentityService` (per page load) | one page load | detects reloads (= rejoin), `receiverSessionId` targeting, politeness tie-break |
-| `roomId` / `roomKey` | `RoomService` (normalised name / short hash) | while in the room | message scoping (`roomId` on every envelope), ScaleDrone room names |
+| `roomId` / `roomKey` | `RoomService` (normalised name / short hash) | while in the room | message scoping (`roomId` on every envelope), signaling room names |
 | `callId` | `uuid()` in `CallManager` (`streamId` for live) | one call/stream | `mesh-<callId>` room, `callId` on every call message, push payloads, history |
 | `pcId` | `uuid()` per `PeerSession` | one `RTCPeerConnection` | negotiation routing (`pcId` / `targetPcId`), stale-message rejection, orphan detection |
 | `messageId` | `uuid()` per envelope (or reused for retries) | one message | de-duplication (`BoundedSet` of 4000) |
@@ -1014,7 +1025,7 @@ Rules that hold across all layers:
 - `envelope()` stamps `v`, `messageId`, `timestamp`, `senderId`, `senderSessionId`, `senderName`, `roomId`, `callId`, `peerId`.
 - While disconnected, messages go to an outbox (max 300, dropped after 20 s) and are flushed on reconnect.
 
-**Receiving**: each incoming ScaleDrone message passes these filters **in this order**, and is dropped at the first that fails:
+**Receiving**: each incoming message passes these filters **in this order**, and is dropped at the first that fails:
 
 1. `isSignalingMessage()`: structural validation and the protocol version `v === 2`.
 2. Our own session (`senderSessionId === mine`): this is the echo the liveness watchdog waits for; it is never emitted as a message.
@@ -1028,7 +1039,7 @@ Survivors are emitted as `signaling.events 'message'`. Listeners:
 - `CallManager.onMessage`: call-control types (`call-*`, `call-participants-added`) are handled there. **Every other message whose `callId` equals the current mesh's `callId` is forwarded to `MeshSession.handleMessage`.**
 - `PresenceService`, `LiveStreamManager`, `ChatService`, `DirectMessageService` each pick their own types.
 
-ScaleDrone rooms subscribed (`SignalingService.subscribe(name, handlers)` survives client re-creation):
+Signaling rooms subscribed (`SignalingService.subscribe(name, handlers)` survives client re-creation):
 
 | Room | Subscribed by | When |
 |---|---|---|
@@ -1232,7 +1243,7 @@ Bitrate, resolution and frame rate are changed with `RTCRtpSender.setParameters`
 | Remote re-created its PC (new `pcId` in an offer) | `PeerConnectionManager.handleNegotiation` | close the old session and answer on a fresh one |
 | One-sided connection (remote doesn't know our `pcId`) | heartbeat `peers` map in `onMember` | impolite side re-creates |
 | Network change or wake from sleep | `NetworkMonitor` → `CallManager` → `mesh.onNetworkChange` | ICE restart on every peer (the P2P window is re-armed) |
-| Signaling socket dead | `SignalingService` echo watchdog | re-create the ScaleDrone client → `reconnected` → `mesh-join` re-announce plus restart of unhealthy peers |
+| Signaling socket dead | `SignalingService` echo watchdog | re-create the Socket.IO client → `reconnected` → `mesh-join` re-announce plus restart of unhealthy peers |
 | Participant silent and media dead | `MeshSession.tick` (35 s) | drop that participant only |
 | 1:1 peer stays disconnected | `CallManager.recomputeStatus` | `reconnecting` → `failed` after 45 s |
 
@@ -1281,7 +1292,7 @@ If you rewrite the transport or the WebRTC layer, keep this surface and the UI k
 
 ### 11. Recipes
 
-**Replace ScaleDrone with another signaling transport** (WebSocket server, Firebase, MQTT, Socket.IO…):
+**Replace the signaling transport** (the Socket.IO server can be swapped for any compatible backend):
 
 - Re-implement `SignalingService` with the same public API:
   - `subscribe(roomName, {onOpen, onMembers, onMemberJoin, onMemberLeave})` returning an unsubscribe function;
@@ -1309,7 +1320,7 @@ If you rewrite the transport or the WebRTC layer, keep this surface and the UI k
 **Interoperate with a native or other client:** implement the wire protocol in `types/signaling.ts`:
 
 - envelope `v: 2`;
-- ScaleDrone room names from §3;
+- signaling room names from §3;
 - transceiver order `audio`, then `video`, with `max-bundle`;
 - the politeness rule from §2;
 - `mesh-join` on entering `mesh-<callId>` and a heartbeat every ≤10 s;

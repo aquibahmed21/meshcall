@@ -72,7 +72,7 @@ export class DiagnosticsPanel {
     sections.push(
       this.section('Signaling & network', [
         ['Signaling', signaling.status],
-        ['Channel', config.scaledroneChannelId],
+        ['Server', config.serverUrl],
         ['Device', identity.deviceId.slice(0, 8)],
         ['Session', identity.sessionId.slice(0, 8)],
         ['Browser online', net.online ? 'yes (hint only)' : 'no'],

@@ -118,7 +118,7 @@ export class ChatService {
 
   get status(): ChatStatus {
     const sig: SignalingStatus = this.signaling.status;
-    if (sig === 'connecting' || sig === 'reconnecting' || sig === 'loading') return 'connecting';
+    if (sig === 'connecting' || sig === 'reconnecting') return 'connecting';
     if (sig !== 'connected') return 'disconnected';
     if (this.deliveryTimers.size > 0) return 'sending';
     if (this.lastError) return 'error';

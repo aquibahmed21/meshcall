@@ -159,7 +159,7 @@ export async function joinRoom(app: AppContext, room: RoomContext): Promise<void
     const sig = app.signaling.status;
     leaveRoom(app);
     throw new RoomJoinError(
-      sig === 'unavailable' ? 'ScaleDrone signaling is unavailable – check your connection and try again' : 'Unable to join the room – signaling did not respond in time',
+      sig === 'unavailable' ? 'Signaling server is unavailable – check your connection and try again' : 'Unable to join the room – signaling did not respond in time',
     );
   }
 }

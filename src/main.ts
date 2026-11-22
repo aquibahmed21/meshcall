@@ -200,6 +200,16 @@ async function boot(): Promise<void> {
   app.notifications.events.on('pushCall', (ctx) => handleLaunchContext(ctx, 'push'));
   app.notifications.events.on('pushChat', (ctx) => handleLaunchContext(ctx, 'push'));
 
+  // If the server rejects our token (expired / revoked), show the sign-in screen.
+  app.signaling.events.on('authFailed', () => {
+    app.identity.clearAuth();
+    app.signaling.stop();
+    renderOnboarding(mount, app.config.serverUrl, (result) => {
+      app.identity.setAuth(result.token, result.name, result.phone);
+      void app.signaling.start();
+    });
+  });
+
   const launch = async () => {
     await startApp(app);
     let launchCtx = await app.pwa.consumeLaunchContext();
@@ -219,9 +229,9 @@ async function boot(): Promise<void> {
     } else showRoomScreen();
   };
 
-  if (!app.identity.isRegistered) {
-    renderOnboarding(mount, (name) => {
-      app.identity.setDisplayName(name);
+  if (!app.identity.isLoggedIn) {
+    renderOnboarding(mount, app.config.serverUrl, (result) => {
+      app.identity.setAuth(result.token, result.name, result.phone);
       void launch();
     });
   } else {

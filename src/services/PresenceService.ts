@@ -238,7 +238,7 @@ export class PresenceService {
     const sig = this.signaling.status;
     if (sig !== 'connected') {
       // We cannot observe anyone while our own signaling is down.
-      return sig === 'connecting' || sig === 'loading' ? 'connecting' : 'unknown';
+      return sig === 'connecting' ? 'connecting' : 'unknown';
     }
     if (u.clients.size > 0) return 'online';
     const now = Date.now();

@@ -36,7 +36,7 @@ export class UIManager {
   private callView: CallView | null = null;
   private diagnostics: DiagnosticsPanel;
   private toasts = new Toasts();
-  private sigPill = h('span', { class: 'pill', title: 'Signaling (ScaleDrone)' });
+  private sigPill = h('span', { class: 'pill', title: 'Signaling (Socket.IO)' });
   private netPill = h('span', { class: 'pill', title: 'Network' });
   private pushPill = h('button', { class: 'pill pill-btn', type: 'button', onclick: () => openSettings(this.app, 'device') });
   private banner = h('div', { class: 'banner', hidden: true });

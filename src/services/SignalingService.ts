@@ -1,9 +1,9 @@
-import { Backoff, BoundedSet, Timer, withTimeout } from '../core/async';
+import { io, type Socket } from 'socket.io-client';
+import { Backoff, BoundedSet, Timer } from '../core/async';
 import { Emitter } from '../core/emitter';
 import { uuid } from '../core/ids';
 import { createLogger, errorMessage } from '../core/logger';
 import type { AppConfig } from '../config';
-import type { ScaledroneClient, ScaledroneConstructor, ScaledroneMember, ScaledroneMessage, ScaledroneRoom } from '../types/scaledrone';
 import {
   PROTOCOL_VERSION,
   isSignalingMessage,
@@ -15,16 +15,19 @@ import type { IdentityService } from './IdentityService';
 import type { RoomContext } from './RoomService';
 
 const log = createLogger('Signaling');
-const SCRIPT_URL = 'https://cdn.scaledrone.com/scaledrone.min.js';
 
-export type SignalingStatus = 'idle' | 'loading' | 'connecting' | 'connected' | 'reconnecting' | 'unavailable';
+export type SignalingStatus = 'idle' | 'connecting' | 'connected' | 'reconnecting' | 'unavailable';
 
 export interface ClientData {
   deviceId: string;
   name: string;
   sessionId: string;
 }
-export type Member = ScaledroneMember<ClientData>;
+
+export interface Member {
+  id: string;
+  clientData?: ClientData;
+}
 
 export interface RoomHandlers {
   onOpen?: () => void;
@@ -43,7 +46,8 @@ export interface SendOptions {
 
 interface RoomEntry {
   handlers: RoomHandlers;
-  room: ScaledroneRoom | null;
+  /** Whether join_room has been sent and acknowledged for the current socket. */
+  joined: boolean;
 }
 
 interface Outgoing {
@@ -52,38 +56,45 @@ interface Outgoing {
   queuedAt: number;
 }
 
+interface ServerMessage {
+  room: string;
+  data: unknown;
+  id: string;
+  timestamp: number;
+  clientId: string;
+}
+
 const OUTBOX_LIMIT = 300;
 const OUTBOX_MAX_AGE_MS = 20_000;
-const ECHO_TIMEOUT_MS = 20_000;
 
 export const inboxRoom = (roomKey: string, deviceId: string) => `inbox-${roomKey}-${deviceId}`;
 export const lobbyRoom = (roomKey: string) => `observable-room-${roomKey}`;
 export const meshRoom = (callId: string) => `mesh-${callId}`;
 
 /**
- * ScaleDrone transport.
+ * Socket.IO transport (replaces the previous ScaleDrone transport).
  *
- *  - Loads the ScaleDrone client from the CDN (with timeout + retry).
- *  - Tracks connection status; relies on ScaleDrone's own reconnect for abnormal closures and
- *    re-creates the client with exponential backoff when ScaleDrone gives up ('close').
- *  - Liveness watchdog: ScaleDrone echoes our own publishes back to us. If a publish to a room we
- *    are subscribed to is not echoed within ECHO_TIMEOUT_MS the socket is presumed dead (common
- *    after Wi-Fi switches / sleep where the WebSocket never errors) and the client is re-created.
- *  - Outgoing messages are queued while disconnected and flushed (minus stale ones) on reconnect.
- *  - Incoming messages are validated, filtered to this device/session, and de-duplicated by messageId.
+ *  - Connects to the self-hosted Express + Socket.IO server.
+ *  - Tracks connection status; manages reconnection with exponential backoff.
+ *  - Liveness watchdog: the server echoes our own publishes back to us. If a publish to a room
+ *    we are subscribed to is not echoed within echoWatchdogMs the socket is presumed dead and
+ *    re-created.
+ *  - Outgoing messages are queued while disconnected and flushed on reconnect.
+ *  - Incoming messages are validated, filtered to this device/session, and de-duplicated.
  */
 export class SignalingService {
   readonly events = new Emitter<{
     status: SignalingStatus;
     message: { msg: SignalingMessage; room: string };
     reconnected: void;
-    /** One of OUR publishes came back from ScaleDrone (i.e. the server accepted and fanned it out). */
+    /** One of OUR publishes came back (server accepted and fanned it out). */
     echo: { msg: SignalingMessage; room: string };
+    /** Server rejected our token – user must re-authenticate. */
+    authFailed: void;
   }>();
 
   private _status: SignalingStatus = 'idle';
-  private ctor: ScaledroneConstructor | null = null;
-  private drone: ScaledroneClient | null = null;
+  private socket: Socket | null = null;
   private generation = 0;
   private everConnected = false;
   private rooms = new Map<string, RoomEntry>();
@@ -94,8 +105,8 @@ export class SignalingService {
   private pendingEchoSince: number | null = null;
   private watchdog: ReturnType<typeof setInterval> | null = null;
   private stopped = false;
-  /** Current room scope: stamped on every outgoing message, required on every incoming one. */
   private room: RoomContext | null = null;
+
   private readonly onOnline = () => {
     if (this._status !== 'connected' && !this.stopped) {
       log.info('Browser online – reconnecting signaling immediately');
@@ -123,7 +134,7 @@ export class SignalingService {
 
   /**
    * Switch room scope. Queued messages of the previous room are discarded and incoming
-   * messages of any other room are dropped from now on (stale-room protection).
+   * messages of any other room are dropped (stale-room protection).
    */
   setRoom(room: RoomContext | null): void {
     if (this.room?.roomId === room?.roomId) return;
@@ -145,28 +156,29 @@ export class SignalingService {
     if (this.watchdog) clearInterval(this.watchdog);
     this.retryTimer.clear();
     this.generation++;
-    this.closeDrone();
+    this.closeSocket();
     this.setStatus('idle');
   }
 
   /** Subscribe to a room. Survives client re-creation. Returns an unsubscribe function. */
   subscribe(name: string, handlers: RoomHandlers = {}): () => void {
-    const entry: RoomEntry = { handlers, room: null };
-    this.rooms.get(name)?.room?.unsubscribe();
+    const entry: RoomEntry = { handlers, joined: false };
+    // If re-subscribing, leave the old entry first.
+    if (this.rooms.has(name) && this.socket && this._status === 'connected') {
+      this.socket.emit('leave_room', { room: name });
+    }
     this.rooms.set(name, entry);
-    if (this.drone && this._status === 'connected') this.attachRoom(name, entry);
+    if (this.socket && this._status === 'connected') this.attachRoom(name, entry);
     return () => {
       if (this.rooms.get(name) !== entry) return;
       this.rooms.delete(name);
-      try {
-        entry.room?.unsubscribe();
-      } catch (err) {
-        log.debug(`Unsubscribe ${name} failed`, errorMessage(err));
+      if (this.socket) {
+        try { this.socket.emit('leave_room', { room: name }); } catch { /* ignore */ }
       }
     };
   }
 
-  /** Directed message to one device (all of its sessions unless receiverSessionId is set). */
+  /** Directed message to one device (all sessions unless receiverSessionId is set). */
   send<T extends MessageType>(receiverId: string, type: T, payload: PayloadOf<T>, opts: SendOptions = {}): string {
     const msg = this.envelope(receiverId, type, payload, opts);
     if (!this.room) {
@@ -184,12 +196,12 @@ export class SignalingService {
     return msg.messageId;
   }
 
-  /** Force a fresh ScaleDrone connection (e.g. after network change / dead socket). */
+  /** Force a fresh connection (e.g. after network change / dead socket). */
   reconnectNow(reason: string): void {
     if (this.stopped) return;
     log.info(`Re-creating signaling connection (${reason})`);
     this.generation++;
-    this.closeDrone();
+    this.closeSocket();
     this.setStatus(this.everConnected ? 'reconnecting' : 'connecting');
     this.retryTimer.clear();
     void this.connect();
@@ -216,12 +228,12 @@ export class SignalingService {
   }
 
   private publish(room: string, message: SignalingMessage): void {
-    if (this._status !== 'connected' || !this.drone) {
+    if (this._status !== 'connected' || !this.socket) {
       this.enqueue(room, message);
       return;
     }
     try {
-      this.drone.publish({ room, message });
+      this.socket.emit('publish', { room, message });
       if (this.rooms.has(room) && this.pendingEchoSince === null) this.pendingEchoSince = Date.now();
     } catch (err) {
       log.warn(`Publish failed (${message.messageType}) – queued`, errorMessage(err));
@@ -244,107 +256,93 @@ export class SignalingService {
     for (const o of pending) this.publish(o.room, o.message);
   }
 
-  private async loadClient(): Promise<ScaledroneConstructor> {
-    if (this.ctor) return this.ctor;
-    if (window.Scaledrone) return (this.ctor = window.Scaledrone);
-    this.setStatus('loading');
-    const load = new Promise<ScaledroneConstructor>((resolve, reject) => {
-      document.querySelector(`script[src="${SCRIPT_URL}"]`)?.remove();
-      const s = document.createElement('script');
-      s.src = SCRIPT_URL;
-      s.async = true;
-      s.onload = () => (window.Scaledrone ? resolve(window.Scaledrone) : reject(new Error('Scaledrone global missing')));
-      s.onerror = () => reject(new Error('Failed to load ScaleDrone client'));
-      document.head.appendChild(s);
-    });
-    this.ctor = await withTimeout(load, 15_000, 'ScaleDrone script load');
-    return this.ctor;
-  }
-
   private async connect(): Promise<void> {
     const gen = ++this.generation;
-    let Ctor: ScaledroneConstructor;
-    try {
-      Ctor = await this.loadClient();
-    } catch (err) {
-      log.error('ScaleDrone unavailable', errorMessage(err));
-      this.setStatus('unavailable');
-      this.scheduleRetry(gen);
-      return;
-    }
     if (gen !== this.generation || this.stopped) return;
 
     this.setStatus(this.everConnected ? 'reconnecting' : 'connecting');
-    const clientData: ClientData = {
-      deviceId: this.identity.deviceId,
-      name: this.identity.displayName,
-      sessionId: this.identity.sessionId,
-    };
-    let drone: ScaledroneClient;
-    try {
-      drone = new Ctor(this.config.scaledroneChannelId, { data: clientData });
-    } catch (err) {
-      log.error('Could not create ScaleDrone client', errorMessage(err));
-      this.setStatus('unavailable');
-      this.scheduleRetry(gen);
-      return;
-    }
-    this.drone = drone;
+
+    const socket = io(this.config.serverUrl, {
+      auth: { token: this.identity.token },
+      reconnection: false,
+      timeout: 20_000,
+    });
+    this.socket = socket;
+
     const current = () => gen === this.generation && !this.stopped;
-    let opened = false;
 
     const openTimer = new Timer();
     openTimer.start(20_000, () => {
       if (current() && this._status !== 'connected') {
-        log.warn('ScaleDrone connection timed out');
+        log.warn('Socket.IO connection timed out');
         this.retryAfterFailure(gen);
       }
     });
 
-    drone.on('open', (error) => {
+    socket.on('connect', () => {
       openTimer.clear();
       if (!current()) return;
-      if (error) {
-        log.error('ScaleDrone connection error', errorMessage(error));
-        this.retryAfterFailure(gen);
-        return;
-      }
-      opened = true;
-      this.onConnected(); // attaches every room to this fresh client
-    });
-    drone.on('error', (error) => {
-      if (current()) log.throttled('error', 10_000, 'WARN', 'ScaleDrone error', errorMessage(error));
-    });
-    drone.on('disconnect', () => {
-      if (!current()) return;
-      log.warn('Disconnected – ScaleDrone is reconnecting');
-      this.setStatus('reconnecting');
-    });
-    drone.on('reconnect', () => {
-      if (!current()) return;
-      // ScaleDrone's internal reconnect only restores rooms it already knew, and a client whose
-      // FIRST handshake never completed (e.g. the app started offline) cannot subscribe/publish
-      // afterwards. In those cases use a brand-new client so every room is attached on 'open'.
-      const pending = [...this.rooms.values()].some((e) => !e.room);
-      if (!opened || pending) {
-        log.info('Reconnected – switching to a fresh client to (re)attach rooms');
-        this.reconnectNow(opened ? 'rooms pending after reconnect' : 'first handshake never completed');
-        return;
-      }
-      log.info('Reconnected (ScaleDrone auto-reconnect)');
       this.onConnected();
     });
-    drone.on('close', () => {
+
+    socket.on('connect_error', (err: Error) => {
+      openTimer.clear();
       if (!current()) return;
-      log.warn('Connection closed – scheduling reconnect');
+      if (err.message === 'unauthorized') {
+        log.error('Signaling auth failed – token invalid or expired');
+        this.generation++;
+        this.closeSocket();
+        this.setStatus('unavailable');
+        this.events.emit('authFailed', undefined);
+        return;
+      }
+      log.error('Socket.IO connect error', err.message);
       this.retryAfterFailure(gen);
+    });
+
+    socket.on('disconnect', (reason: string) => {
+      if (!current()) return;
+      log.warn(`Disconnected (${reason}) – scheduling reconnect`);
+      this.retryAfterFailure(gen);
+    });
+
+    // ── Incoming events from server ────────────────────────────────────────
+
+    socket.on('message', (data: ServerMessage) => {
+      if (!current()) return;
+      if (!this.rooms.has(data.room)) return;
+      this.handleRaw(data.room, data);
+    });
+
+    socket.on('room_opened', ({ room }: { room: string }) => {
+      if (!current()) return;
+      const entry = this.rooms.get(room);
+      if (!entry) return;
+      entry.joined = true;
+      log.debug(`Room open: ${room}`);
+      entry.handlers.onOpen?.();
+    });
+
+    socket.on('members', ({ room, members }: { room: string; members: Member[] }) => {
+      if (!current()) return;
+      this.rooms.get(room)?.handlers.onMembers?.(members);
+    });
+
+    socket.on('member_join', ({ room, member }: { room: string; member: Member }) => {
+      if (!current()) return;
+      this.rooms.get(room)?.handlers.onMemberJoin?.(member);
+    });
+
+    socket.on('member_leave', ({ room, member }: { room: string; member: Member }) => {
+      if (!current()) return;
+      this.rooms.get(room)?.handlers.onMemberLeave?.(member);
     });
   }
 
   private retryAfterFailure(gen: number): void {
     if (gen !== this.generation) return;
     this.generation++;
-    this.closeDrone();
+    this.closeSocket();
     this.setStatus(this.everConnected ? 'reconnecting' : 'unavailable');
     this.scheduleRetry(this.generation);
   }
@@ -359,11 +357,7 @@ export class SignalingService {
   }
 
   private onConnected(): void {
-    // Rooms subscribed while we were disconnected/reconnecting were never attached to a ScaleDrone
-    // client (ScaleDrone's auto-reconnect only re-subscribes rooms it already knew). Attach them
-    // now – otherwise joining a room or starting a call during a network blip would silently
-    // never receive anything.
-    for (const [name, entry] of this.rooms) if (!entry.room) this.attachRoom(name, entry);
+    for (const [name, entry] of this.rooms) if (!entry.joined) this.attachRoom(name, entry);
     const wasConnected = this.everConnected;
     this.everConnected = true;
     this.backoff.reset();
@@ -374,29 +368,20 @@ export class SignalingService {
   }
 
   private attachRoom(name: string, entry: RoomEntry): void {
-    if (!this.drone) return;
+    if (!this.socket) return;
     const gen = this.generation;
-    const room = this.drone.subscribe(name);
-    entry.room = room;
-    const live = () => gen === this.generation && this.rooms.get(name) === entry;
-    room.on('open', (error) => {
-      if (!live()) return;
-      if (error) {
-        log.error(`Room ${name} failed to open`, errorMessage(error));
-        return;
-      }
-      log.debug(`Room open: ${name}`);
-      entry.handlers.onOpen?.();
+    const clientData: ClientData = {
+      deviceId: this.identity.deviceId,
+      name: this.identity.displayName,
+      sessionId: this.identity.sessionId,
+    };
+    this.socket.emit('join_room', { room: name, clientData }, (ack: { ok: boolean }) => {
+      if (gen !== this.generation || this.rooms.get(name) !== entry) return;
+      if (!ack?.ok) log.error(`Room ${name} failed to open`);
     });
-    room.on('message', (m) => live() && this.handleRaw(name, m));
-    if (name.startsWith('observable-')) {
-      room.on('members', (ms) => live() && entry.handlers.onMembers?.(ms as Member[]));
-      room.on('member_join', (m) => live() && entry.handlers.onMemberJoin?.(m as Member));
-      room.on('member_leave', (m) => live() && entry.handlers.onMemberLeave?.(m as Member));
-    }
   }
 
-  private handleRaw(room: string, raw: ScaledroneMessage): void {
+  private handleRaw(room: string, raw: ServerMessage): void {
     const msg = raw.data;
     if (!isSignalingMessage(msg)) {
       log.throttled('invalid', 30_000, 'DEBUG', `Ignoring malformed message in ${room}`);
@@ -422,22 +407,22 @@ export class SignalingService {
 
   private checkLiveness(): void {
     if (this._status !== 'connected' || this.pendingEchoSince === null) return;
-    if (Date.now() - this.pendingEchoSince > ECHO_TIMEOUT_MS) {
+    if (Date.now() - this.pendingEchoSince > this.config.signaling.echoWatchdogMs) {
       log.warn('No echo of our own messages – signaling socket presumed dead');
       this.pendingEchoSince = null;
       this.reconnectNow('echo-watchdog');
     }
   }
 
-  private closeDrone(): void {
-    const d = this.drone;
-    this.drone = null;
-    for (const entry of this.rooms.values()) entry.room = null;
-    if (!d) return;
+  private closeSocket(): void {
+    const s = this.socket;
+    this.socket = null;
+    for (const entry of this.rooms.values()) entry.joined = false;
+    if (!s) return;
     try {
-      d.close();
+      s.disconnect();
     } catch (err) {
-      log.debug('ScaleDrone close failed', errorMessage(err));
+      log.debug('Socket close failed', errorMessage(err));
     }
   }
 
@@ -448,5 +433,3 @@ export class SignalingService {
     this.events.emit('status', status);
   }
 }
-
-export type { ScaledroneMember };
