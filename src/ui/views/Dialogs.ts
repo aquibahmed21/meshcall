@@ -9,6 +9,8 @@ import { colorFor, h, initials, nodes } from '../dom';
 import { icons } from '../icons';
 import { Modal } from './Modal';
 import { renderNotificationSettings } from './NotificationSettings';
+import { renderPermissionsPanel } from './PermissionsPanel';
+import { isHeadless, isNative, native } from '../../native/native';
 
 function field(label: string, control: HTMLElement, hint?: string): HTMLElement {
   return h('label', { class: 'field' }, h('span', { class: 'field-label' }, label), control, hint ? h('small', { class: 'hint' }, hint) : null);
@@ -57,6 +59,10 @@ export function openSettings(app: AppContext, initialTab: SettingsTab = 'call', 
     version = v ?? '';
     if (m.isOpen) render();
   });
+  void app.devices.refresh(false);
+  let shownCode: string | null = null;
+  let linkMsg = '';
+  app.links.events.on('code', (c) => (shownCode = c));
   const render = () => {
     const s = app.settings.get();
     const d = app.devices.devices;
@@ -87,13 +93,72 @@ export function openSettings(app: AppContext, initialTab: SettingsTab = 'call', 
       h('h3', {}, 'Audio & video devices'),
       field('Microphone', select(devOpts(d.audioinput, 'Microphone'), s.audioInputId ?? '', (v) => void app.media.switchDevice('audioinput', v || null))),
       field('Camera', select(devOpts(d.videoinput, 'Camera'), s.videoInputId ?? '', (v) => void app.media.switchDevice('videoinput', v || null))),
-      d.outputSelectable
+      isNative && !isHeadless
+        ? field('Speaker', nativeOutputSelect(render))
+        : d.outputSelectable
         ? field('Speaker', select(devOpts(d.audiooutput, 'Speaker'), s.audioOutputId ?? '', (v) => app.settings.update({ audioOutputId: v || null })))
         : null,
       volumeField(app),
       matchMedia('(pointer: coarse)').matches
         ? toggle('Use media volume (phone)', s.mediaVolume !== false, (v) => app.settings.update({ mediaVolume: v }))
         : null,
+    );
+    const dnd = h(
+      'section',
+      {},
+      h('h3', {}, 'Do not disturb'),
+      toggle('Do not disturb', s.dnd, (v) => app.settings.update({ dnd: v })),
+      toggle('Quiet hours', s.dndSchedule, (v) => (app.settings.update({ dndSchedule: v }), render())),
+      s.dndSchedule
+        ? h(
+            'div',
+            { class: 'dnd-times' },
+            h('input', { type: 'time', value: s.dndFrom, 'aria-label': 'From', onchange: (e: Event) => app.settings.update({ dndFrom: (e.target as HTMLInputElement).value || '22:00' }) }),
+            h('span', {}, '→'),
+            h('input', { type: 'time', value: s.dndTo, 'aria-label': 'To', onchange: (e: Event) => app.settings.update({ dndTo: (e.target as HTMLInputElement).value || '07:00' }) }),
+          )
+        : null,
+      h('p', { class: 'hint' }, 'Callers see you as busy. Missed calls still show in Calls.'),
+    );
+    const mine = app.links.list();
+    const code = shownCode;
+    const linkedSection = h(
+      'section',
+      {},
+      h('h3', {}, 'My devices'),
+      ...mine.map((l) =>
+        h(
+          'div',
+          { class: 'link-row' },
+          h('span', { class: `presence-dot ${app.presence.status(l.deviceId) === 'online' ? 'online' : 'offline'}`, 'aria-hidden': 'true' }),
+          h('span', { class: 'grow' }, l.name),
+          h('button', { class: 'btn small', type: 'button', onclick: () => (app.links.unlink(l.deviceId), render()) }, 'Unlink'),
+        ),
+      ),
+      code
+        ? h('div', { class: 'link-code', 'aria-live': 'polite' }, h('strong', {}, code), h('small', {}, 'Enter this on your other device (2 min)'))
+        : h(
+            'div',
+            { class: 'link-actions' },
+            h('button', { class: 'btn small', type: 'button', onclick: () => ((shownCode = app.links.showCode()), render()) }, 'Show code'),
+            h('input', { class: 'link-input', inputmode: 'numeric', maxlength: 6, placeholder: '6-digit code', 'aria-label': 'Code from your other device' }),
+            h(
+              'button',
+              {
+                class: 'btn small primary',
+                type: 'button',
+                onclick: async (e: Event) => {
+                  const input = (e.target as HTMLElement).parentElement?.querySelector('input') as HTMLInputElement;
+                  const name = await app.links.pair(input.value);
+                  linkMsg = name ? `Linked with ${name}` : 'Wrong or expired code';
+                  render();
+                },
+              },
+              'Link',
+            ),
+          ),
+      linkMsg ? h('p', { class: 'hint' }, linkMsg) : null,
+      h('p', { class: 'hint' }, 'Link your own devices to move a running call between them. Both must be in the same room.'),
     );
     const quality = h(
       'section',
@@ -175,7 +240,7 @@ export function openSettings(app: AppContext, initialTab: SettingsTab = 'call', 
     );
     const tabs: Array<[SettingsTab, string, HTMLElement[]]> = [
       ['call', 'Call', [devices, quality, effects, connection]],
-      ['device', 'Device', [profile, renderNotificationSettings(app, render), appSection, diagnostics]],
+      ['device', 'Device', [profile, dnd, linkedSection, renderNotificationSettings(app, render), ...(isNative && !isHeadless ? [renderPermissionsPanel()] : []), appSection, diagnostics]],
     ];
     if (opts.callOnly && preview) {
       m.setContent(h('div', { class: 'cs-layout' }, preview.el, h('div', { class: 'settings-grid single' }, devices, quality, effects)));
@@ -187,7 +252,7 @@ export function openSettings(app: AppContext, initialTab: SettingsTab = 'call', 
         'div',
         { class: 'panel-tabs settings-tabs', role: 'tablist', 'aria-label': 'Settings' },
         ...tabs.map(([id, label]) =>
-          h('button', { class: 'panel-tab', role: 'tab', type: 'button', id: `settings-tab-${id}`, 'aria-selected': String(tab === id), 'aria-controls': `settings-panel-${id}`, onclick: () => ((tab = id), render()) }, label),
+          h('button', { class: 'panel-tab', role: 'tab', type: 'button', id: `settings-tab-${id}`, 'aria-selected': String(tab === id), 'aria-controls': `settings-panel-${id}`, onclick: () => ((tab = id), render()) }, label, id === 'device' && native.missingPermissions > 0 ? h('span', { class: 'red-dot', title: 'Permissions missing' }) : null),
         ),
       ),
       ...tabs.map(([id, , sections]) =>
@@ -282,7 +347,7 @@ export function openGroupCall(app: AppContext): Modal {
         else chosen.delete(u.deviceId);
         start.disabled = chosen.size === 0;
       });
-      return h('li', {}, h('label', {}, cb, h('span', { class: `dot ${u.status}` }), h('span', { class: 'grow' }, u.name), h('small', {}, u.busy ? 'in a call' : u.status)));
+      return h('li', {}, h('label', {}, cb, h('span', { class: `dot ${u.status === 'online' && u.away ? 'away' : u.status}` }), h('span', { class: 'grow' }, u.name), h('small', {}, u.busy ? 'in a call' : u.status)));
     }),
   );
   const mediaSel = select<MediaKind>([['video', 'Video'], ['audio', 'Audio only']], media, (v) => (media = v));
@@ -336,7 +401,7 @@ export function openAddParticipants(app: AppContext): Modal {
               return h(
                 'li',
                 {},
-                h('label', {}, cb, h('span', { class: `dot ${u.status}` }), h('span', { class: 'grow' }, u.name), h('small', {}, u.busy ? 'in another call' : reachable ? u.status : 'offline')),
+                h('label', {}, cb, h('span', { class: `dot ${u.status === 'online' && u.away ? 'away' : u.status}` }), h('span', { class: 'grow' }, u.name), h('small', {}, u.busy ? 'in another call' : reachable ? u.status : 'offline')),
               );
             }),
           )
@@ -369,7 +434,7 @@ function audiencePicker(
             else state.ids.delete(u.deviceId);
             onChange();
           });
-          return h('li', {}, h('label', {}, cb, h('span', { class: `dot ${u.status}` }), h('span', { class: 'grow' }, u.name), h('small', {}, u.status)));
+          return h('li', {}, h('label', {}, cb, h('span', { class: `dot ${u.status === 'online' && u.away ? 'away' : u.status}` }), h('span', { class: 'grow' }, u.name), h('small', {}, u.status)));
         })
       : [h('li', { class: 'empty' }, 'Nobody else is in this room yet.')]),
   );
@@ -561,4 +626,26 @@ export function openOfflineCallDialog(app: AppContext, userId: string, media: Me
     ),
   );
   return m.open();
+}
+
+/** Android: pick the call output (earpiece / speaker / Bluetooth / wired) – applies to the live call. */
+function nativeOutputSelect(rerender: () => void): HTMLElement {
+  const el = h('select', {}) as HTMLSelectElement;
+  const fill = async () => {
+    const { outputs, current } = await native.audioOutputs();
+    if (!native.inCallAudio || !outputs.length) {
+      el.replaceChildren(h('option', { value: '' }, 'Choose during a call (Speaker button)'));
+      el.disabled = true;
+      return;
+    }
+    el.disabled = false;
+    el.replaceChildren(...outputs.map((o) => h('option', { value: String(o.id), selected: String(o.id) === current }, o.name)));
+    el.value = current;
+  };
+  el.addEventListener('change', async () => {
+    await native.setAudioOutput(Number(el.value));
+    rerender();
+  });
+  void fill();
+  return el;
 }

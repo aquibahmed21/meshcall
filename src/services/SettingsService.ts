@@ -31,6 +31,30 @@ export interface Settings {
   volumeBoost: number;
   /** Phones: play call audio as media audio. */
   mediaVolume: boolean;
+  /** Do not disturb: incoming calls are declined as "busy" and recorded as missed. */
+  dnd: boolean;
+  /** Daily quiet hours ("HH:MM") – do not disturb switches itself on in this window. */
+  dndSchedule: boolean;
+  dndFrom: string;
+  dndTo: string;
+  /** Data saver: low video quality + 15 fps (previous values are restored when it is switched off). */
+  dataSaver: boolean;
+  dataSaverPrev: { quality: VideoQualityPreset; fps: FrameRatePreset } | null;
+}
+
+const toMin = (t: string): number => {
+  const [h, m] = t.split(':').map(Number);
+  return (h || 0) * 60 + (m || 0);
+};
+
+/** Is do-not-disturb on right now (manual switch or inside the daily quiet hours)? */
+export function isDndActive(s: Readonly<Settings>, now = new Date()): boolean {
+  if (s.dnd) return true;
+  if (!s.dndSchedule) return false;
+  const cur = now.getHours() * 60 + now.getMinutes();
+  const from = toMin(s.dndFrom);
+  const to = toMin(s.dndTo);
+  return from <= to ? cur >= from && cur < to : cur >= from || cur < to; // window may cross midnight
 }
 
 const KEY = 'voip.settings';
@@ -49,6 +73,12 @@ const DEFAULTS: Settings = {
   audioOutputId: null,
   volumeBoost: 100,
   mediaVolume: true,
+  dnd: false,
+  dndSchedule: false,
+  dndFrom: '22:00',
+  dndTo: '07:00',
+  dataSaver: false,
+  dataSaverPrev: null,
 };
 
 export class SettingsService {
@@ -72,4 +102,12 @@ export class SettingsService {
     storage.set(KEY, persisted);
     this.events.emit('change', { settings: this.value, changed });
   }
+}
+
+/** Data saver: low video quality + 15 fps now, previous values restored when switched off. */
+export function setDataSaver(svc: SettingsService, on: boolean): void {
+  const s = svc.get();
+  if (on === s.dataSaver) return;
+  if (on) svc.update({ dataSaver: true, dataSaverPrev: { quality: s.videoQuality, fps: s.frameRate }, videoQuality: 'low', frameRate: 15 });
+  else svc.update({ dataSaver: false, videoQuality: s.dataSaverPrev?.quality ?? 'auto', frameRate: s.dataSaverPrev?.fps ?? 'auto', dataSaverPrev: null });
 }

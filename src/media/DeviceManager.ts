@@ -1,5 +1,6 @@
 import { Emitter } from '../core/emitter';
 import { createLogger, errorMessage } from '../core/logger';
+import { isNative, native } from '../native/native';
 import type { SettingsService } from '../services/SettingsService';
 import type { MediaManager } from './MediaManager';
 
@@ -51,6 +52,9 @@ export class DeviceManager {
   }
 
   async start(): Promise<void> {
+    // Android: device names/ids are only exposed once camera/microphone are granted → re-read then.
+    native.events.on('perms', () => void this.refresh(false));
+    native.events.on('resume', () => void this.refresh(false));
     navigator.mediaDevices?.addEventListener?.('devicechange', this.onChange);
     await this.watchPermission('camera');
     await this.watchPermission('microphone');
@@ -65,7 +69,21 @@ export class DeviceManager {
   async refresh(fromChange: boolean): Promise<void> {
     if (!navigator.mediaDevices?.enumerateDevices) return;
     try {
-      const all = await navigator.mediaDevices.enumerateDevices();
+      let all = await navigator.mediaDevices.enumerateDevices();
+      // Android WebView hides device ids/labels until getUserMedia has succeeded once → probe briefly
+      // (only if the OS permission is already granted and nothing is capturing yet).
+      if (isNative && !this.media.state.hasAudio && all.some((x) => (x.kind === 'audioinput' || x.kind === 'videoinput') && !x.deviceId)) {
+        const st = await native.permissionStatus();
+        for (const [perm, c] of [['microphone', { audio: true }], ['camera', { video: true }]] as const) {
+          if (st[perm] !== 'granted') continue;
+          try {
+            (await navigator.mediaDevices.getUserMedia(c)).getTracks().forEach((t) => t.stop());
+          } catch (err) {
+            log.warn(`Device probe (${perm}) failed`, errorMessage(err));
+          }
+        }
+        all = await navigator.mediaDevices.enumerateDevices();
+      }
       const prev = this.lists;
       this.lists = {
         ...prev,
@@ -95,7 +113,7 @@ export class DeviceManager {
 
     // Follow OS default microphone changes when the user has not pinned a device.
     const def = this.lists.audioinput.find((d) => d.deviceId === 'default')?.groupId ?? '';
-    if (!s.audioInputId && this.lastDefaultAudio && def && def !== this.lastDefaultAudio && this.media.state.hasAudio) {
+    if (!isNative && !s.audioInputId && this.lastDefaultAudio && def && def !== this.lastDefaultAudio && this.media.state.hasAudio) {
       log.info('Default microphone changed – following it');
       void this.media.switchDevice('audioinput', null);
     }

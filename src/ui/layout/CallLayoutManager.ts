@@ -46,6 +46,8 @@ export class CallLayoutManager {
   private _layout: CallLayoutType;
   private _pinned: string | null = null;
   private _speaker: string | null = null;
+  /** Phones: temporary full-screen focus on one person from a grid (tap again to go back). */
+  private _focus: string | null = null;
 
   constructor() {
     const pref = storage.get<string>(PREF_KEY, 'grid');
@@ -58,6 +60,17 @@ export class CallLayoutManager {
   get pinned(): string | null {
     return this._pinned;
   }
+  get focused(): string | null {
+    return this._focus;
+  }
+
+  /** Focus one person (spotlight) or, with null, return to the previous layout. */
+  focus(id: string | null): void {
+    this._focus = id;
+    this._pinned = id;
+    this.events.emit('change', undefined);
+  }
+
   get activeSpeaker(): string | null {
     return this._speaker;
   }
@@ -91,11 +104,17 @@ export class CallLayoutManager {
   reset(): void {
     this._pinned = null;
     this._speaker = null;
+    this._focus = null;
   }
 
   plan(tiles: LayoutTile[]): LayoutPlan {
     const ids = new Set(tiles.map((t) => t.id));
     if (this._pinned && !ids.has(this._pinned)) this._pinned = null; // pinned person left
+    if (this._focus && (!ids.has(this._focus) || tiles.length < 3)) {
+      this._focus = null;
+      if (tiles.length < 3) this._pinned = null;
+    }
+    const layoutNow: CallLayoutType = this._focus && this._layout === 'grid' ? 'spotlight' : this._layout;
     const speaker = this._speaker && ids.has(this._speaker) ? this._speaker : null;
     const remote = tiles.filter((t) => !t.local);
 
@@ -105,7 +124,7 @@ export class CallLayoutManager {
       if (!mainId && id) [mainId, reason] = [id, why];
     };
     pick(this._pinned, 'pinned');
-    if (this._layout === 'speaker') pick(speaker, 'speaker');
+    if (layoutNow === 'speaker') pick(speaker, 'speaker');
     pick(remote.find((t) => t.screen)?.id, 'screen');
     pick(speaker, 'speaker');
     pick(remote.find((t) => t.hasVideo)?.id, 'video');
@@ -113,9 +132,9 @@ export class CallLayoutManager {
     pick(tiles.find((t) => t.local)?.id, 'self');
 
     const order = [...remote.map((t) => t.id), ...tiles.filter((t) => t.local).map((t) => t.id)];
-    if (tiles.length <= 1 || this._layout === 'grid') {
+    if (tiles.length <= 1 || layoutNow === 'grid') {
       return { layout: 'grid', mainId, main: tiles.map((t) => t.id), strip: [], reason };
     }
-    return { layout: this._layout, mainId, main: mainId ? [mainId] : [], strip: order.filter((id) => id !== mainId), reason };
+    return { layout: layoutNow, mainId, main: mainId ? [mainId] : [], strip: order.filter((id) => id !== mainId), reason };
   }
 }

@@ -8,6 +8,7 @@ import type { CallState, CallStatus, ParticipantState } from '../../types/state'
 import type { DataUsageSnapshot } from '../../webrtc/DataUsageMonitor';
 import type { StatsReport } from '../../webrtc/StatsMonitor';
 import { colorFor, h, initials, nodes } from '../dom';
+import { Modal } from './Modal';
 import { icons } from '../icons';
 import { CALL_LAYOUTS, CallLayoutManager, type LayoutPlan } from '../layout/CallLayoutManager';
 import { ViewModeController, type ViewModeSnapshot } from '../ViewModeController';
@@ -15,6 +16,8 @@ import type { MeshSession } from '../../calls/MeshSession';
 import { ChatPanel } from './ChatPanel';
 import { peerNetInfo } from '../netInfo';
 import { VideoGrid, type TileModel } from './VideoGrid';
+import { isNative, native } from '../../native/native';
+import { setDataSaver } from '../../services/SettingsService';
 
 const STATUS_LABEL: Record<CallStatus, string> = {
   idle: '',
@@ -76,10 +79,11 @@ export interface CallViewCallbacks {
   /** Devices, quality, echo / noise / gain for the running call. */
   onCallSettings: () => void;
   onBack: () => void;
-  onToast: (level: 'info' | 'warn' | 'error', text: string) => void;
+  onToast: (level: 'info' | 'warn' | 'error', text: string, action?: { label: string; run: () => void }) => void;
 }
 
 /** Touch devices (phones/tablets) get the earpiece ↔ loudspeaker toggle. */
+const PHONE = matchMedia('(max-width: 767px)');
 const TOUCH = typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches;
 const UNLOCK_HOLD_MS = 1500;
 
@@ -151,9 +155,14 @@ export class CallView {
       h('div', { class: 'controls-wrap' }, this.moreMenu, this.layoutMenu, this.controls),
     );
 
+    this.bindSwipe(this.grid.el);
+    this.bindSelfDrag(this.grid.el);
+    this.bindAutoHide();
+
     // Fullscreen targets the call container (video + chat + controls), never the whole app.
     this.viewModes = new ViewModeController(this.el, (v) => this.grid.owns(v));
     this.disposer.add(this.viewModes.events.on('change', (s) => this.onViewModes(s)));
+    this.disposer.add(native.events.on('audio', () => this.render()));
     this.setupAutoPip();
     // Leaving PiP (closed by the user/browser, or by us on return) pauses that <video> in some
     // browsers → the tile would stay frozen/blank. Resume playback and redraw the call.
@@ -269,13 +278,19 @@ export class CallView {
 
   // ── loudspeaker (phones) ─────────────────────────────────────────────────
 
-  private speakerOn = false;
+  private _speakerOn = false;
+
+  /** Android: the OS decides (earpiece / speaker / Bluetooth / wired); browser: our own toggle. */
+  private get speakerOn(): boolean {
+    return isNative ? native.speakerOn : this._speakerOn;
+  }
 
   private async toggleSpeaker(): Promise<void> {
     const on = !this.speakerOn;
     try {
-      await this.grid.audioRoute.set(on);
-      this.speakerOn = on;
+      if (isNative) await native.setCallAudio(true, on, true);
+      else await this.grid.audioRoute.set(on);
+      this._speakerOn = on;
     } catch (err) {
       this.cb.onToast('warn', `Speaker unavailable: ${(err as Error).message}`);
     }
@@ -362,6 +377,15 @@ export class CallView {
     this.status.dataset.status = c.status;
     this.renderTimer();
     this.renderOverlay(c);
+    const auto = this.autoHideActive();
+    this.el.classList.toggle('autohide', auto);
+    if (auto) {
+      if (!this.idleTimer) this.wake();
+    } else if (this.idleTimer) {
+      clearTimeout(this.idleTimer);
+      this.idleTimer = undefined;
+      this.el.classList.remove('idle');
+    }
 
     if (isTerminal(c.status)) {
       // Call over: leave PiP/fullscreen immediately (the view itself lingers for the end screen).
@@ -374,6 +398,7 @@ export class CallView {
 
     this.watchSpeaker();
     const tiles = this.tiles(c);
+    this.watchNetwork(tiles, c.callId);
     const vm = this.viewModes.snapshot;
     this.plan = this.layout.plan(tiles.map((t) => ({ id: t.id, local: t.local, screen: t.screen, hasVideo: this.grid.hasVideo(t.id) })));
     this.mainId = this.plan.mainId;
@@ -404,6 +429,22 @@ export class CallView {
   // ── selection / PiP / fullscreen ─────────────────────────────────────────
 
   /** Feed the mesh's active-speaker detection into the layout (re-subscribes per mesh). */
+  private poorSince = 0;
+  private saverOffered = '';
+
+  /** Weak network for a while → offer the data saver once per call. */
+  private watchNetwork(tiles: TileModel[], callId: string): void {
+    const poor = tiles.some((t) => !t.local && (t.quality === 'poor' || t.quality === 'critical'));
+    if (!poor || this.app.settings.get().dataSaver || this.saverOffered === callId) {
+      this.poorSince = 0;
+      return;
+    }
+    this.poorSince ||= Date.now();
+    if (Date.now() - this.poorSince < 8000) return;
+    this.saverOffered = callId;
+    this.cb.onToast('warn', 'Weak network', { label: 'Save data', run: () => setDataSaver(this.app.settings, true) });
+  }
+
   private watchSpeaker(): void {
     const session = this.app.calls.session;
     if (session === this.speakerSession) return;
@@ -416,7 +457,135 @@ export class CallView {
 
   /** Tile click = pin/unpin (manual spotlight). Runs in the click handler → PiP follow has user activation. */
   private select(id: string): void {
+    const count = this.plan.main.length + this.plan.strip.length;
+    if (PHONE.matches && count > 2) {
+      // Phones: tap a person in the grid → full-screen focus; tap the focused one again → back to the grid.
+      if (this.layout.focused) this.layout.focus(this.layout.focused === id ? null : id);
+      else if (this.plan.layout === 'grid') this.layout.focus(id);
+      else this.layout.togglePin(id);
+      return;
+    }
     this.layout.togglePin(id);
+  }
+
+  // ── phones: auto-hide controls on video calls, draggable self-view ─────────
+
+  private idleTimer: ReturnType<typeof setTimeout> | undefined;
+  private selfPos = { x: 0, y: 0 };
+  private swallowClick = false;
+
+  private autoHideActive(): boolean {
+    const c = this.app.calls.state;
+    return !!c && c.media === 'video' && c.status === 'connected' && matchMedia('(max-width: 767px)').matches;
+  }
+
+  /** Show the chrome and (re)arm the 5 s timer; called on any touch and on first render. */
+  private wake(): void {
+    clearTimeout(this.idleTimer);
+    this.el.classList.remove('idle');
+    if (!this.autoHideActive()) return;
+    this.idleTimer = setTimeout(() => {
+      if (this.moreOpen || this.layoutOpen || this.panelOpen) return this.wake();
+      this.el.classList.add('idle');
+    }, 5000);
+  }
+
+  private bindAutoHide(): void {
+    // While hidden, the first tap on the video only brings the controls back (no tile focus).
+    this.el.addEventListener(
+      'pointerdown',
+      (e) => {
+        this.swallowClick = this.el.classList.contains('idle') && !!(e.target as Element).closest('.call-main');
+        this.wake();
+      },
+      true,
+    );
+    this.el.addEventListener(
+      'click',
+      (e) => {
+        if (!this.swallowClick) return;
+        this.swallowClick = false;
+        e.stopPropagation();
+      },
+      true,
+    );
+    this.disposer.add(() => clearTimeout(this.idleTimer));
+  }
+
+  /** 1:1 phone layout: the floating self-view can be dragged anywhere inside the video area. */
+  private bindSelfDrag(grid: HTMLElement): void {
+    let drag: { id: number; sx: number; sy: number; ox: number; oy: number; moved: boolean; el: HTMLElement } | null = null;
+    grid.addEventListener('pointerdown', (e) => {
+      const el = (e.target as Element).closest?.('.tile.local') as HTMLElement | null;
+      if (!el || (el.closest('.grid') as HTMLElement | null)?.dataset.count !== '2' || !matchMedia('(max-width: 767px)').matches) return;
+      drag = { id: e.pointerId, sx: e.clientX, sy: e.clientY, ox: this.selfPos.x, oy: this.selfPos.y, moved: false, el };
+      el.setPointerCapture?.(e.pointerId);
+    });
+    grid.addEventListener('pointermove', (e) => {
+      if (!drag || e.pointerId !== drag.id) return;
+      const dx = e.clientX - drag.sx;
+      const dy = e.clientY - drag.sy;
+      if (!drag.moved && Math.hypot(dx, dy) < 6) return;
+      drag.moved = true;
+      // Clamp so the tile stays on screen (its rest position is bottom-right).
+      const g = (drag.el.closest('.grid') ?? grid).getBoundingClientRect();
+      const t = drag.el.getBoundingClientRect();
+      const restL = t.left - this.selfPos.x;
+      const restT = t.top - this.selfPos.y;
+      const nx = Math.min(g.right - 4 - t.width - restL, Math.max(g.left + 4 - restL, drag.ox + dx));
+      const ny = Math.min(g.bottom - 4 - t.height - restT, Math.max(g.top + 4 - restT, drag.oy + dy));
+      this.selfPos = { x: nx, y: ny };
+      grid.style.setProperty('--sx', `${nx}px`);
+      grid.style.setProperty('--sy', `${ny}px`);
+      this.wake();
+    });
+    const end = (e: PointerEvent): void => {
+      if (!drag || e.pointerId !== drag.id) return;
+      const moved = drag.moved;
+      drag = null;
+      if (moved) {
+        const stop = (ev: Event): void => ev.stopPropagation();
+        grid.addEventListener('click', stop, { capture: true, once: true });
+        setTimeout(() => grid.removeEventListener('click', stop, true), 400);
+      }
+    };
+    grid.addEventListener('pointerup', end);
+    grid.addEventListener('pointercancel', end);
+  }
+
+  /** "Move call": one linked device → go; several → ask which. */
+  private pickHandoff(devices: Array<{ deviceId: string; name: string }>): void {
+    if (devices.length === 1) {
+      this.app.calls.handoffTo(devices[0]!.deviceId);
+      return;
+    }
+    const m = new Modal('Move call to…');
+    m.setContent(h('div', { class: 'modal-actions col' }, ...devices.map((d) => h('button', { class: 'btn', type: 'button', onclick: () => (m.close(), this.app.calls.handoffTo(d.deviceId)) }, d.name))));
+    m.open();
+  }
+
+  /** Phones: swipe the focused video left/right to move to the next/previous person. */
+  private bindSwipe(el: HTMLElement): void {
+    let sx = 0;
+    let sy = 0;
+    let active = false;
+    el.addEventListener('pointerdown', (e) => {
+      active = !!this.layout.focused && e.pointerType === 'touch';
+      sx = e.clientX;
+      sy = e.clientY;
+    });
+    el.addEventListener('pointerup', (e) => {
+      if (!active || !this.layout.focused) return;
+      active = false;
+      const dx = e.clientX - sx;
+      if (Math.abs(dx) < 60 || Math.abs(e.clientY - sy) > Math.abs(dx) * 0.6) return;
+      const order = [...this.plan.main, ...this.plan.strip];
+      const i = order.indexOf(this.layout.focused);
+      if (i < 0) return;
+      this.layout.focus(order[(i + (dx < 0 ? 1 : -1) + order.length) % order.length]!);
+      navigator.vibrate?.(8);
+    });
+    el.addEventListener('pointercancel', () => (active = false));
   }
 
   /** Own (or give up) the history entry of one layer; `viaBack` = Back already consumed it. */
@@ -558,6 +727,7 @@ export class CallView {
         {},
         h('span', { class: 'avatar sm', style: `--avatar:${colorFor(p.deviceId)}` }, initials(p.name)),
         h('span', { class: 'grow' }, p.name, h('small', {}, peerProblem(p) ?? p.peer?.selectedPath?.pathLabel ?? '')),
+        isHost ? h('button', { class: 'icon-btn', 'aria-label': `Mute ${p.name}`, title: 'Mute', html: icons.micOff, onclick: () => this.app.calls.muteRemote(p.deviceId) }) : null,
         isHost
           ? h('button', { class: 'icon-btn', 'aria-label': `Remove ${p.name}`, title: 'Remove', html: icons.remove, onclick: () => this.app.groups.removeParticipant(p.deviceId) })
           : null,
@@ -584,6 +754,14 @@ export class CallView {
             ),
           ),
         ),
+        isHost
+          ? h(
+              'div',
+              { class: 'host-tools' },
+              h('button', { class: 'btn small', type: 'button', onclick: () => this.app.calls.muteRemote() }, h('span', { html: icons.micOff }), 'Mute all'),
+              h('button', { class: `btn small${this.app.calls.locked ? ' primary' : ''}`, type: 'button', 'aria-pressed': String(this.app.calls.locked), onclick: () => (this.app.calls.setLocked(!this.app.calls.locked), this.render()) }, h('span', { html: icons.lock }), this.app.calls.locked ? 'Locked' : 'Lock'),
+            )
+          : null,
         c.kind !== 'live' ? h('button', { class: 'btn small', onclick: () => this.cb.onInvite() }, h('span', { html: icons.userPlus }), 'Add participants') : null,
         c.participants.size > 1 ? h('p', { class: 'hint' }, `Mesh: you upload a separate stream to each of the ${c.participants.size} other participants.`) : null,
         this.lastUsage ? h('p', { class: 'hint' }, `Upload now ${formatBitrate(this.lastUsage.uploadBps)} · download ${formatBitrate(this.lastUsage.downloadBps)}`) : null,
@@ -659,8 +837,8 @@ export class CallView {
           { key: 'mute', label: m.audioMuted ? 'Unmute' : 'Mute', icon: m.audioMuted ? icons.micOff : icons.mic, on: () => calls.toggleMute(), active: m.audioMuted, disabled: !m.hasAudio, tone: 'warn' },
           { key: 'cam', label: m.videoMuted ? 'Camera on' : 'Camera off', icon: m.videoMuted ? icons.camOff : icons.cam, on: () => void calls.toggleCamera(), active: m.videoMuted, tone: 'warn' },
         );
-        if (isTouch && !m.videoMuted) specs.push({ key: 'flip', label: 'Flip', icon: icons.flip, on: () => void this.app.media.flipCamera(), secondary: true });
-        if (!isTouch && MediaManager.screenShareSupported())
+        if (isTouch) specs.push({ key: 'flip', label: 'Flip', icon: icons.flip, on: () => void this.app.media.flipCamera(), disabled: m.videoMuted });
+        if (MediaManager.screenShareSupported())
           specs.push({ key: 'share', label: m.screenSharing ? 'Stop share' : 'Share', icon: icons.screen, on: () => void calls.toggleScreenShare(), active: m.screenSharing, secondary: true });
       }
       specs.push({
@@ -670,6 +848,7 @@ export class CallView {
         on: () => this.togglePanel('chat'),
         active: this.panelOpen && this.tab === 'chat',
         badge: unread ? (unread > 9 ? '9+' : String(unread)) : undefined,
+        secondary: true,
       });
       specs.push({
         key: 'people',
@@ -679,6 +858,10 @@ export class CallView {
         active: this.panelOpen && this.tab === 'people',
         secondary: true,
       });
+      if ((c.kind === 'direct' || c.kind === 'group') && c.status === 'connected') {
+        const free = this.app.links.list().filter((l) => this.app.presence.status(l.deviceId) === 'online' && !this.app.presence.get(l.deviceId)?.onCall);
+        if (free.length) specs.push({ key: 'handoff', label: 'Move call', icon: icons.pip, on: () => this.pickHandoff(free), secondary: true });
+      }
       if (c.kind === 'direct' || c.kind === 'group')
         specs.push({ key: 'invite', label: 'Add', icon: icons.userPlus, on: () => this.cb.onInvite(), secondary: true });
       if (this.app.invites.isHostOf(c.callId))
@@ -706,10 +889,20 @@ export class CallView {
           disabled: busyPip || (!pipOn && !this.grid.hasVideo(this.mainId)),
           secondary: true,
         });
+      else if (isNative && c.media === 'video')
+        specs.push({ key: 'pip', label: 'PiP', icon: icons.pip, on: () => native.enterPip(), secondary: true });
+      specs.push({
+        key: 'saver',
+        label: this.app.settings.get().dataSaver ? 'Saver on' : 'Data saver',
+        icon: icons.saver,
+        on: () => setDataSaver(this.app.settings, !this.app.settings.get().dataSaver),
+        active: this.app.settings.get().dataSaver,
+        secondary: true,
+      });
       specs.push({ key: 'stats', label: 'Network', icon: icons.stats, on: () => this.cb.onToggleDiagnostics(), secondary: true });
       specs.push({ key: 'settings', label: 'Call settings', icon: icons.settings, on: () => this.cb.onCallSettings(), secondary: true });
       if (TOUCH)
-        specs.push({ key: 'speaker', label: this.speakerOn ? 'Speaker on' : 'Speaker', icon: icons.volume, on: () => void this.toggleSpeaker(), active: this.speakerOn });
+        specs.push({ key: 'speaker', label: isNative ? ({ speaker: 'Speaker', earpiece: 'Earpiece', bluetooth: 'Bluetooth', wired: 'Headset' } as Record<string, string>)[native.audioRoute] ?? 'Speaker' : this.speakerOn ? 'Speaker on' : 'Speaker', icon: icons.volume, on: () => void this.toggleSpeaker(), active: this.speakerOn });
       specs.push({ key: 'lock', label: 'Lock', icon: icons.lock, on: () => this.setLocked(true), secondary: true });
     }
     specs.push({
@@ -728,7 +921,7 @@ export class CallView {
 
     const secondary = specs.filter((s) => s.secondary);
     const moreBtn: CtrlSpec | null = secondary.length
-      ? { key: 'more', label: 'More', icon: icons.more, on: () => this.setMore(!this.moreOpen), active: this.moreOpen }
+      ? { key: 'more', label: 'More', icon: icons.more, on: () => this.setMore(!this.moreOpen), active: this.moreOpen, badge: secondary.find((x) => x.key === 'chat')?.badge }
       : null;
     const endIdx = specs.findIndex((s) => s.key === 'end');
     const bar = [...specs.slice(0, endIdx), ...(moreBtn ? [moreBtn] : []), ...specs.slice(endIdx)];
@@ -749,6 +942,7 @@ export class CallView {
           },
           h('span', { html: s.icon }),
           s.label,
+          s.badge ? h('span', { class: 'badge inline' }, s.badge) : null,
         ),
       ),
     );
@@ -839,6 +1033,16 @@ export class CallView {
       liveEmpty && !isTerminal(c.status)
         ? `You are live · ${viewers}/${this.app.config.mesh.maxLiveViewers} viewer${viewers === 1 ? '' : 's'}`
         : (c.statusDetail ?? STATUS_LABEL[c.status]);
+    if (liveEmpty && !isTerminal(c.status)) {
+      // Streamer: never cover your own video – just a small LIVE pill with the viewer count.
+      this.overlay.className = 'call-overlay live-pill';
+      this.overlay.replaceChildren(
+        h('span', { class: 'live-dot' }, 'LIVE'),
+        h('span', { class: 'live-count', title: 'Mesh streaming uploads one full copy per viewer – keep the viewer count small.', html: `${icons.users}${viewers}/${this.app.config.mesh.maxLiveViewers}` }),
+      );
+      return;
+    }
+    this.overlay.className = 'call-overlay';
     this.overlay.replaceChildren(
       ...nodes(
         h('div', { class: `avatar big${c.status === 'calling' || c.status === 'ringing' ? ' pulse' : ''}`, style: `--avatar:${colorFor(c.remoteUser?.deviceId ?? c.callId)}` }, initials(who || '?')),

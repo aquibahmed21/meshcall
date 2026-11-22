@@ -23,9 +23,13 @@
     "test:room-persistence": "node tests/e2e/room-persistence.mjs",
     "test:contacts": "node tests/e2e/contacts.mjs",
     "test:back": "node tests/e2e/back-nav.mjs",
-    "test:people": "node tests/e2e/people.mjs"
+    "test:people": "node tests/e2e/people.mjs",
+    "android:sync": "npm run build && cap sync android",
+    "android:apk": "npm run android:sync && cd android && ./gradlew assembleDebug",
+    "android:install": "adb install -r android/app/build/outputs/apk/debug/app-debug.apk"
   },
   "devDependencies": {
+    "@capacitor/cli": "^8.6.0",
     "@types/node": "^26.6.3",
     "@vitejs/plugin-basic-ssl": "^2.3.0",
     "node-turn": "^0.0.6",
@@ -33,5 +37,10 @@
     "typescript": "^5.9.0",
     "vite": "^7.3.0",
     "vitest": "^3.2.0"
+  },
+  "dependencies": {
+    "@capacitor/android": "^8.6.0",
+    "@capacitor/app": "^8.1.2",
+    "@capacitor/core": "^8.6.0"
   }
 }

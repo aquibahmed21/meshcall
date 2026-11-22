@@ -1,4 +1,5 @@
 import { createLogger } from '../core/logger';
+import { isHeadless, isNative, native } from '../native/native';
 
 const log = createLogger('Ringtone');
 
@@ -6,9 +7,19 @@ const log = createLogger('Ringtone');
 export class Ringtone {
   private ctx: AudioContext | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
+  private nativeRinging = false;
 
   start(kind: 'incoming' | 'outgoing'): void {
     this.stop();
+    // Android: incoming rings use the system ringtone on the ringer volume. Ringback (outgoing)
+    // stays a generated tone on the media volume, like call audio.
+    if (isHeadless) return; // no screen: the notification channel is already ringing
+    if (isNative && kind === 'incoming') {
+      this.nativeRinging = true;
+      native.startRinging();
+      if ('vibrate' in navigator) navigator.vibrate([400, 200, 400, 200, 400]);
+      return;
+    }
     try {
       this.ctx = new AudioContext();
       void this.ctx.resume().catch(() => undefined);
@@ -47,6 +58,10 @@ export class Ringtone {
   }
 
   stop(): void {
+    if (this.nativeRinging) {
+      this.nativeRinging = false;
+      native.stopRinging();
+    }
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     if (this.ctx) void this.ctx.close().catch(() => undefined);

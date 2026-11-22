@@ -18,15 +18,29 @@ export class Toasts {
       h('span', { class: 'toast-icon', html: ICON[level], 'aria-hidden': 'true' }),
       h('span', { class: 'toast-text' }, text),
     );
+    const dismiss = () => {
+      t.classList.add('leaving');
+      setTimeout(() => t.remove(), 180);
+    };
     if (action) {
       t.append(h('button', { class: 'btn small primary', onclick: (e: Event) => { e.stopPropagation(); t.remove(); action.run(); } }, action.label));
     }
-    t.addEventListener('click', () => t.remove());
+    t.append(h('button', { class: 'toast-x', type: 'button', 'aria-label': 'Dismiss', html: icons.close, onclick: (e: Event) => (e.stopPropagation(), dismiss()) }));
+    t.addEventListener('click', dismiss);
+    // Swipe sideways (or up) to dismiss.
+    let sx = 0;
+    let sy = 0;
+    t.addEventListener('pointerdown', (e) => ((sx = e.clientX), (sy = e.clientY)));
+    t.addEventListener('pointermove', (e) => {
+      if (e.buttons || e.pointerType === 'touch') {
+        const dx = e.clientX - sx;
+        if (Math.abs(dx) > 8) t.style.transform = `translateX(${dx}px)`;
+        if (Math.abs(dx) > 70 || sy - e.clientY > 40) dismiss();
+      }
+    });
+    t.addEventListener('pointerup', () => (t.style.transform = ''));
     this.el.append(t);
     while (this.el.children.length > 4) this.el.firstElementChild?.remove();
-    setTimeout(() => {
-      t.classList.add('leaving'); // fade out, then remove
-      setTimeout(() => t.remove(), 200);
-    }, action ? Math.max(ms, 20_000) : level === 'error' ? ms * 1.5 : ms);
+    setTimeout(dismiss, action ? Math.min(Math.max(ms, 6000), 8000) : level === 'error' ? ms * 1.5 : ms);
   }
 }

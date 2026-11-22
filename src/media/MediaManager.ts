@@ -1,6 +1,7 @@
 import { VideoEffects, effectsActive } from './VideoEffects';
 import { Emitter } from '../core/emitter';
 import { createLogger, errorMessage } from '../core/logger';
+import { isHeadless, isNative, native } from '../native/native';
 import type { SettingsService, VideoQualityPreset } from '../services/SettingsService';
 import type { MediaKind } from '../types/signaling';
 import type { LocalMediaSource } from '../webrtc/PeerSession';
@@ -132,7 +133,7 @@ export class MediaManager implements LocalMediaSource {
   }
 
   static screenShareSupported(): boolean {
-    return !!navigator.mediaDevices && 'getDisplayMedia' in navigator.mediaDevices;
+    return (isNative && !isHeadless) || !!navigator.mediaDevices && 'getDisplayMedia' in navigator.mediaDevices;
   }
 
   /**
@@ -204,6 +205,7 @@ export class MediaManager implements LocalMediaSource {
   /** Stop every local track (camera/mic lights off). */
   release(): void {
     this.generation++;
+    if (this.screenTrack && isNative) void native.stopScreenCapture(); // end the Android screen capture service too
     for (const t of [this.audioTrack, this.cameraTrack, this.screenTrack]) this.stopTrack(t);
     this.audioTrack = this.cameraTrack = this.screenTrack = null;
     this.effects.stop();
@@ -315,12 +317,21 @@ export class MediaManager implements LocalMediaSource {
     return this.exclusive(async () => {
       if (this.screenTrack) return true;
       try {
-        const s = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: { ideal: 15, max: 30 } }, audio: false });
-        const track = s.getVideoTracks()[0];
+        let track: MediaStreamTrack | undefined;
+        if (isNative) {
+          // Android: native screen capture (the WebView has no getDisplayMedia)
+          const cap = await native.startScreenCapture();
+          if (!cap) return false;
+          track = cap.track;
+          cap.onEnded(() => void this.stopScreenShare());
+        } else {
+          const s = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: { ideal: 15, max: 30 } }, audio: false });
+          track = s.getVideoTracks()[0];
+          track?.addEventListener('ended', () => void this.stopScreenShare(), { once: true });
+        }
         if (!track) return false;
         track.contentHint = 'detail';
         this.screenTrack = track;
-        track.addEventListener('ended', () => void this.stopScreenShare(), { once: true });
         this.replaceInPreview('video', track);
         this.events.emit('track', { kind: 'video', track });
         log.info('Screen sharing started');
@@ -338,6 +349,7 @@ export class MediaManager implements LocalMediaSource {
       const t = this.screenTrack;
       if (!t) return;
       this.screenTrack = null;
+      if (isNative) void native.stopScreenCapture();
       this.stopTrack(t);
       this.stream.removeTrack(t);
       const cam = this.videoMuted ? null : this.cameraOut();

@@ -7,6 +7,13 @@ export interface UserPresence {
   name: string;
   status: PresenceStatus;
   busy: boolean;
+  /** Online but the app is in the background (Android) / tab hidden. */
+  away: boolean;
+  dnd: boolean;
+  /** In a MeshCall call or an operator/VoIP call on the phone. */
+  onCall: boolean;
+  /** MeshCall call they are in right now. */
+  callId?: string;
   pushEnabled: boolean;
   lastSeen: number;
 }

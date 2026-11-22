@@ -66,6 +66,15 @@ export class CallHistoryService {
     this.entries = Array.isArray(stored) ? (stored as CallHistoryEntry[]).filter((e) => e && typeof e.callId === 'string') : [];
     for (const e of this.entries) this.recorded.add(e.callId);
     this.disposer.add(this.calls.events.on('state', (c) => c && this.observe(c)));
+    this.disposer.add(
+      this.calls.events.on('dndMissed', (m) => {
+        if (this.recorded.has(m.callId)) return;
+        this.recorded.add(m.callId);
+        this.entries = [{ callId: m.callId, kind: m.kind, direction: 'incoming' as const, media: m.media, peers: [{ deviceId: m.deviceId, name: m.name }], outcome: 'missed' as const, startedAt: Date.now(), durationMs: 0 }, ...this.entries].slice(0, MAX_ENTRIES);
+        this.persist();
+        this.events.emit('change', undefined);
+      }),
+    );
     this.events.emit('change', undefined);
   }
 
@@ -81,6 +90,22 @@ export class CallHistoryService {
   /** Newest first. */
   list(): CallHistoryEntry[] {
     return this.entries;
+  }
+
+  /** Missed incoming calls since the Calls tab was last opened. */
+  unseenMissed(): number {
+    const seen = storage.get<number>(this.seenKey(), 0);
+    return this.entries.filter((e) => e.direction === 'incoming' && (e.outcome === 'missed' || e.outcome === 'no-answer') && e.startedAt > seen).length;
+  }
+
+  markSeen(): void {
+    if (!this.room || !this.unseenMissed()) return;
+    storage.set(this.seenKey(), Date.now());
+    this.events.emit('change', undefined);
+  }
+
+  private seenKey(): string {
+    return `voip.callHistory.seen.${this.room?.roomId ?? ''}`;
   }
 
   clear(): void {

@@ -269,6 +269,16 @@ export class LiveStreamManager {
     this.signaling.send(s.hostId, 'live-viewer-joined', { streamId }, { callId: streamId });
   }
 
+  private lastInvite: LiveInvite | null = null;
+  private autoWatch: string | null = null;
+
+  /** Notification "Watch": join that stream now, or the moment its invitation arrives. */
+  acceptInvite(streamId: string): void {
+    if (this.lastInvite?.streamId === streamId) return this.watch(this.lastInvite);
+    this.autoWatch = streamId;
+    setTimeout(() => this.autoWatch === streamId && (this.autoWatch = null), 30_000);
+  }
+
   /** Accept a live-viewer-added invitation (the stream may not have been announced to us yet). */
   watch(invite: LiveInvite): void {
     if (!this.streams.has(invite.streamId)) {
@@ -325,7 +335,14 @@ export class LiveStreamManager {
         if (known && known.hostId !== m.senderId) return;
         const ring = m.payload.ring === true;
         log.info(`${m.senderName} ${ring ? 'is calling you into' : 'added you to'} "${m.payload.title}"`);
-        this.events.emit('invite', { streamId: m.payload.streamId, title: m.payload.title, hostId: m.senderId, hostName: m.senderName, ring });
+        const invite = { streamId: m.payload.streamId, title: m.payload.title, hostId: m.senderId, hostName: m.senderName, ring };
+        this.lastInvite = invite;
+        if (this.autoWatch === invite.streamId) {
+          this.autoWatch = null;
+          this.watch(invite);
+          return;
+        }
+        this.events.emit('invite', invite);
         break;
       }
       case 'live-viewer-removed': {

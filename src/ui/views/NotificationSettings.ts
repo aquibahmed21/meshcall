@@ -2,6 +2,7 @@ import { alertDialog, confirmDialog } from './ConfirmDialog';
 import type { AppContext } from '../../app';
 import { PUSH_STATUS_LABEL } from '../../services/PushNotificationService';
 import { PwaService } from '../../services/PwaService';
+import { isNative, native } from '../../native/native';
 import { h, nodes } from '../dom';
 import { icons } from '../icons';
 
@@ -74,7 +75,7 @@ export function renderNotificationSettings(app: AppContext, rerender: () => void
       'div',
       { class: 'grow' },
       h('strong', {}, on ? 'Notifications are on' : busy ? 'Setting up notifications…' : blocked ? 'Notifications are blocked' : 'Notifications are off'),
-      h('small', {}, on ? 'Calls and messages reach this device even when MeshCall is closed.' : status === 'disabled' ? 'Turn on to get calls and messages while MeshCall is closed.' : PUSH_STATUS_LABEL[status]),
+      h('small', {}, on ? (isNative ? 'MeshCall stays connected in the background so calls ring and calls never drop.' : 'Calls and messages reach this device even when MeshCall is closed.') : status === 'disabled' ? 'Turn on to get calls and messages while MeshCall is closed.' : PUSH_STATUS_LABEL[status]),
     ),
     chip(on ? 'On' : busy ? 'Wait' : blocked ? 'Blocked' : 'Off', on ? 'ok' : blocked ? 'bad' : 'muted'),
   );
@@ -86,7 +87,7 @@ export function renderNotificationSettings(app: AppContext, rerender: () => void
       'div',
       { class: 'notif-row' },
       h('span', { class: 'notif-row-icon', html: icons.phone, 'aria-hidden': 'true' }),
-      h('div', { class: 'grow' }, h('strong', {}, 'Calls & messages when closed'), h('small', {}, PUSH_STATUS_LABEL[status])),
+      h('div', { class: 'grow' }, h('strong', {}, isNative ? 'Stay connected in background' : 'Calls & messages when closed'), h('small', {}, PUSH_STATUS_LABEL[status])),
       toggle,
     ),
     h(
@@ -103,7 +104,9 @@ export function renderNotificationSettings(app: AppContext, rerender: () => void
     { class: 'notif-actions' },
     ...nodes(
       perm === 'granted' ? action(icons.bell, 'Send test', () => app.notifications.showTest()) : null,
-      action(
+      isNative ? action(icons.info, 'Battery settings', async () => { await native.requestBatteryExemption(); }, { title: 'Allow MeshCall to run unrestricted so Android never stops it' }) : null,
+      isNative ? action(icons.info, 'App settings', () => native.openAppSettings()) : null,
+      isNative ? null : action(
         icons.refresh,
         on ? 'Re-subscribe' : 'Subscribe',
         async (b) => {

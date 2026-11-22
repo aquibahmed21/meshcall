@@ -303,6 +303,7 @@ export class VideoGrid {
     t.root.classList.toggle('pinned', pinned);
     t.root.classList.toggle('speaking', view.speakerId === m.id);
     t.root.classList.toggle('is-main', isMain);
+    t.root.classList.toggle('pip-main', plan.mainId === m.id);
     t.root.classList.toggle('thumb', plan.strip.includes(m.id));
     t.root.classList.toggle('has-video', t.hasVideo);
     t.root.classList.toggle('mirrored', m.local && !m.screen && m.mirror !== false);
@@ -311,7 +312,7 @@ export class VideoGrid {
     t.root.classList.toggle('in-pip', inPip);
     t.root.setAttribute('aria-pressed', String(selected));
     t.root.setAttribute('aria-label', `${m.local ? 'Your video' : m.name}${pinned ? ' (pinned – activate to unpin)' : selected ? ' (main)' : ' – pin as main video'}`);
-    t.label.textContent = m.local ? `${m.name} (You)` : m.name;
+    t.label.textContent = m.local ? 'You' : m.name;
     t.mic.hidden = !m.audioMuted;
     t.cam.hidden = !m.videoMuted || m.screen;
     t.state.textContent = m.connection ?? '';

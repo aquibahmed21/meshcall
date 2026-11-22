@@ -1,3 +1,4 @@
+import { isDndActive } from '../services/SettingsService';
 import type { NotifyResult } from '../services/PushNotificationService';
 import { BoundedSet, Timer } from '../core/async';
 import { Disposer, Emitter } from '../core/emitter';
@@ -69,6 +70,8 @@ export class CallManager {
     toast: { level: ToastLevel; text: string };
     stats: { report: StatsReport; usage: DataUsageSnapshot };
     rejoinAvailable: SavedCall | null;
+    /** An incoming call was declined automatically (do not disturb). */
+    dndMissed: { callId: string; kind: 'direct' | 'group'; media: MediaKind; deviceId: string; name: string };
   }>();
 
   private call: CallState | null = null;
@@ -76,7 +79,7 @@ export class CallManager {
   private inviteSender: { deviceId: string; sessionId: string } | null = null;
   private acceptedSessionId: string | null = null;
   /** Opened from a call notification: the call we expect an invite for (NOT auto-accepted). */
-  private expected: { callId: string; callerName?: string; timer: ReturnType<typeof setTimeout> } | null = null;
+  private expected: { callId: string; callerName?: string; autoAccept?: boolean; timer: ReturnType<typeof setTimeout> } | null = null;
   private pushSent = false;
   /** Outcome of the last call notification for the current outgoing call. */
   private pushResult: NotifyResult | undefined;
@@ -89,6 +92,7 @@ export class CallManager {
   private reconnectTimer = new Timer();
   private endedTimer = new Timer();
   private acceptResend: ReturnType<typeof setInterval> | null = null;
+  private inviteResend: ReturnType<typeof setInterval> | null = null;
   private disposer = new Disposer();
   private everConnectedPeer = false;
   private calleeOnline = false;
@@ -182,8 +186,21 @@ export class CallManager {
     this.pushResult = undefined;
     this.calleeOnline = user?.status === 'online';
     this.sendInvite(userId, 'direct');
+    // The callee may only open the app (or its screen) AFTER the first invite – e.g. a closed
+    // Android app woken by a notification. Keep re-delivering it while nobody has answered; the
+    // callee dedupes repeats of an invite it has already shown.
+    if (this.inviteResend) clearInterval(this.inviteResend);
+    this.inviteResend = setInterval(() => {
+      const cur = this.call;
+      if (!cur || cur.callId !== callId || cur.direction !== 'outgoing' || (cur.status !== 'calling' && cur.status !== 'ringing') || cur.participants.size > 0) {
+        if (this.inviteResend) clearInterval(this.inviteResend);
+        this.inviteResend = null;
+        return;
+      }
+      this.sendInvite(userId, 'direct');
+    }, 4_000);
     this.ringtone.start('outgoing');
-    this.d.presence.setBusy(true);
+    this.d.presence.setBusy(true, callId);
     log.info(`Calling ${name} (${media})`);
 
     if (user?.status !== 'online') void this.sendPush(userId);
@@ -322,6 +339,19 @@ export class CallManager {
     this.emit();
   }
 
+  /** Host: mute everyone (or one person). */
+  muteRemote(userId?: string): void {
+    this.mesh?.muteRemote(userId);
+  }
+
+  get locked(): boolean {
+    return !!this.mesh?.locked;
+  }
+
+  setLocked(on: boolean): void {
+    this.mesh?.setLocked(on);
+  }
+
   removeParticipant(userId: string): void {
     this.mesh?.removeParticipant(userId);
   }
@@ -388,7 +418,7 @@ export class CallManager {
    * it when we come online) – it then rings normally; it is never auto-accepted. If nothing
    * arrives, tell the user instead of silently doing nothing.
    */
-  expectCall(callId: string, callerName?: string): void {
+  expectCall(callId: string, callerName?: string, autoAccept = false): void {
     const c = this.call;
     if (c?.callId === callId && !isTerminal(c.status)) return;
     this.clearExpected();
@@ -398,7 +428,18 @@ export class CallManager {
       this.expected = null;
       if (this.call?.callId !== callId) this.toast('warn', callerName ? `Missed call from ${callerName} – the call is no longer available` : 'That call is no longer available');
     }, 30_000);
-    this.expected = { callId, callerName, timer };
+    this.expected = { callId, callerName, autoAccept, timer };
+  }
+
+  /** Notification "Accept": answer straight away, or as soon as the invite arrives. */
+  acceptFromNotification(callId: string, callerName?: string, callerId?: string): void {
+    const c = this.call;
+    if (c?.callId === callId && c.status === 'ringing' && c.direction === 'incoming') void this.acceptIncoming();
+    else {
+      this.expectCall(callId, callerName, true);
+      // This (fresh) app instance never saw the invite – the headless one did. Ask the caller to ring again.
+      if (callerId && this.d.signaling.isConnected) this.d.signaling.send(callerId, 'call-join-request', {}, { callId });
+    }
   }
 
   /** Notification "Decline" for the call that is ringing now. */
@@ -549,6 +590,10 @@ export class CallManager {
         return this.onHangup(msg);
       case 'call-participants-added':
         return this.onParticipantsAdded(msg);
+      case 'call-join-request':
+        return this.onJoinRequest(msg);
+      case 'call-handoff':
+        return this.onHandoff(msg);
       default:
         if (msg.callId && this.mesh && msg.callId === this.mesh.callId) this.mesh.handleMessage(msg);
     }
@@ -575,6 +620,13 @@ export class CallManager {
     // A 1:1 invite we already handled (declined/missed) is never re-rung; group calls may
     // legitimately re-invite someone who left.
     if (!this.seenInvites.add(callId) && p.callKind === 'direct' && this.expected?.callId !== callId) return;
+    if (isDndActive(this.d.settings.get()) || this.d.presence.externalCall) {
+      log.info(`Do not disturb – declining call from ${msg.senderName}`);
+      reply('call-reject', { reason: 'busy' });
+      this.events.emit('dndMissed', { callId, kind: p.callKind === 'group' ? 'group' : 'direct', media: p.media, deviceId: msg.senderId, name: msg.senderName });
+      void notifications.showMissedCall(callId, msg.senderName, { callerId: msg.senderId, media: p.media, roomId: this.d.signaling.currentRoom?.roomId, roomName: this.d.signaling.currentRoom?.roomName });
+      return;
+    }
     if (this.inCall) {
       log.info(`Busy – rejecting call from ${msg.senderName}`);
       reply('call-reject', { reason: 'busy' });
@@ -593,6 +645,7 @@ export class CallManager {
     log.info(`Incoming ${p.callKind === 'group' ? 'group ' : ''}${p.media} call from ${msg.senderName}`);
     this.emit();
 
+    const autoAccept = this.expected?.callId === callId && !!this.expected.autoAccept;
     if (this.expected?.callId === callId) this.clearExpected(); // it rings normally below
     this.ringtone.start('incoming');
     const room = this.d.signaling.currentRoom;
@@ -606,12 +659,76 @@ export class CallManager {
       roomId: room?.roomId,
       roomName: room?.roomName,
     });
+    if (autoAccept) void this.acceptIncoming();
     this.ringTimer.start(this.d.config.timeouts.ringMs + 5_000, () => {
       if (this.call?.callId === callId && this.call.status === 'ringing') {
-        void notifications.showMissedCall(callId, msg.senderName);
+        void notifications.showMissedCall(callId, msg.senderName, { callerId: msg.senderId, media: p.media, roomId: this.d.signaling.currentRoom?.roomId, roomName: this.d.signaling.currentRoom?.roomName });
         this.finish('ended', `Missed call from ${msg.senderName}`, true);
       }
     });
+  }
+
+  /** Set by the app: is this device one of MY linked devices? */
+  isLinked: (deviceId: string) => boolean = () => false;
+  private handingOff: string | null = null;
+
+  /** Move the running call to one of my linked devices: it joins, then this device hangs up. */
+  handoffTo(deviceId: string): boolean {
+    const c = this.call;
+    if (!c || c.kind === 'live' || c.status !== 'connected' || !this.isLinked(deviceId)) return false;
+    this.handingOff = deviceId;
+    this.d.signaling.send(deviceId, 'call-handoff', { media: c.media }, { callId: c.callId });
+    this.addParticipants([deviceId]);
+    this.toast('info', 'Moving call…');
+    // Leave once the other device is in (or give up after a while and stay in the call).
+    const t0 = Date.now();
+    const timer = setInterval(() => {
+      const cur = this.call;
+      if (!cur || cur.callId !== c.callId || this.handingOff !== deviceId || isTerminal(cur.status)) return clearInterval(timer);
+      if (cur.participants.has(deviceId)) {
+        clearInterval(timer);
+        this.handingOff = null;
+        setTimeout(() => this.call?.callId === c.callId && this.hangup(), 1500);
+      } else if (Date.now() - t0 > 30_000) {
+        clearInterval(timer);
+        this.handingOff = null;
+        this.toast('warn', 'The other device did not answer');
+      }
+    }, 500);
+    return true;
+  }
+
+  private onHandoff(msg: MessageOf<'call-handoff'>): void {
+    if (!msg.callId || !this.isLinked(msg.senderId)) return;
+    const ringing = this.call?.callId === msg.callId && this.call.status === 'ringing';
+    if (this.inCall && !ringing) return;
+    this.acceptFromNotification(msg.callId, msg.senderName); // the invite may already be ringing, or arrive next
+    this.toast('info', `Taking over the call from ${msg.senderName}`);
+  }
+
+  /** Join a call someone is still in (Calls tab): ask a member to add us, answer the invite automatically. */
+  requestJoin(callId: string, peerId: string, name?: string): boolean {
+    if (!this.guardIdle()) return false;
+    this.expectCall(callId, name, true);
+    this.d.signaling.send(peerId, 'call-join-request', {}, { callId });
+    this.toast('info', 'Asking to join…');
+    return true;
+  }
+
+  private onJoinRequest(msg: MessageOf<'call-join-request'>): void {
+    const c = this.call;
+    // A callee whose app was restarted asks us (the caller) to deliver the invite again.
+    if (c && c.callId === msg.callId && c.direction === 'outgoing' && c.kind === 'direct' && (c.status === 'calling' || c.status === 'ringing') && c.remoteUser?.deviceId === msg.senderId) {
+      this.sendInvite(msg.senderId, 'direct');
+      return;
+    }
+    if (!c || c.callId !== msg.callId || c.kind === 'live' || !this.mesh || c.status !== 'connected') return;
+    if (this.mesh.locked) {
+      this.d.signaling.send(msg.senderId, 'call-reject', { reason: 'unavailable' }, { callId: c.callId });
+      return;
+    }
+    if (c.participants.has(msg.senderId)) return;
+    this.addParticipants([msg.senderId]);
   }
 
   private onParticipantsAdded(msg: MessageOf<'call-participants-added'>): void {
@@ -688,7 +805,7 @@ export class CallManager {
       this.finish('ended', 'Answered on another device', true);
       return;
     }
-    void this.d.notifications.showMissedCall(c.callId, msg.senderName);
+    void this.d.notifications.showMissedCall(c.callId, msg.senderName, { callerId: msg.senderId, media: c.media, roomId: this.d.signaling.currentRoom?.roomId, roomName: this.d.signaling.currentRoom?.roomName });
     this.finish('ended', `Missed call from ${msg.senderName}`, true);
   }
 
@@ -762,10 +879,15 @@ export class CallManager {
       else this.toast('info', `${name} left`);
     });
     mesh.events.on('removed', () => this.finish('ended', 'You were removed from the call'));
-    mesh.events.on('rejected', ({ reason }) => this.finish('failed', reason === 'full' ? 'The stream is full' : 'Not allowed to join this call'));
+    mesh.events.on('hostMuted', () => {
+      if (this.mesh !== mesh || this.d.media.state.audioMuted) return;
+      this.d.media.setAudioMuted(true);
+      this.toast('info', 'The host muted you');
+    });
+    mesh.events.on('rejected', ({ reason }) => this.finish('failed', reason === 'full' ? 'The stream is full' : reason === 'locked' ? 'The call is locked' : 'Not allowed to join this call'));
     mesh.events.on('stats', (s) => this.events.emit('stats', s));
     mesh.join();
-    this.d.presence.setBusy(true);
+    this.d.presence.setBusy(true, c.callId);
     this.persistActiveCall();
 
     if (c.kind === 'group' || c.role === 'broadcaster') {
@@ -848,6 +970,8 @@ export class CallManager {
     for (const t of [this.ringTimer, this.noAckTimer, this.connectTimer, this.reconnectTimer]) t.clear();
     if (this.acceptResend) clearInterval(this.acceptResend);
     this.acceptResend = null;
+    if (this.inviteResend) clearInterval(this.inviteResend);
+    this.inviteResend = null;
     this.ringtone.stop();
     if (this.call) void this.d.notifications.close(`call-${this.call.callId}`);
     this.mesh?.leave(reason);

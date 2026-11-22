@@ -5,6 +5,8 @@ import { isTerminal } from '../calls/CallStateMachine';
 import type { SavedCall } from '../calls/CallManager';
 import type { NetworkQuality } from '../types/state';
 import { backStack } from './BackStack';
+import { isNative, native } from '../native/native';
+import { isDndActive } from '../services/SettingsService';
 import { colorFor, h, initials, nodes } from './dom';
 import { icons, logo } from './icons';
 import { CallView } from './views/CallView';
@@ -193,11 +195,13 @@ export class UIManager {
   private renderProfile(): void {
     const { identity, signaling, rooms } = this.app;
     const sig = signaling.status;
-    const state = sig === 'connected' ? 'online' : sig === 'unavailable' ? 'offline' : 'connecting';
-    const stateText = state === 'online' ? 'Online' : state === 'offline' ? 'Offline' : 'Connecting';
+    const dnd = sig === 'connected' && isDndActive(this.app.settings.get());
+    const state = dnd ? 'dnd' : sig === 'connected' ? 'online' : sig === 'unavailable' ? 'offline' : 'connecting';
+    const stateText = state === 'dnd' ? 'Do not disturb' : state === 'online' ? 'Online' : state === 'offline' ? 'Offline' : 'Connecting';
     const room = rooms.current?.roomName;
     this.profile.setAttribute('aria-label', `${identity.displayName}, ${stateText}${room ? `, room ${room}` : ''} – profile and settings`);
     this.profile.onclick = () => openSettings(this.app, 'device');
+    this.profile.classList.toggle('alert-dot', native.missingPermissions > 0);
     this.profile.replaceChildren(
       h(
         'span',
@@ -218,6 +222,7 @@ export class UIManager {
       if (!viaBack) this.menuBack?.();
       this.menuBack = null;
     }
+    this.topMenuBtn.classList.toggle('alert-dot', native.missingPermissions > 0);
     this.topMenuBtn.setAttribute('aria-expanded', String(open));
     if (open) {
       this.renderTopMenu();
@@ -235,7 +240,8 @@ export class UIManager {
         room ? h('div', { class: 'menu-label', title: room.roomName }, h('small', {}, 'Room'), h('strong', {}, room.roomName)) : null,
         room ? item(icons.userPlus, 'Start invite', () => this.newInvite()) : null,
         room ? item(icons.live, 'Go live', () => (this.app.calls.inCall ? this.toasts.show('info', 'You are already in a call') : openGoLive(this.app))) : null,
-        item(icons.settings, 'Settings', () => openSettings(this.app)),
+        item(icons.bellOff, isDndActive(this.app.settings.get()) ? 'DND on' : 'DND', () => this.app.settings.update({ dnd: !this.app.settings.get().dnd }), this.app.settings.get().dnd ? 'on' : ''),
+        item(icons.settings, 'Settings', () => openSettings(this.app, native.missingPermissions > 0 ? 'device' : undefined), native.missingPermissions > 0 ? 'alert-dot' : ''),
         inst === 'available' || inst === 'ios-manual' ? item(icons.download, 'Install app', () => this.install()) : null,
         room
           ? item(
@@ -255,6 +261,15 @@ export class UIManager {
   private wire(): void {
     const { app } = this;
     this.armExitGuard();
+    // Android: after a restart there may be no history entry yet (it is only armed by a tap) → Back still asks.
+    native.onRootBack = () => {
+      if (this.callGuard) {
+        this.toasts.show('info', 'Hang up to leave the call');
+        return true;
+      }
+      this.pressBackToExit();
+      return true;
+    };
     // Closing / reloading the tab mid-call would drop the call. Browsers only allow their own
     // generic "Leave site?" prompt here (a page cannot style it), so ask only during a call.
     window.addEventListener('beforeunload', (e) => {
@@ -283,8 +298,13 @@ export class UIManager {
       if (!room) this.drawer.close();
     });
     app.dms.events.on('change', () => this.sidebar.renderUsers());
+    app.history.events.on('change', () => this.syncCallBadge());
+    app.notifications.events.on('missed', (m) =>
+      this.toasts.show('warn', `Missed ${m.media === 'video' ? 'video ' : ''}call from ${m.callerName}`, 10000, { label: 'Call back', run: () => this.callUser(m.callerId, m.media === 'video' ? 'video' : 'audio') }),
+    );
     app.dms.events.on('incoming', (m) => {
       if (this.drawer.openPeer === m.senderId && document.visibilityState === 'visible') return;
+      if (app.dms.isMuted(m.senderId)) return; // muted contact: no alert, still counted as unread
       const room = app.rooms.current;
       void app.notifications.showDirectMessage({ messageId: m.messageId, senderId: m.senderId, senderName: m.senderName, text: m.text, roomId: m.roomId, roomName: room?.roomName ?? '' });
       this.toasts.show('info', `${m.senderName}: ${m.text.slice(0, 80)}`, 6000, { label: 'Open', run: () => this.openConversation(m.senderId, m.messageId) });
@@ -308,7 +328,10 @@ export class UIManager {
       apply();
     }
     app.signaling.events.on('status', () => this.renderAll());
-    app.presence.events.on('change', () => this.sidebar.renderUsers());
+    app.presence.events.on('change', () => {
+      this.sidebar.renderUsers();
+      this.sidebar.refreshCalls();
+    });
     app.live.events.on('streams', () => this.sidebar.renderStreams());
     app.invites.events.on('change', () => this.sidebar.renderStreams());
     app.invites.events.on('new', (inv) => {
@@ -356,7 +379,15 @@ export class UIManager {
       this.renderBanner();
     });
     app.media.events.on('state', () => this.callView?.render());
-    app.settings.events.on('change', () => this.callView?.render());
+    native.events.on('perms', () => {
+      this.renderProfile();
+      this.topMenuBtn.classList.toggle('alert-dot', native.missingPermissions > 0);
+      if (!this.topMenu.hidden) this.renderTopMenu();
+    });
+    app.settings.events.on('change', () => {
+      this.callView?.render();
+      this.renderProfile();
+    });
     app.push.events.on('status', () => {
       this.renderIdleHints();
       this.renderPills();
@@ -388,7 +419,7 @@ export class UIManager {
         onToggleDiagnostics: () => this.toggleDiagnostics(),
         onCallSettings: () => openSettings(this.app, 'call', { callOnly: true }),
         onBack: () => this.setView('people'),
-        onToast: (level, text) => this.toasts.show(level, text),
+        onToast: (level, text, action) => this.toasts.show(level, text, 6000, action),
       });
       this.stage.replaceChildren(this.callView.el);
     } else if (!showCall && this.callView) {
@@ -429,14 +460,27 @@ export class UIManager {
     }
     this.exitGuard = backStack.push(() => {
       // Open after the stack has re-armed this entry, so the dialog sits above it.
-      setTimeout(() => void this.confirmExit(), 0);
+      setTimeout(() => this.pressBackToExit(), 0);
       return false;
     });
   }
 
-  private async confirmExit(): Promise<void> {
-    const ok = await confirmDialog({ title: 'Exit MeshCall?', confirmLabel: 'Exit', cancelLabel: 'Stay', icon: icons.exit });
-    if (!ok) return;
+  private lastBackPress = 0;
+
+  /** Back on the root screen: press twice to exit (no dialog). The Android service keeps calls reachable. */
+  private pressBackToExit(): void {
+    const now = Date.now();
+    if (now - this.lastBackPress < 3000) {
+      this.lastBackPress = 0;
+      this.exitNow();
+      return;
+    }
+    this.lastBackPress = now;
+    this.toasts.show('info', 'Press back again to exit', 2800);
+  }
+
+  private exitNow(): void {
+    if (isNative) return native.exitApp(); // Android: close the screen; the service keeps calls reachable
     this.exiting = true;
     this.exitGuard?.();
     this.exitGuard = null;
@@ -496,11 +540,22 @@ export class UIManager {
     // Mobile: the bottom tabs choose the sidebar pane (Call tab without a call = call history).
     if (this.mobile.matches) this.sidebar.setPane(view === 'call' ? 'calls' : view);
     for (const b of this.nav.querySelectorAll('button')) b.setAttribute('aria-current', b.dataset.view === view ? 'page' : 'false');
+    this.syncCallBadge();
     this.renderBanner();
   }
 
+  private callNavBadge = h('span', { class: 'badge nav-badge', hidden: true });
+
+  private syncCallBadge(): void {
+    const n = this.view === 'call' ? 0 : this.app.history.unseenMissed();
+    this.callNavBadge.hidden = !n;
+    this.callNavBadge.textContent = n > 9 ? '9+' : String(n);
+  }
+
   private navBtn(view: MobileView, label: string, icon: string): HTMLButtonElement {
-    return h('button', { 'data-view': view, 'aria-label': label, onclick: () => this.setView(view) }, h('span', { html: icon }), h('span', {}, label));
+    const b = h('button', { 'data-view': view, 'aria-label': label, onclick: () => this.setView(view) }, h('span', { html: icon }), h('span', {}, label));
+    if (view === 'call') b.append(this.callNavBadge);
+    return b;
   }
 
   // ── rendering ────────────────────────────────────────────────────────────

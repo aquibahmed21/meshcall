@@ -1,5 +1,6 @@
 import { Emitter } from '../core/emitter';
 import { createLogger, errorMessage } from '../core/logger';
+import { isNative, native } from '../native/native';
 import { isLaunchContext, type LaunchContext } from '../push/payloads';
 
 const log = createLogger('PWA');
@@ -64,6 +65,7 @@ export class PwaService {
 
   /** Call as early as possible so beforeinstallprompt is not missed. */
   listenForInstall(): void {
+    if (isNative) return this.setInstall('installed');
     this.setInstall(PwaService.isStandalone() ? 'installed' : PwaService.isIos() && window.isSecureContext ? 'ios-manual' : 'unavailable');
     window.addEventListener('beforeinstallprompt', (e) => {
       e.preventDefault(); // show our own button instead of the mini-infobar
@@ -106,6 +108,11 @@ export class PwaService {
   }
 
   private async doRegister(): Promise<ServiceWorkerRegistration | null> {
+    if (isNative) {
+      // The Android app bundles its own assets and uses native notifications – no Service Worker.
+      await native.init();
+      return null;
+    }
     if (!('serviceWorker' in navigator) || !window.isSecureContext) {
       log.info('Service Worker unavailable (needs HTTPS or localhost)');
       return null;
@@ -165,6 +172,7 @@ export class PwaService {
    * a short-lived Cache entry – never put in the URL). Read once, then deleted; ignored if stale.
    */
   async consumeLaunchContext(maxAgeMs = 120_000): Promise<LaunchContext | null> {
+    if (isNative) return native.consumeLaunchContext(maxAgeMs);
     if (typeof caches === 'undefined') return null;
     try {
       const cache = await caches.open('launch-context-v1');

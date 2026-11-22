@@ -5,6 +5,7 @@ import type { AppConfig } from '../config';
 import { uint8ArrayToUrlBase64, urlBase64ToUint8Array } from '../push/base64url';
 import type { ChatMessagePush, IncomingCallPush, TargetedPushPayload } from '../push/payloads';
 import { PushNotSubscribedError, PushUnsupportedError, WebPushServerBackend, type PushBackend } from '../push/PushBackend';
+import { isNative, native } from '../native/native';
 import { PwaService } from './PwaService';
 
 const log = createLogger('Push');
@@ -120,6 +121,11 @@ export class PushNotificationService {
     return !!this.backend?.capabilities.targetedDelivery && this._status === 'enabled';
   }
 
+  /** Android: the user has not switched the background connection off. */
+  get wantsBackground(): boolean {
+    return storage.get(PREF_KEY, true);
+  }
+
   get serverUrl(): string {
     return this.backend?.url ?? '';
   }
@@ -127,6 +133,7 @@ export class PushNotificationService {
   // ── lifecycle ─────────────────────────────────────────────────────────────
 
   async initialize(registration: ServiceWorkerRegistration | null): Promise<void> {
+    if (isNative) return this.nativeRefresh();
     this.registration = registration;
     const blocked = this.environmentStatus();
     if (blocked) return this.setStatus(blocked);
@@ -140,6 +147,7 @@ export class PushNotificationService {
    *   no subscription but the user wanted push and permission is granted → recreate it
    */
   refreshSubscription(): Promise<void> {
+    if (isNative) return this.nativeRefresh();
     return this.exclusive(async () => {
       if (this.environmentStatus() || !this.registration || !this.backend) return;
       if (Notification.permission === 'denied') return this.setStatus('denied');
@@ -191,12 +199,29 @@ export class PushNotificationService {
 
   // ── API ───────────────────────────────────────────────────────────────────
 
+  /**
+   * Android app: there is no Web Push. Calls and messages reach the device through the signaling
+   * connection that the foreground service keeps alive, and are shown as native notifications.
+   */
+  private async nativeRefresh(): Promise<void> {
+    const perm = await native.refreshPermission();
+    if (perm === 'denied') return this.setStatus('denied');
+    const wanted = storage.get(PREF_KEY, true);
+    if (perm === 'granted' && wanted) {
+      void native.setupBackground();
+      return this.setStatus('enabled');
+    }
+    this.setStatus('disabled');
+  }
+
   getPermissionState(): NotificationPermission | 'unsupported' {
+    if (isNative) return native.notificationPermission;
     return typeof Notification === 'undefined' ? 'unsupported' : Notification.permission;
   }
 
   /** Only ever call from a user gesture. Never re-prompts once denied. */
   async requestPermission(): Promise<boolean> {
+    if (isNative) return native.requestNotificationPermission();
     if (typeof Notification === 'undefined') return false;
     if (Notification.permission !== 'default') return Notification.permission === 'granted';
     try {
@@ -217,6 +242,14 @@ export class PushNotificationService {
 
   /** "Enable notifications" button: permission → subscription → server registration. */
   subscribe(): Promise<PushSubscription | null> {
+    if (isNative) {
+      return this.exclusive(async () => {
+        storage.set(PREF_KEY, true);
+        await native.requestNotificationPermission();
+        await this.nativeRefresh();
+        return null;
+      });
+    }
     return this.exclusive(async () => {
       const blocked = this.environmentStatus();
       if (blocked || !this.registration || !this.backend) {
@@ -253,6 +286,14 @@ export class PushNotificationService {
 
   /** "Turn off": tell the server first, then drop the browser subscription. */
   unsubscribe(): Promise<boolean> {
+    if (isNative) {
+      return this.exclusive(async () => {
+        storage.set(PREF_KEY, false);
+        await native.stopService();
+        this.setStatus('disabled');
+        return true;
+      });
+    }
     return this.exclusive(async () => {
       storage.set(PREF_KEY, false);
       const sub = await this.getSubscription();
@@ -350,6 +391,21 @@ export class PushNotificationService {
   }
 
   async diagnostics(): Promise<PushDiagnostics> {
+    if (isNative) {
+      return {
+        browserSupport: true,
+        permission: native.notificationPermission,
+        serviceWorker: 'native (foreground service)',
+        status: this._status,
+        subscription: this._status === 'enabled' ? 'active' : 'none',
+        serverVerified: null,
+        endpoint: null,
+        pushServer: '(Android background service)',
+        targetedDelivery: false,
+        lastRegistration: null,
+        lastError: this.lastError,
+      };
+    }
     const sub = await this.getSubscription();
     const sw = this.registration?.active?.state ?? (this.registration ? 'registered' : 'none');
     return {

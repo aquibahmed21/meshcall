@@ -4,10 +4,19 @@ import type { CallHistoryEntry, CallOutcome } from '../../services/CallHistorySe
 import type { MediaKind } from '../../types/signaling';
 import type { PresenceStatus } from '../../types/state';
 import { backStack } from '../BackStack';
+import { confirmDialog } from './ConfirmDialog';
 import { colorFor, h, initials, nodes } from '../dom';
 import { icons } from '../icons';
 
-const STATUS_TEXT: Record<PresenceStatus, string> = { online: 'Online', offline: 'Offline', connecting: 'Connecting', unknown: 'Unknown' };
+function shortTime(ts: number): string {
+  const d = new Date(ts);
+  const now = new Date();
+  if (d.toDateString() === now.toDateString()) return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  const days = (now.getTime() - ts) / 86_400_000;
+  return days < 6 ? d.toLocaleDateString([], { weekday: 'short' }) : d.toLocaleDateString([], { day: 'numeric', month: 'short' });
+}
+
+const STATUS_TEXT: Record<PresenceStatus | 'away' | 'dnd', string> = { online: 'Online', away: 'Away', dnd: 'Do not disturb', offline: 'Offline', connecting: 'Connecting', unknown: 'Unknown' };
 const LONG_PRESS_MS = 450;
 
 export type SidebarPane = 'people' | 'live' | 'calls';
@@ -99,23 +108,10 @@ export class Sidebar {
       'div',
       { class: 'pane-head' },
       h('h2', {}, 'Live now'),
-      h('button', { class: 'icon-btn go-live-btn', type: 'button', 'aria-label': 'Go live', title: 'Go live', html: icons.live, onclick: () => this.cb.onGoLive() }),
     );
     this.panes = {
-      people: h('section', { class: 'side-section', id: 'people', 'aria-label': 'People' }, this.toolbar, this.users),
-      live: h(
-        'section',
-        { class: 'side-section', id: 'live', 'aria-label': 'Live now' },
-        h(
-          'div',
-          { class: 'pane-head' },
-          h('h2', {}, 'Invites'),
-          h('button', { class: 'icon-btn go-live-btn', type: 'button', 'aria-label': 'Start invite', title: 'Start invite', html: icons.userPlus, onclick: () => this.cb.onNewInvite() }),
-        ),
-        this.invites,
-        liveHead,
-        this.streams,
-      ),
+      people: h('section', { class: 'side-section', id: 'people', 'aria-label': 'People' }, this.toolbar, this.invites, this.users),
+      live: h('section', { class: 'side-section', id: 'live', 'aria-label': 'Live now' }, liveHead, this.streams),
       calls: h('section', { class: 'side-section', id: 'calls', 'aria-label': 'Recent calls' }, h('h2', {}, 'Recent calls'), this.calls),
     };
     this.el = h('aside', { class: 'sidebar' }, this.tabs, this.panes.people, this.panes.live, this.panes.calls, this.selectBar);
@@ -124,7 +120,12 @@ export class Sidebar {
       if (this.actionsFor && !(e.target as Element).closest?.('.user.actions')) this.showActions(null);
     });
     document.addEventListener('keydown', (e) => e.key === 'Escape' && this.actionsFor && this.showActions(null));
-    app.history.events.on('change', () => this.renderCalls());
+    app.history.events.on('change', () => {
+      if (this.pane === 'calls') this.app.history.markSeen();
+      this.renderCalls();
+      this.renderUsers();
+      this.renderTabs();
+    });
     this.setPane('people');
   }
 
@@ -133,6 +134,8 @@ export class Sidebar {
     for (const [id, el] of Object.entries(this.panes)) el.hidden = id !== pane;
     this.el.dataset.pane = pane;
     if (pane !== 'people') this.setSelecting(false);
+    if (pane === 'calls') this.app.history.markSeen();
+    this.renderTabs();
     this.render();
   }
 
@@ -145,7 +148,7 @@ export class Sidebar {
 
   private renderTabs(): void {
     const me = this.app.identity.deviceId;
-    const live = this.app.live.list().filter((s) => s.hostId !== me).length + this.app.invites.list().filter((i) => i.hostId !== me).length;
+    const live = this.app.live.list().filter((s) => s.hostId !== me).length;
     const tab = (id: SidebarPane, label: string, badge?: number) =>
       h(
         'button',
@@ -153,7 +156,7 @@ export class Sidebar {
         label,
         ...nodes(badge ? h('span', { class: 'badge' }, String(badge)) : null),
       );
-    this.tabs.replaceChildren(tab('people', 'People'), tab('live', 'Live', live), tab('calls', 'Calls'));
+    this.tabs.replaceChildren(tab('people', 'People'), tab('live', 'Live', live), tab('calls', 'Calls', this.pane === 'calls' ? 0 : this.app.history.unseenMissed()));
   }
 
   // ── people ───────────────────────────────────────────────────────────────
@@ -197,7 +200,7 @@ export class Sidebar {
 
   private renderToolbar(count: number): void {
     const selecting = this.selected !== null;
-    this.countEl.textContent = selecting ? 'Select people' : count ? `${count} ${count === 1 ? 'person' : 'people'}` : '';
+    this.countEl.textContent = selecting ? 'Select' : count ? `${count} online` : '';
     const label = selecting ? 'Cancel selection' : 'Select people for a group call';
     if (this.selectBtn.getAttribute('aria-label') !== label) {
       this.selectBtn.setAttribute('aria-label', label);
@@ -211,7 +214,7 @@ export class Sidebar {
     const q = this.filter.value.trim().toLowerCase();
     const all = this.app.presence.contacts();
     const users = all.filter((u) => !q || u.name.toLowerCase().includes(q));
-    this.renderToolbar(all.length);
+    this.renderToolbar(all.filter((u) => u.status === 'online').length);
     this.renderSelectBar();
     if (!users.length) {
       this.users.replaceChildren(h('li', { class: 'empty' }, q ? 'No match' : 'No one here yet'));
@@ -221,6 +224,7 @@ export class Sidebar {
     this.users.replaceChildren(
       ...users.map((u) => {
         const unread = this.app.dms.unreadFor(u.deviceId);
+        const last = this.lastActivity(u.deviceId);
         const picked = !!this.selected?.has(u.deviceId);
         const actions = !selecting && this.actionsFor === u.deviceId;
         const row = h(
@@ -228,15 +232,20 @@ export class Sidebar {
           {
             class: 'user-row',
             type: 'button',
-            'aria-label': `${u.name}, ${u.busy ? 'in a call' : STATUS_TEXT[u.status]}${unread ? `, ${unread} unread` : ''}`,
+            'aria-label': `${u.name}, ${u.onCall ? 'in a call' : STATUS_TEXT[u.status === 'online' && u.away ? 'away' : u.status]}${unread ? `, ${unread} unread` : ''}`,
             'aria-pressed': selecting ? String(picked) : undefined,
           },
           ...nodes(selecting ? h('span', { class: `pick${picked ? ' on' : ''}`, html: picked ? icons.check : '', 'aria-hidden': 'true' }) : null),
-          h('span', { class: 'avatar', style: `--avatar:${colorFor(u.deviceId)}` }, initials(u.name)),
-          h('span', { class: 'grow user-info' }, h('span', { class: 'user-name' }, u.name)),
+          h(
+            'span',
+            { class: 'me-avatar' },
+            h('span', { class: 'avatar', style: `--avatar:${colorFor(u.deviceId)}` }, initials(u.name)),
+            h('span', { class: `presence-dot ${u.onCall ? 'busy' : u.status === 'online' && u.dnd ? 'dnd' : u.status === 'online' && u.away ? 'away' : u.status}`, title: u.onCall ? 'On a call' : u.status === 'online' && u.dnd ? 'Do not disturb' : STATUS_TEXT[u.status === 'online' && u.away ? 'away' : u.status], 'aria-hidden': 'true' }),
+          ),
+          h('span', { class: 'grow user-info' }, h('span', { class: 'user-name' }, u.name), ...nodes(u.onCall && u.status === 'online' ? h('span', { class: 'user-last on-call' }, 'On a call') : last ? h('span', { class: 'user-last' }, last.text) : null)),
           ...nodes(
+            last ? h('span', { class: 'user-time' }, last.time) : null,
             unread && !actions ? h('span', { class: 'badge' }, unread > 9 ? '9+' : String(unread)) : null,
-            actions ? null : h('span', { class: `status-dot ${u.busy ? 'busy' : u.status}`, title: u.busy ? 'In a call' : STATUS_TEXT[u.status], 'aria-hidden': 'true' }),
           ),
         );
         this.bindRow(row, u.deviceId);
@@ -259,6 +268,24 @@ export class Sidebar {
     );
   }
 
+  /** Latest message or call with this person, as a one-line preview. */
+  private lastActivity(peerId: string): { text: string; time: string } | null {
+    const msgs = this.app.dms.conversation(peerId).messages;
+    const m = msgs[msgs.length - 1];
+    const call = this.app.history.list().filter((e) => e.peers.some((p) => p.deviceId === peerId)).sort((a, b) => b.startedAt - a.startedAt)[0];
+    if (!m && !call) return null;
+    if (m && (!call || m.timestamp >= call.startedAt)) return { text: m.deleted ? 'Deleted message' : `${m.own ? 'You: ' : ''}${m.file ? `📎 ${m.text ? m.text.replace(/\s+/g, ' ') : m.file.name}` : m.text.replace(/\s+/g, ' ')}`, time: shortTime(m.timestamp) };
+    const c = call!;
+    const kind = c.media === 'video' ? 'video call' : 'call';
+    const text =
+      c.outcome === 'answered' ? `${c.direction === 'incoming' ? 'Incoming' : 'Outgoing'} ${kind}${c.durationMs ? ` · ${Math.max(1, Math.round(c.durationMs / 60000))} min` : ''}` :
+      c.outcome === 'missed' || c.outcome === 'no-answer' ? `Missed ${kind}` :
+      c.outcome === 'declined' ? `Declined ${kind}` :
+      c.outcome === 'cancelled' ? `Cancelled ${kind}` :
+      `${c.direction === 'incoming' ? 'Incoming' : 'Outgoing'} ${kind}`;
+    return { text: `📞 ${text}`, time: shortTime(c.startedAt) };
+  }
+
   /** Tap → open (or toggle when selecting); long-press / right-click → call buttons. */
   private bindRow(row: HTMLElement, userId: string): void {
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -278,7 +305,7 @@ export class Sidebar {
         this.suppressClick = true;
         document.addEventListener('pointerup', () => setTimeout(() => (this.suppressClick = false), 60), { once: true });
         navigator.vibrate?.(15);
-        this.showActions(userId);
+        this.startSelectWith(userId);
       }, LONG_PRESS_MS);
     });
     row.addEventListener('pointermove', (e) => {
@@ -292,7 +319,7 @@ export class Sidebar {
       if (this.selected) return;
       cancel();
       this.suppressClick = true;
-      this.showActions(userId);
+      this.startSelectWith(userId);
       setTimeout(() => (this.suppressClick = false), 0);
     });
     row.addEventListener('click', (e) => {
@@ -307,31 +334,91 @@ export class Sidebar {
     });
   }
 
+  /** Long-press / right-click: enter selection mode with this person already picked. */
+  private startSelectWith(userId: string): void {
+    this.setSelecting(true);
+    this.selected?.add(userId);
+    this.renderUsers();
+  }
+
   private toggle(userId: string): void {
     const sel = this.selected;
     if (!sel) return;
-    const max = this.app.config.mesh.maxParticipants - 1;
     if (sel.has(userId)) sel.delete(userId);
-    else if (sel.size < max) sel.add(userId);
+    else sel.add(userId);
+    if (!sel.size) return this.setSelecting(false); // last one unticked → leave selection mode
     this.renderUsers();
+  }
+
+  private selMenuOpen = false;
+
+  private async removeSelected(): Promise<void> {
+    const ids = [...(this.selected ?? [])];
+    if (!ids.length) return;
+    const names = ids.map((id) => this.app.presence.nameOf(id));
+    const label = ids.length === 1 ? names[0]! : `${ids.length} people`;
+    if (!(await confirmDialog({ title: `Remove ${label}?`, message: 'They are removed from your contacts and the conversations are deleted.', confirmLabel: 'Remove', danger: true, icon: icons.trash }))) return;
+    for (const id of ids) {
+      this.app.dms.deleteConversation(id);
+      this.app.presence.removeContact(id);
+    }
+    this.setSelecting(false);
   }
 
   private renderSelectBar(): void {
     const sel = this.selected;
     this.selectBar.hidden = !sel;
-    if (!sel) return;
+    if (!sel) {
+      this.selMenuOpen = false;
+      return;
+    }
     const max = this.app.config.mesh.maxParticipants - 1;
     const n = sel.size;
+    const ids = [...sel];
     const start = (media: MediaKind) => {
-      const ids = [...sel];
       this.setSelecting(false);
-      this.cb.onGroupCall(ids, media);
+      if (ids.length === 1) this.cb.onCall(ids[0]!, media);
+      else this.cb.onGroupCall(ids, media);
     };
+    const tooMany = n > max;
+    const allMuted = n > 0 && ids.every((id) => this.app.dms.isMuted(id));
+    const everyone = this.visibleIds();
+    const item = (icon: string, label: string, run: () => void, cls = '') =>
+      h('button', { class: `menu-item ${cls}`.trim(), role: 'menuitem', type: 'button', onclick: () => ((this.selMenuOpen = false), run()) }, h('span', { html: icon }), label);
+    const menu = this.selMenuOpen
+      ? h(
+          'div',
+          { class: 'more-menu sel-menu', role: 'menu' },
+          ...nodes(
+            n === 1 ? item(icons.chat, 'Message', () => (this.setSelecting(false), this.cb.onOpenContact(ids[0]!))) : null,
+            item(icons.check, n === everyone.length ? 'Unselect all' : 'Select all', () => {
+              if (n === everyone.length) this.setSelecting(false);
+              else {
+                everyone.forEach((id) => sel.add(id));
+                this.renderUsers();
+              }
+            }),
+            item(allMuted ? icons.bell : icons.bellOff, allMuted ? 'Unmute' : 'Mute', () => {
+              ids.forEach((id) => this.app.dms.setMuted(id, !allMuted));
+              this.renderSelectBar();
+            }),
+            item(icons.trash, 'Remove', () => void this.removeSelected(), 'danger'),
+          ),
+        )
+      : null;
     this.selectBar.replaceChildren(
-      h('span', { class: 'grow' }, n ? `${n} selected${n >= max ? ` (max ${max})` : ''}` : 'Tap people to select'),
-      h('button', { class: 'icon-btn call-btn', type: 'button', disabled: n === 0, 'aria-label': 'Group audio call', title: 'Audio call', html: icons.phone, onclick: () => start('audio') }),
-      h('button', { class: 'icon-btn call-btn', type: 'button', disabled: n === 0, 'aria-label': 'Group video call', title: 'Video call', html: icons.cam, onclick: () => start('video') }),
+      h('button', { class: 'icon-btn', type: 'button', 'aria-label': 'Cancel selection', title: 'Cancel', html: icons.close, onclick: () => this.setSelecting(false) }),
+      h('span', { class: 'grow' }, n ? `${n} selected` : 'Tap people to select'),
+      h('button', { class: 'icon-btn call-btn', type: 'button', disabled: n === 0 || tooMany, 'aria-label': 'Audio call', title: tooMany ? `Max ${max} people` : 'Audio call', html: icons.phone, onclick: () => start('audio') }),
+      h('button', { class: 'icon-btn call-btn', type: 'button', disabled: n === 0 || tooMany, 'aria-label': 'Video call', title: tooMany ? `Max ${max} people` : 'Video call', html: icons.cam, onclick: () => start('video') }),
+      h('button', { class: 'icon-btn', type: 'button', disabled: n === 0, 'aria-label': 'More', title: 'More', html: icons.more, onclick: () => ((this.selMenuOpen = !this.selMenuOpen), this.renderSelectBar()) }),
+      ...nodes(menu),
     );
+  }
+
+  /** Contacts currently listed (respects the search filter). */
+  private visibleIds(): string[] {
+    return [...this.panes.people.querySelectorAll<HTMLElement>('[data-user]')].map((e) => e.dataset.user!).filter(Boolean);
   }
 
   // ── live ─────────────────────────────────────────────────────────────────
@@ -360,8 +447,9 @@ export class Sidebar {
 
   private renderInvites(): void {
     const list = this.app.invites.list();
+    this.invites.hidden = !list.length; // invites only appear while one is open
     if (!list.length) {
-      this.invites.replaceChildren(h('li', { class: 'empty' }, 'No open invites'));
+      this.invites.replaceChildren();
       return;
     }
     const me = this.app.identity.deviceId;
@@ -387,6 +475,11 @@ export class Sidebar {
 
   // ── calls (history) ──────────────────────────────────────────────────────
 
+  /** Presence changed: "Join" badges on the Calls tab may appear/disappear. */
+  refreshCalls(): void {
+    if (this.pane === 'calls') this.renderCalls();
+  }
+
   private renderCalls(): void {
     const entries = this.app.history.list();
     if (!entries.length) {
@@ -404,7 +497,13 @@ export class Sidebar {
     const bad = e.outcome !== 'answered' && e.outcome !== 'elsewhere';
     const missed = e.direction === 'incoming' && (e.outcome === 'missed' || e.outcome === 'declined');
     const detail = [OUTCOME_TEXT[e.outcome], e.outcome === 'answered' ? formatDuration(e.durationMs) : '', when(e.startedAt)].filter(Boolean).join(' · ');
+    // Group call that is still running without us → joining beats ringing everyone again.
+    const liveWith = group && !this.app.calls.inCall ? this.app.presence.inCallWith(e.callId) : null;
     const callBack = () => {
+      if (liveWith) {
+        this.app.calls.requestJoin(e.callId, liveWith, name);
+        return;
+      }
       const ids = e.peers.map((p) => p.deviceId);
       if (group) this.cb.onGroupCall(ids, e.media);
       else if (ids[0]) this.cb.onCall(ids[0], e.media);
@@ -424,7 +523,7 @@ export class Sidebar {
           h('span', { class: 'user-name' }, name),
           h('small', { class: `call-detail${bad ? ' bad' : ''}` }, h('span', { class: 'call-dir', html: e.direction === 'incoming' ? icons.callIn : icons.callOut, 'aria-hidden': 'true' }), detail),
         ),
-        h('span', { class: 'call-media', html: e.media === 'video' ? icons.cam : icons.phone, 'aria-hidden': 'true' }),
+        liveWith ? h('span', { class: 'badge-join' }, 'Join') : h('span', { class: 'call-media', html: e.media === 'video' ? icons.cam : icons.phone, 'aria-hidden': 'true' }),
       ),
     );
   }

@@ -36,13 +36,17 @@ export type TargetedPushPayload = IncomingCallPush | ChatMessagePush;
 /** Context handed from a notification click to the app (never contains credentials). */
 export interface CallLaunchContext {
   kind: 'incoming-call';
-  action: 'open' | 'decline';
+  action: 'open' | 'decline' | 'accept' | 'callback';
   callId: string;
   roomId?: string;
   roomName?: string;
   callerId?: string;
   callerName?: string;
   callType?: string;
+  /** Missed-call notification: only its "Call back" action does something. */
+  missed?: boolean;
+  /** Inline reply typed in a missed-call notification (sent as a chat message). */
+  replyText?: string;
   at: number;
 }
 
@@ -61,7 +65,9 @@ export function isIncomingCallPush(v: unknown): v is IncomingCallPush {
 /** A chat notification was clicked → open that conversation. */
 export interface ChatLaunchContext {
   kind: 'chat-message';
-  action: 'open';
+  action: 'open' | 'reply';
+  /** Inline reply typed in the notification (Android). */
+  replyText?: string;
   senderId: string;
   senderName?: string;
   messageId?: string;
@@ -83,5 +89,5 @@ export function isLaunchContext(v: unknown): v is LaunchContext {
 
 export function isCallLaunchContext(v: unknown): v is CallLaunchContext {
   const c = v as Partial<CallLaunchContext> | null;
-  return !!c && c.kind === 'incoming-call' && typeof c.callId === 'string' && (c.action === 'open' || c.action === 'decline');
+  return !!c && c.kind === 'incoming-call' && typeof c.callId === 'string' && (c.action === 'open' || c.action === 'decline' || c.action === 'callback');
 }

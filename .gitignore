@@ -7,3 +7,4 @@ tests/e2e/artifacts
 node_modules/
 dist/
 .env.*.local
+MeshCall-debug.apk

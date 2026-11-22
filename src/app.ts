@@ -9,6 +9,8 @@ import { DeviceManager } from './media/DeviceManager';
 import { MediaManager } from './media/MediaManager';
 import { ChatService } from './services/ChatService';
 import { DirectMessageService } from './services/DirectMessageService';
+import { DeviceLinkService } from './services/DeviceLinkService';
+import { FileTransferService } from './services/FileTransferService';
 import { RoomService, type RoomContext } from './services/RoomService';
 import { IdentityService } from './services/IdentityService';
 import { NetworkMonitor } from './services/NetworkMonitor';
@@ -16,9 +18,10 @@ import { NotificationService } from './services/NotificationService';
 import { PresenceService } from './services/PresenceService';
 import { PushNotificationService } from './services/PushNotificationService';
 import { PwaService } from './services/PwaService';
-import { SettingsService } from './services/SettingsService';
+import { SettingsService, isDndActive } from './services/SettingsService';
 import { SignalingService } from './services/SignalingService';
 import { withTimeout } from './core/async';
+import { isNative, native } from './native/native';
 import { createLogger } from './core/logger';
 import { WebRTCManager } from './webrtc/WebRTCManager';
 
@@ -43,6 +46,8 @@ export interface AppContext {
   rooms: RoomService;
   pwa: PwaService;
   dms: DirectMessageService;
+  files: FileTransferService;
+  links: DeviceLinkService;
   history: CallHistoryService;
 }
 
@@ -55,6 +60,8 @@ export function createApp(): AppContext {
   const settings = new SettingsService();
   const signaling = new SignalingService(identity, config);
   const presence = new PresenceService(signaling, identity, config);
+  presence.dndProbe = () => isDndActive(settings.get());
+  settings.events.on('change', ({ changed }) => changed.some((k) => k.startsWith('dnd')) && presence.announce());
   const network = new NetworkMonitor();
   const media = new MediaManager(settings);
   const devices = new DeviceManager(settings, media);
@@ -70,8 +77,12 @@ export function createApp(): AppContext {
   const pwa = new PwaService();
   pwa.listenForInstall(); // as early as possible – beforeinstallprompt can fire right after load
   const dms = new DirectMessageService(signaling, identity, presence, push);
+  const files = new FileTransferService(signaling, config);
+  files.authorize = (fileId, peerId) => dms.sharedWith(fileId, peerId);
+  const links = new DeviceLinkService(signaling, identity);
+  calls.isLinked = (id) => links.isLinked(id);
   const history = new CallHistoryService(calls, identity);
-  return { invites, history, dms, pwa, config, identity, settings, signaling, presence, network, media, devices, webrtc, notifications, push, calls, groups, live, chat, rooms };
+  return { links, files, invites, history, dms, pwa, config, identity, settings, signaling, presence, network, media, devices, webrtc, notifications, push, calls, groups, live, chat, rooms };
 }
 
 /**
@@ -87,6 +98,23 @@ export async function startApp(app: AppContext): Promise<void> {
     if (s && (s.status === 'connecting' || s.status === 'connected' || s.status === 'reconnecting')) app.chat.bind(s.callId);
     else if (!s || isTerminal(s.status)) app.chat.unbind();
   });
+  if (isNative) {
+    // Operator / WhatsApp-style call on the phone → shown to contacts, new calls get "busy".
+    native.events.on('external', (on) => app.presence.setExternalCall(on));
+    // Android: while a call is up the foreground service declares microphone/camera so the OS
+    // keeps capturing and the process is never frozen or killed in the background.
+    app.calls.events.on('state', (s) => {
+      const live = !!s && (s.status === 'connecting' || s.status === 'connected' || s.status === 'reconnecting');
+      void native.setCallAudio(live, s?.media === 'video');
+      native.setPipEligible(live && s?.media === 'video');
+      if (!app.push.wantsBackground) return;
+      void native.updateService(
+        live
+          ? { inCall: true, video: s!.media === 'video', text: s!.remoteUser?.name ? `Call with ${s!.remoteUser.name}` : s!.title ?? 'Call in progress' }
+          : { inCall: false, video: false },
+      );
+    });
+  }
   // Advertise "reachable while closed" only if the backend can deliver to THIS device.
   app.push.events.on('status', () => app.presence.setPushEnabled(app.push.canTarget));
   const registration = await app.pwa.register();
@@ -119,6 +147,8 @@ export async function joinRoom(app: AppContext, room: RoomContext): Promise<void
   app.live.start();
   app.invites.start();
   app.dms.start(room);
+  app.files.start();
+  app.links.start(room);
   app.history.start(room);
   app.rooms.set(room);
   try {
@@ -147,6 +177,8 @@ export function leaveRoom(app: AppContext): void {
   app.calls.stop();
   app.live.stop();
   app.dms.stop();
+  app.files.stop();
+  app.links.stop();
   app.history.stop();
   app.chat.unbind();
   app.presence.stop();

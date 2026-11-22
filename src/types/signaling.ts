@@ -47,6 +47,12 @@ export interface MediaStatePayload {
 export interface PresencePayload {
   busy: boolean;
   pushEnabled: boolean;
+  away?: boolean;
+  dnd?: boolean;
+  /** Id of the MeshCall call this device is in (lets others join it from the Calls tab). */
+  callId?: string;
+  /** The phone itself is in an operator / WhatsApp-style call. */
+  phone?: boolean;
 }
 export type PresenceHeartbeatMessage = Envelope<'presence-heartbeat', PresencePayload>;
 export type PresenceLeaveMessage = Envelope<'presence-leave', PresencePayload>;
@@ -88,13 +94,23 @@ export type MeshWelcomeMessage = Envelope<'mesh-welcome', MeshMemberPayload>;
 export type MeshHeartbeatMessage = Envelope<'mesh-heartbeat', MeshMemberPayload>;
 export type MeshLeaveMessage = Envelope<'mesh-leave', { reason: string }>;
 export type MeshRemoveMessage = Envelope<'mesh-remove', { targetId: string }>;
-export type MeshRejectMessage = Envelope<'mesh-reject', { reason: 'full' | 'not-allowed' | 'ended' }>;
+export type MeshRejectMessage = Envelope<'mesh-reject', { reason: 'full' | 'not-allowed' | 'ended' | 'locked' }>;
+/** Host → everyone (no targetId) or one person: switch the microphone off. They may unmute again. */
+export type MeshMuteMessage = Envelope<'mesh-mute', { targetId?: string }>;
+/** Host → everyone: nobody new may join while locked. */
+export type MeshLockMessage = Envelope<'mesh-lock', { locked: boolean }>;
 export type MediaStateMessage = Envelope<'media-state', MediaStatePayload>;
 /**
  * Broadcast in the call's mesh room by a CURRENT participant when it adds people.
  * Converts a 1:1 call into a group call on every client and widens the join allow-list.
  * Existing peer connections are untouched – only new links are negotiated.
  */
+/** Sent to someone already in a call: "let me in" – they answer by adding us (call-participants-added + invite). */
+export type CallJoinRequestMessage = Envelope<'call-join-request', Record<string, never>>;
+export type DeviceLinkRequest = Envelope<'device-link-request', { code: string }>;
+export type DeviceLinkAccept = Envelope<'device-link-accept', { name: string }>;
+/** A linked device hands its running call to us: expect the invite and answer it automatically. */
+export type CallHandoffMessage = Envelope<'call-handoff', { media: MediaKind }>;
 export type CallParticipantsAddedMessage = Envelope<'call-participants-added', { participantIds: string[]; title?: string }>;
 
 // ── WebRTC negotiation ──────────────────────────────────────────────────────
@@ -175,7 +191,26 @@ export type ChatSignalMessage = Envelope<'chat-message', ChatPayload>;
 
 // ── Direct (1:1) messages – room-scoped, outside calls ────────────────────────
 /** Sent to the recipient's room inbox; messageId (envelope) is stable across retries. */
-export type DirectMessageSignal = Envelope<'direct-message', { text: string; sentAt: number }>;
+export interface DmReply {
+  messageId: string;
+  name: string;
+  /** Short preview of the quoted message. */
+  text: string;
+}
+export interface FileMeta {
+  id: string;
+  name: string;
+  size: number;
+  mime: string;
+}
+export type DirectMessageSignal = Envelope<'direct-message', { text: string; sentAt: number; replyTo?: DmReply; file?: FileMeta }>;
+/** Peer-to-peer file transfer negotiation (offer/answer/ICE for a dedicated data channel). */
+export type FileSignal = Envelope<'file-signal', { fileId: string; tid: string; kind: 'offer' | 'answer' | 'ice' | 'error'; data?: unknown }>;
+export type DmTypingSignal = Envelope<'dm-typing', { typing: boolean }>;
+export type DmReadSignal = Envelope<'dm-read', { messageIds: string[] }>;
+export type DmReactSignal = Envelope<'dm-react', { messageId: string; emoji: string | null }>;
+export type DmEditSignal = Envelope<'dm-edit', { messageId: string; text: string }>;
+export type DmDeleteSignal = Envelope<'dm-delete', { messageId: string }>;
 /** Recipient → sender: the message reached the recipient's app (= "Delivered"). */
 export type DirectMessageAckSignal = Envelope<'direct-message-ack', { messageId: string }>;
 
@@ -194,18 +229,30 @@ export type SignalingMessage =
   | MeshLeaveMessage
   | MeshRemoveMessage
   | MeshRejectMessage
+  | MeshMuteMessage
+  | MeshLockMessage
   | MediaStateMessage
   | OfferMessage
   | AnswerMessage
   | ICECandidateMessage
   | PeerReconnectMessage
   | CallParticipantsAddedMessage
+  | CallJoinRequestMessage
+  | DeviceLinkRequest
+  | DeviceLinkAccept
+  | CallHandoffMessage
+  | FileSignal
   | LiveStreamMessage
   | InviteStartedMessage
   | InviteStoppedMessage
   | ChatSignalMessage
   | DirectMessageSignal
-  | DirectMessageAckSignal;
+  | DirectMessageAckSignal
+  | DmTypingSignal
+  | DmReadSignal
+  | DmReactSignal
+  | DmEditSignal
+  | DmDeleteSignal;
 
 export type MessageType = SignalingMessage['messageType'];
 export type MessageOf<T extends MessageType> = Extract<SignalingMessage, { messageType: T }>;
@@ -216,9 +263,10 @@ export type NegotiationMessage = OfferMessage | AnswerMessage | ICECandidateMess
 const TYPES: ReadonlySet<string> = new Set<MessageType>([
   'presence-heartbeat', 'presence-leave', 'call-invite', 'call-ringing', 'call-accept', 'call-reject',
   'call-cancel', 'call-hangup', 'mesh-join', 'mesh-welcome', 'mesh-heartbeat', 'mesh-leave', 'mesh-remove',
-  'mesh-reject', 'media-state', 'offer', 'answer', 'ice-candidate', 'peer-reconnect', 'call-participants-added', 'chat-message',
+  'mesh-reject', 'mesh-mute', 'mesh-lock', 'media-state', 'offer', 'answer', 'ice-candidate', 'peer-reconnect', 'call-participants-added', 'call-join-request', 'file-signal', 'device-link-request', 'device-link-accept', 'call-handoff', 'chat-message',
   'live-started', 'live-stopped', 'live-audience-updated', 'live-viewer-added', 'live-viewer-removed',
   'live-viewer-joined', 'live-viewer-left', 'direct-message', 'direct-message-ack', 'invite-started', 'invite-stopped',
+  'dm-typing', 'dm-read', 'dm-react', 'dm-edit', 'dm-delete',
 ]);
 
 /** Structural validation of untrusted wire data. */

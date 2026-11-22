@@ -2,7 +2,8 @@ import { Disposer, Emitter } from '../core/emitter';
 import { uuid } from '../core/ids';
 import { createLogger } from '../core/logger';
 import { storage } from '../core/storage';
-import type { SignalingMessage } from '../types/signaling';
+import type { DmReply, FileMeta, SignalingMessage } from '../types/signaling';
+import { isFileMeta } from './FileTransferService';
 import type { IdentityService } from './IdentityService';
 import type { PresenceService } from './PresenceService';
 import type { NotifyResult, PushNotificationService } from './PushNotificationService';
@@ -19,7 +20,7 @@ const log = createLogger('DM');
  *  push-accepted – the push server ACCEPTED a targeted notification (not proof of delivery)
  *  failed     – could not be sent
  */
-export type DmStatus = 'sending' | 'sent' | 'delivered' | 'queued' | 'push-accepted' | 'failed';
+export type DmStatus = 'sending' | 'sent' | 'delivered' | 'read' | 'queued' | 'push-accepted' | 'failed';
 
 export interface DirectMessage {
   messageId: string;
@@ -33,6 +34,17 @@ export interface DirectMessage {
   own: boolean;
   status?: DmStatus;
   statusDetail?: string;
+  /** Quoted message this one answers. */
+  replyTo?: DmReply;
+  /** Attachment (the bytes travel peer-to-peer, see FileTransferService). */
+  file?: FileMeta;
+  /** Emoji reactions by user id (one each). */
+  reactions?: Record<string, string>;
+  edited?: boolean;
+  /** Deleted for everyone – only a tombstone is shown. */
+  deleted?: boolean;
+  /** Incoming: a read receipt was already sent. */
+  readSent?: boolean;
 }
 
 export interface Conversation {
@@ -43,6 +55,8 @@ export interface Conversation {
 }
 
 export const MAX_DM_LENGTH = 2000;
+export const EDIT_WINDOW_MS = 15 * 60_000;
+export const REACTIONS = ['👍', '❤️', '😂', '😮', '😢', '🙏'] as const;
 const ACK_TIMEOUT_MS = 15_000;
 const MAX_PER_CONVERSATION = 300;
 /** Automatic re-sends (same messageId) while the recipient stays online but no ack arrives. */
@@ -72,7 +86,10 @@ export function offlineExplanation(result: NotifyResult, name: string): string {
  * de-duplicates, so a lost ack can never produce a duplicate message.
  */
 export class DirectMessageService {
-  readonly events = new Emitter<{ change: void; incoming: DirectMessage }>();
+  readonly events = new Emitter<{ change: void; incoming: DirectMessage; typing: string }>();
+  private typingFrom = new Map<string, ReturnType<typeof setTimeout>>();
+  private lastTypingSent = 0;
+  private muted = new Set<string>();
   private room: RoomContext | null = null;
   private conversations = new Map<string, Conversation>();
   private seen = new Set<string>();
@@ -100,6 +117,7 @@ export class DirectMessageService {
       this.conversations.set(c.peerId, { ...c, messages });
       for (const m of c.messages) this.seen.add(m.messageId);
     }
+    this.muted = new Set(storage.get<string[]>(`voip.dm.muted.${room.roomId}`, []));
     this.disposer.add(this.signaling.events.on('message', ({ msg }) => this.onMessage(msg)));
     this.disposer.add(this.presence.events.on('change', () => this.flushQueued()));
     this.disposer.add(this.signaling.events.on('status', (s) => s === 'connected' && this.flushQueued()));
@@ -113,6 +131,8 @@ export class DirectMessageService {
     this.ackTimers.forEach(clearTimeout);
     this.ackTimers.clear();
     this.resends.clear();
+    this.typingFrom.forEach(clearTimeout);
+    this.typingFrom.clear();
     this.conversations.clear();
     this.seen.clear();
     this.active = null;
@@ -150,7 +170,7 @@ export class DirectMessageService {
     }
   }
 
-  send(peerId: string, raw: string): DmSendResult {
+  send(peerId: string, raw: string, replyTo?: DmReply): DmSendResult {
     const text = raw.replace(/\r\n?/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
     if (!text) return 'empty';
     if (text.length > MAX_DM_LENGTH) return 'too-long';
@@ -165,6 +185,7 @@ export class DirectMessageService {
       timestamp: Date.now(),
       own: true,
       status: 'sending',
+      ...(replyTo ? { replyTo } : {}),
     };
     this.seen.add(msg.messageId);
     this.append(peerId, msg);
@@ -172,10 +193,36 @@ export class DirectMessageService {
     return 'ok';
   }
 
+  /** Send an attachment (already stored by FileTransferService.offer) with an optional caption. */
+  sendFile(peerId: string, file: FileMeta, caption = ''): DmSendResult {
+    if (!this.room) return 'no-room';
+    const msg: DirectMessage = {
+      messageId: uuid(),
+      roomId: this.room.roomId,
+      peerId,
+      senderId: this.identity.deviceId,
+      senderName: this.identity.displayName,
+      text: caption.trim().slice(0, MAX_DM_LENGTH),
+      timestamp: Date.now(),
+      own: true,
+      status: 'sending',
+      file,
+    };
+    this.seen.add(msg.messageId);
+    this.append(peerId, msg);
+    void this.deliver(msg);
+    return 'ok';
+  }
+
+  /** Did we share this file with this person? (the only people allowed to fetch it) */
+  sharedWith(fileId: string, peerId: string): boolean {
+    return !!this.conversations.get(peerId)?.messages.some((m) => m.own && m.file?.id === fileId && !m.deleted);
+  }
+
   /** Retry a failed/queued message now (same messageId). */
   retry(messageId: string): void {
     const m = this.find(messageId);
-    if (m?.own && m.status !== 'delivered') void this.deliver(m);
+    if (m?.own && !m.deleted && m.status !== 'delivered' && m.status !== 'read') void this.deliver(m);
   }
 
   // ── delivery ─────────────────────────────────────────────────────────────
@@ -193,7 +240,7 @@ export class DirectMessageService {
   private async deliverOnce(m: DirectMessage): Promise<void> {
     const online = this.presence.status(m.peerId) === 'online';
     if (online && this.signaling.isConnected) {
-      this.signaling.send(m.peerId, 'direct-message', { text: m.text, sentAt: m.timestamp }, { messageId: m.messageId });
+      this.signaling.send(m.peerId, 'direct-message', { text: m.text, sentAt: m.timestamp, ...(m.replyTo ? { replyTo: m.replyTo } : {}), ...(m.file ? { file: m.file } : {}) }, { messageId: m.messageId });
       this.setStatus(m, 'sent');
       this.clearAck(m.messageId);
       this.ackTimers.set(
@@ -221,7 +268,7 @@ export class DirectMessageService {
           messageId: m.messageId,
           senderId: m.senderId,
           senderName: m.senderName,
-          text: m.text,
+          text: m.file ? `📎 ${m.file.name}` : m.text,
           roomId: room.roomId,
           roomName: room.roomName,
           timestamp: m.timestamp,
@@ -238,7 +285,7 @@ export class DirectMessageService {
     for (const c of this.conversations.values()) {
       if (this.presence.status(c.peerId) !== 'online') continue;
       for (const m of c.messages) {
-        if (m.own && (m.status === 'queued' || m.status === 'push-accepted' || m.status === 'sending')) {
+        if (m.own && !m.deleted && (m.status === 'queued' || m.status === 'push-accepted' || m.status === 'sending')) {
           log.info(`${c.peerName} is online – delivering queued message`);
           void this.deliver(m);
         }
@@ -255,31 +302,187 @@ export class DirectMessageService {
       this.signaling.send(msg.senderId, 'direct-message-ack', { messageId: msg.messageId }, { receiverSessionId: msg.senderSessionId });
       if (this.seen.has(msg.messageId)) return;
       const text = typeof msg.payload?.text === 'string' ? msg.payload.text.slice(0, MAX_DM_LENGTH * 2).trim() : '';
-      if (!text) return;
-      this.seen.add(msg.messageId);
-      this.presence.learn(msg.senderId, msg.senderName);
-      const m: DirectMessage = {
-        messageId: msg.messageId,
-        roomId: this.room.roomId,
-        peerId: msg.senderId,
-        senderId: msg.senderId,
-        senderName: msg.senderName,
-        text,
-        timestamp: typeof msg.payload.sentAt === 'number' ? msg.payload.sentAt : msg.timestamp,
-        own: false,
-      };
-      this.append(msg.senderId, m, msg.senderName);
-      if (this.active !== msg.senderId) this.conversations.get(msg.senderId)!.unread++;
-      this.persist();
-      this.events.emit('incoming', m);
-      this.events.emit('change', undefined);
+      const file = isFileMeta(msg.payload?.file) ? msg.payload.file : undefined;
+      if (!text && !file) return;
+      this.receive(msg.senderId, msg.senderName, msg.messageId, text, typeof msg.payload.sentAt === 'number' ? msg.payload.sentAt : msg.timestamp, msg.payload.replyTo, file);
     } else if (msg.messageType === 'direct-message-ack') {
       const m = this.find(msg.payload.messageId);
       if (!m?.own || m.peerId !== msg.senderId) return; // only the recipient can confirm
       this.clearAck(m.messageId);
       this.resends.delete(m.messageId);
-      this.setStatus(m, 'delivered');
+      if (m.status !== 'read') this.setStatus(m, 'delivered');
+    } else if (msg.messageType === 'dm-typing') {
+      const peer = msg.senderId;
+      const old = this.typingFrom.get(peer);
+      if (old) clearTimeout(old);
+      if (msg.payload.typing) {
+        this.typingFrom.set(peer, setTimeout(() => (this.typingFrom.delete(peer), this.events.emit('typing', peer)), 5000));
+      } else this.typingFrom.delete(peer);
+      this.events.emit('typing', peer);
+    } else if (msg.messageType === 'dm-read') {
+      for (const id of Array.isArray(msg.payload.messageIds) ? msg.payload.messageIds : []) {
+        const m = this.find(id);
+        if (m?.own && m.peerId === msg.senderId && !m.deleted) {
+          this.clearAck(id);
+          m.status = 'read';
+        }
+      }
+      this.persist();
+      this.events.emit('change', undefined);
+    } else if (msg.messageType === 'dm-react') {
+      const m = this.find(msg.payload.messageId);
+      if (!m || m.peerId !== msg.senderId || m.deleted) return;
+      this.applyReaction(m, msg.senderId, msg.payload.emoji);
+    } else if (msg.messageType === 'dm-edit') {
+      const m = this.find(msg.payload.messageId);
+      const text = typeof msg.payload.text === 'string' ? msg.payload.text.slice(0, MAX_DM_LENGTH).trim() : '';
+      if (!m || m.own || m.peerId !== msg.senderId || m.deleted || !text) return;
+      m.text = text;
+      m.edited = true;
+      this.persist();
+      this.events.emit('change', undefined);
+    } else if (msg.messageType === 'dm-delete') {
+      const m = this.find(msg.payload.messageId);
+      if (!m || m.own || m.peerId !== msg.senderId) return;
+      this.tombstone(m);
     }
+  }
+
+  private receive(senderId: string, senderName: string, messageId: string, text: string, sentAt: number, replyTo?: DmReply, file?: FileMeta): void {
+    if (!this.room) return;
+    this.seen.add(messageId);
+    this.presence.learn(senderId, senderName);
+    this.typingFrom.delete(senderId);
+    const m: DirectMessage = {
+      messageId,
+      roomId: this.room.roomId,
+      peerId: senderId,
+      senderId,
+      senderName,
+      text,
+      timestamp: sentAt,
+      own: false,
+      ...(file ? { file: { id: file.id, name: file.name.slice(0, 120), size: file.size, mime: file.mime.slice(0, 100) } } : {}),
+      ...(replyTo && typeof replyTo.messageId === 'string' ? { replyTo: { messageId: replyTo.messageId, name: String(replyTo.name ?? '').slice(0, 60), text: String(replyTo.text ?? '').slice(0, 120) } } : {}),
+    };
+    this.append(senderId, m, senderName);
+    if (this.active !== senderId) this.conversations.get(senderId)!.unread++;
+    this.persist();
+    this.events.emit('incoming', m);
+    this.events.emit('change', undefined);
+  }
+
+  // ── actions on messages ──────────────────────────────────────────────────
+
+  /** Tell the contact we are typing (throttled; no-op while they are offline). */
+  notifyTyping(peerId: string, typing: boolean): void {
+    if (this.presence.status(peerId) !== 'online' || !this.signaling.isConnected) return;
+    const now = Date.now();
+    if (typing && now - this.lastTypingSent < 3000) return;
+    this.lastTypingSent = typing ? now : 0;
+    this.signaling.send(peerId, 'dm-typing', { typing }, {});
+  }
+
+  isTyping(peerId: string): boolean {
+    return this.typingFrom.has(peerId);
+  }
+
+  /** The reader sees these messages now → read receipts. */
+  markRead(peerId: string): void {
+    const c = this.conversations.get(peerId);
+    if (!c) return;
+    const ids = c.messages.filter((m) => !m.own && !m.readSent && !m.deleted).map((m) => m.messageId);
+    if (!ids.length) return;
+    for (const m of c.messages) if (!m.own) m.readSent = true;
+    this.persist();
+    if (this.signaling.isConnected && this.presence.status(peerId) === 'online') this.signaling.send(peerId, 'dm-read', { messageIds: ids }, {});
+  }
+
+  react(messageId: string, emoji: string | null): void {
+    const m = this.find(messageId);
+    if (!m || m.deleted) return;
+    const me = this.identity.deviceId;
+    const next = emoji && m.reactions?.[me] === emoji ? null : emoji; // tapping your reaction again removes it
+    this.applyReaction(m, me, next);
+    if (this.signaling.isConnected && this.presence.status(m.peerId) === 'online') this.signaling.send(m.peerId, 'dm-react', { messageId, emoji: next }, {});
+  }
+
+  private applyReaction(m: DirectMessage, userId: string, emoji: string | null): void {
+    const r = { ...(m.reactions ?? {}) };
+    if (emoji && (REACTIONS as readonly string[]).includes(emoji)) r[userId] = emoji;
+    else delete r[userId];
+    if (Object.keys(r).length) m.reactions = r;
+    else delete m.reactions;
+    this.persist();
+    this.events.emit('change', undefined);
+  }
+
+  canEdit(m: DirectMessage): boolean {
+    return m.own && !m.deleted && Date.now() - m.timestamp < EDIT_WINDOW_MS;
+  }
+
+  private peerHasIt(m: DirectMessage): boolean {
+    return m.status === 'sent' || m.status === 'delivered' || m.status === 'read';
+  }
+
+  /** Edit my message (within 15 min). Returns false if the contact must be online first. */
+  edit(messageId: string, raw: string): 'ok' | 'offline' | 'invalid' {
+    const m = this.find(messageId);
+    const text = raw.replace(/\r\n?/g, '\n').trim();
+    if (!m || !this.canEdit(m) || !text || text.length > MAX_DM_LENGTH) return 'invalid';
+    const online = this.signaling.isConnected && this.presence.status(m.peerId) === 'online';
+    if (this.peerHasIt(m) && !online) return 'offline';
+    m.text = text;
+    m.edited = true;
+    this.persist();
+    this.events.emit('change', undefined);
+    if (this.peerHasIt(m)) this.signaling.send(m.peerId, 'dm-edit', { messageId, text }, {});
+    return 'ok';
+  }
+
+  deleteForMe(messageId: string): void {
+    for (const c of this.conversations.values()) {
+      const i = c.messages.findIndex((x) => x.messageId === messageId);
+      if (i >= 0) {
+        this.clearAck(messageId);
+        c.messages.splice(i, 1);
+        this.persist();
+        this.events.emit('change', undefined);
+        return;
+      }
+    }
+  }
+
+  /** Remove my message for both sides. Returns false if the contact must be online first. */
+  deleteForEveryone(messageId: string): boolean {
+    const m = this.find(messageId);
+    if (!m?.own) return false;
+    const online = this.signaling.isConnected && this.presence.status(m.peerId) === 'online';
+    if (this.peerHasIt(m) && !online) return false;
+    this.clearAck(messageId);
+    if (this.peerHasIt(m)) this.signaling.send(m.peerId, 'dm-delete', { messageId }, {});
+    this.tombstone(m);
+    return true;
+  }
+
+  private tombstone(m: DirectMessage): void {
+    m.deleted = true;
+    m.text = '';
+    delete m.reactions;
+    delete m.replyTo;
+    this.persist();
+    this.events.emit('change', undefined);
+  }
+
+  isMuted(peerId: string): boolean {
+    return this.muted.has(peerId);
+  }
+
+  setMuted(peerId: string, on: boolean): void {
+    if (on) this.muted.add(peerId);
+    else this.muted.delete(peerId);
+    if (this.room) storage.set(`voip.dm.muted.${this.room.roomId}`, [...this.muted]);
+    this.events.emit('change', undefined);
   }
 
   // ── helpers ──────────────────────────────────────────────────────────────

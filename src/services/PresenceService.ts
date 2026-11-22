@@ -1,6 +1,7 @@
 import { Emitter } from '../core/emitter';
 import { createLogger } from '../core/logger';
 import { storage } from '../core/storage';
+import { isHeadless, isNative, native } from '../native/native';
 import type { AppConfig } from '../config';
 import type { PresenceMessage, SignalingMessage } from '../types/signaling';
 import type { PresenceStatus, UserPresence } from '../types/state';
@@ -25,6 +26,10 @@ interface UserRecord {
   leftAt: number | null;
   explicitLeaveSessions: Set<string>;
   busy: boolean;
+  away: boolean;
+  dnd: boolean;
+  callId?: string;
+  phone: boolean;
   pushEnabled: boolean;
 }
 
@@ -39,6 +44,8 @@ export class PresenceService {
   readonly events = new Emitter<{ change: void }>();
   private users = new Map<string, UserRecord>();
   private busy = false;
+  private callId: string | undefined;
+  private phone = false;
   private pushEnabled = false;
   private timers = new Set<ReturnType<typeof setTimeout>>();
   private heartbeat: ReturnType<typeof setInterval> | null = null;
@@ -87,6 +94,7 @@ export class PresenceService {
       this.sendHeartbeat();
       this.events.emit('change', undefined); // re-evaluate staleness
     }, this.config.presence.heartbeatMs);
+    this.offSignal.push(native.events.on('active', () => this.sendHeartbeat()));
     window.addEventListener('pagehide', this.onPageHide);
     document.addEventListener('visibilitychange', this.onVisible);
     this.events.emit('change', undefined);
@@ -109,6 +117,7 @@ export class PresenceService {
     document.removeEventListener('visibilitychange', this.onVisible);
     this.users.clear();
     this.busy = false;
+    this.callId = undefined;
     this.room = null;
     this.events.emit('change', undefined);
   }
@@ -117,10 +126,29 @@ export class PresenceService {
     return `${KNOWN_KEY}.${this.room?.roomId ?? ''}`;
   }
 
-  setBusy(busy: boolean): void {
-    if (this.busy === busy) return;
+  setBusy(busy: boolean, callId?: string): void {
+    const id = busy ? callId : undefined;
+    if (this.busy === busy && this.callId === id) return;
     this.busy = busy;
+    this.callId = id;
     this.sendHeartbeat();
+  }
+
+  /** The phone is in an operator / other-app call (Android audio mode). */
+  setExternalCall(on: boolean): void {
+    if (this.phone === on) return;
+    this.phone = on;
+    this.sendHeartbeat();
+  }
+
+  get externalCall(): boolean {
+    return this.phone;
+  }
+
+  /** Someone (not us) who is in this call right now, if anyone. */
+  inCallWith(callId: string): string | null {
+    for (const u of this.users.values()) if (u.callId === callId && u.busy && u.clients.size > 0) return u.deviceId;
+    return null;
   }
 
   setPushEnabled(enabled: boolean): void {
@@ -197,6 +225,10 @@ export class PresenceService {
       name: u.name || 'Unknown',
       status: this.deriveStatus(u),
       busy: u.busy && u.clients.size > 0,
+      onCall: (u.busy || u.phone) && u.clients.size > 0,
+      callId: u.busy && u.clients.size > 0 ? u.callId : undefined,
+      away: u.away,
+      dnd: u.dnd,
       pushEnabled: u.pushEnabled,
       lastSeen: u.lastSeen,
     };
@@ -256,6 +288,8 @@ export class PresenceService {
     const explicit = sessionId !== undefined && u.explicitLeaveSessions.delete(sessionId);
     u.leftAt = explicit ? Date.now() - this.config.presence.offlineGraceMs : Date.now();
     u.busy = false;
+    u.phone = false;
+    u.callId = undefined;
     log.info(explicit ? `${u.name} offline` : `${u.name} left lobby – offline after grace period`);
     this.events.emit('change', undefined);
     if (!explicit) {
@@ -278,6 +312,10 @@ export class PresenceService {
     if (p.messageType === 'presence-heartbeat') {
       u.lastHeartbeat = Date.now();
       u.busy = p.payload.busy;
+      u.callId = p.payload.callId;
+      u.phone = p.payload.phone === true;
+      u.away = p.payload.away === true;
+      u.dnd = p.payload.dnd === true;
       if (u.clients.size === 0 && u.leftAt !== null) u.leftAt = null; // heard from them again
     } else {
       u.explicitLeaveSessions.add(p.senderSessionId);
@@ -287,10 +325,29 @@ export class PresenceService {
     this.events.emit('change', undefined);
   }
 
+  /** Not looking at the app: Android in the background / running without a screen, or a hidden tab. */
+  private isAway(): boolean {
+    if (isHeadless) return true;
+    if (isNative) return !native.foreground;
+    return document.visibilityState === 'hidden';
+  }
+
+  /** Provided by the app: is do-not-disturb on? (shown to contacts as "busy"). */
+  dndProbe: () => boolean = () => false;
+
+  private dnd(): boolean {
+    return this.dndProbe();
+  }
+
+  /** Re-send our state now (e.g. do-not-disturb toggled). */
+  announce(): void {
+    this.sendHeartbeat();
+  }
+
   private sendHeartbeat(): void {
     if (!this.identity.isRegistered) return;
     if (!this.room) return;
-    this.signaling.broadcast(lobbyRoom(this.room.roomKey), 'presence-heartbeat', { busy: this.busy, pushEnabled: this.pushEnabled });
+    this.signaling.broadcast(lobbyRoom(this.room.roomKey), 'presence-heartbeat', { busy: this.busy, pushEnabled: this.pushEnabled, away: this.isAway(), dnd: this.dnd(), ...(this.callId ? { callId: this.callId } : {}), phone: this.phone });
   }
 
   private sendLeave(): void {
@@ -307,6 +364,9 @@ export class PresenceService {
       leftAt: null,
       explicitLeaveSessions: new Set(),
       busy: false,
+      away: false,
+      dnd: false,
+      phone: false,
       pushEnabled: false,
     };
   }

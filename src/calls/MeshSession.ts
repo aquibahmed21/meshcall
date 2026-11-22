@@ -74,6 +74,7 @@ export class MeshSession {
     peerState: { remoteId: string; state: PeerConnectionState };
     left: { deviceId: string; name: string; role: MeshRole; reason: string };
     removed: void;
+    hostMuted: void;
     rejected: { reason: string };
     stats: { report: StatsReport; usage: DataUsageSnapshot };
     activeSpeaker: string | null;
@@ -90,6 +91,7 @@ export class MeshSession {
   private readonly disposer = new Disposer();
   private readonly banned = new Set<string>();
   private allowList: Set<string> | null;
+  private _locked = false;
   private readonly speaker: ActiveSpeakerDetector;
   private unsubscribeRoom: (() => void) | null = null;
   private signalingUpSince = Date.now();
@@ -299,6 +301,15 @@ export class MeshSession {
       case 'mesh-remove':
         this.onRemove(msg);
         break;
+      case 'mesh-mute':
+        if (msg.senderId === this.opts.hostId && (!msg.payload.targetId || msg.payload.targetId === this.deps.identity.deviceId)) this.events.emit('hostMuted', undefined);
+        break;
+      case 'mesh-lock':
+        if (msg.senderId === this.opts.hostId) {
+          this._locked = msg.payload.locked === true;
+          this.events.emit('participants', undefined);
+        }
+        break;
       case 'mesh-reject':
         // Only an authoritative member can refuse us: the streamer (live), the other party (1:1)
         // or the host (group). A reject from an ordinary group member (e.g. a race where it has
@@ -320,6 +331,28 @@ export class MeshSession {
       default:
         break;
     }
+  }
+
+  get locked(): boolean {
+    return this._locked;
+  }
+
+  private get isHost(): boolean {
+    return this.opts.hostId === this.deps.identity.deviceId;
+  }
+
+  /** Host-only: switch everybody's (or one person's) microphone off. */
+  muteRemote(targetId?: string): void {
+    if (!this.isHost) return;
+    this.deps.signaling.broadcast(meshRoom(this.opts.callId), 'mesh-mute', targetId ? { targetId } : {}, { callId: this.opts.callId });
+  }
+
+  /** Host-only: lock the call – nobody new can join (people already inside stay). */
+  setLocked(locked: boolean): void {
+    if (!this.isHost) return;
+    this._locked = locked;
+    this.deps.signaling.broadcast(meshRoom(this.opts.callId), 'mesh-lock', { locked }, { callId: this.opts.callId });
+    this.events.emit('participants', undefined);
   }
 
   /** Host-only: remove a participant from a group call. */
@@ -356,7 +389,7 @@ export class MeshSession {
     if (!this.allowed(id, payload.invitedBy, msg.messageType === 'mesh-welcome')) {
       if (isJoin) {
         log.warn(`Rejecting join from ${msg.senderName}: not allowed`);
-        this.reply(msg, 'mesh-reject', { reason: 'not-allowed' });
+        this.reply(msg, 'mesh-reject', { reason: this._locked ? 'locked' : 'not-allowed' });
       }
       return;
     }
@@ -543,6 +576,7 @@ export class MeshSession {
    */
   private allowed(deviceId: string, invitedBy?: string, isWelcome = false): boolean {
     if (this.banned.has(deviceId)) return false;
+    if (this._locked && this.opts.kind === 'group' && deviceId !== this.opts.hostId && !this.participants.has(deviceId)) return false;
     if (this.opts.kind === 'live') {
       if (this.opts.role === 'broadcaster') return this.opts.authorize ? this.opts.authorize(deviceId) : true;
       return deviceId === this.opts.hostId;
