@@ -246,7 +246,14 @@ export class ContactsScreen {
       type: 'button',
       title: 'Message',
       html: icons.chat,
-      onclick: (e: Event) => { e.stopPropagation(); this.opts.onMessage(c); },
+      onclick: (e: Event) => {
+        e.stopPropagation();
+        // Auto-save contact if messaging a search result (not yet in local contacts)
+        if (!this.opts.contacts.has(c.phone)) {
+          this.opts.contacts.add(c.phone, c.name);
+        }
+        this.opts.onMessage(c);
+      },
     });
 
     return h(
