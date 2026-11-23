@@ -226,7 +226,13 @@ export class ContactsService {
     const registered = await this.lookup(phones);
     for (const r of registered) {
       const deviceName = serverPhoneToDeviceName.get(r.phone) ?? r.name;
-      this._contacts.set(r.phone, { ...r, name: deviceName, source: 'device' });
+      const existing = this._contacts.get(r.phone);
+      // Merge: keep existing contact if manually added, but update name/online status
+      if (existing && existing.source === 'manual') {
+        this._contacts.set(r.phone, { ...existing, name: deviceName, online: r.online });
+      } else {
+        this._contacts.set(r.phone, { ...r, name: deviceName, source: 'device' });
+      }
     }
     this.persist();
     this.events.emit('change', undefined);
