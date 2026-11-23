@@ -1611,10 +1611,11 @@ select {
     border-right: 0;
     padding-bottom: calc(var(--nav) + var(--safe-bottom));
   }
-  .app[data-view='call'] .sidebar {
+  .app[data-view='call'] .sidebar,
+  .app[data-view='contacts'] .sidebar {
     display: none;
   }
-  .app:not([data-view='call']) .stage {
+  .app:not([data-view='call']):not([data-view='contacts']) .stage {
     display: none;
   }
   .bottom-nav {
@@ -1644,7 +1645,8 @@ select {
   .bottom-nav button[aria-current='page'] {
     color: var(--accent);
   }
-  .app:not(.in-call) .stage {
+  .app:not(.in-call)[data-view='contacts'] .stage,
+  .app:not(.in-call)[data-view='call'] .stage {
     padding-bottom: calc(var(--nav) + var(--safe-bottom));
   }
   /* In an active call the call view owns the whole screen */

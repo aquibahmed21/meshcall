@@ -18,10 +18,11 @@ import { Sidebar } from './views/Sidebar';
 import { Toasts } from './views/Toasts';
 import { renderEnableNotificationsCard } from './views/NotificationSettings';
 
-type MobileView = 'people' | 'live' | 'call';
+type MobileView = 'people' | 'live' | 'call' | 'contacts';
 
 export interface UIManagerOptions {
   onLeaveRoom: () => void;
+  onLogout: () => void;
 }
 
 /**
@@ -195,6 +196,18 @@ export class UIManager {
     this.onCallState();
   }
 
+  /** Mount a contacts screen element into the stage and switch to the contacts view. */
+  showContacts(el: HTMLElement): void {
+    this.stage.replaceChildren(el);
+    this.setView('contacts');
+  }
+
+  /** Leave the contacts view and return to the people pane. */
+  hideContacts(): void {
+    this.stage.replaceChildren(this.idle);
+    this.setView('people');
+  }
+
   /** Header identity: avatar with a presence dot and my name. */
   private renderProfile(): void {
     const { identity, signaling, rooms } = this.app;
@@ -247,17 +260,15 @@ export class UIManager {
         item(icons.bellOff, isDndActive(this.app.settings.get()) ? 'DND on' : 'DND', () => this.app.settings.update({ dnd: !this.app.settings.get().dnd }), this.app.settings.get().dnd ? 'on' : ''),
         item(icons.settings, 'Settings', () => openSettings(this.app, native.missingPermissions > 0 ? 'device' : undefined), native.missingPermissions > 0 ? 'alert-dot' : ''),
         inst === 'available' || inst === 'ios-manual' ? item(icons.download, 'Install app', () => this.install()) : null,
-        room
-          ? item(
-              icons.exit,
-              'Leave room',
-              async () => {
-                if (this.app.calls.inCall && !(await confirmDialog({ title: 'Leave room?', message: 'This ends your current call.', confirmLabel: 'Leave', danger: true }))) return;
-                this.opts.onLeaveRoom();
-              },
-              'danger',
-            )
-          : null,
+        item(
+          icons.exit,
+          'Logout',
+          async () => {
+            if (this.app.calls.inCall && !(await confirmDialog({ title: 'Logout?', message: 'This ends your current call.', confirmLabel: 'Logout', danger: true }))) return;
+            this.opts.onLogout();
+          },
+          'danger',
+        ),
       ),
     );
   }
@@ -542,7 +553,8 @@ export class UIManager {
     this.view = view;
     this.root.dataset.view = view;
     // Mobile: the bottom tabs choose the sidebar pane (Call tab without a call = call history).
-    if (this.mobile.matches) this.sidebar.setPane(view === 'call' ? 'calls' : view);
+    // Contacts view has no matching sidebar pane — keep current pane.
+    if (this.mobile.matches && view !== 'contacts') this.sidebar.setPane(view === 'call' ? 'calls' : view);
     for (const b of this.nav.querySelectorAll('button')) b.setAttribute('aria-current', b.dataset.view === view ? 'page' : 'false');
     this.syncCallBadge();
     this.renderBanner();

@@ -56,15 +56,20 @@ async function boot(): Promise<void> {
     ui?.callUser(ctx.callerId, ctx.callType === 'video' ? 'video' : 'audio');
   };
 
-  /** Show the main UIManager after joining the fixed room. */
+  const doLogout = () => {
+    app.identity.clearAuth();
+    app.signaling.stop();
+    // Reload the page to clear all in-memory state and show the login screen cleanly.
+    window.location.reload();
+  };
+
+  /** Show the main UIManager. UIManager is created once and kept alive. */
   const showMainUI = (ctx?: LaunchContext) => {
     document.title = 'MeshCall';
     if (!ui) {
       ui = new UIManager(app, mount, {
-        onLeaveRoom: () => {
-          // In WhatsApp mode there's nothing to “leave” to — just go back to contacts.
-          showContactsScreen();
-        },
+        onLeaveRoom: () => showContactsScreen(),
+        onLogout: doLogout,
       });
     } else {
       ui.attach(mount);
@@ -82,40 +87,36 @@ async function boot(): Promise<void> {
     else if (ctx?.kind === 'chat-message') ui?.openConversation(ctx.senderId, ctx.messageId);
   };
 
-  /** Show the contacts screen (and join the fixed room in the background if not yet joined). */
+  /** Show the contacts screen inside UIManager's stage so the topbar and bottom nav stay visible. */
   let contactsScreen: ContactsScreen | null = null;
   const showContactsScreen = () => {
     document.title = 'MeshCall';
-    if (contactsScreen) return; // already shown
+    // Ensure UIManager is mounted first so topbar + bottom-nav are always visible.
+    if (!ui) showMainUI();
+    if (contactsScreen) { ui?.showContacts(contactsScreen.el); return; }
     contactsScreen = new ContactsScreen({
       app,
       contacts: app.contacts,
       onCall: (contact, media) => {
-        contactsScreen?.destroy();
-        contactsScreen = null;
+        ui?.hideContacts();
         const deviceId = app.presence.deviceIdForPhone(contact.phone);
         if (deviceId) {
-          showMainUI();
           ui?.callUser(deviceId, media);
         } else {
-          showMainUI();
           ui?.toast?.('warn', `${contact.name} is not currently online`);
         }
       },
       onMessage: (contact) => {
-        contactsScreen?.destroy();
-        contactsScreen = null;
+        ui?.hideContacts();
         const deviceId = app.presence.deviceIdForPhone(contact.phone);
         if (deviceId) {
-          showMainUI();
           ui?.openConversation(deviceId);
         } else {
-          showMainUI();
-          ui?.toast?.('warn', `${contact.name} is not currently online`);
+          ui?.openConversation(app.presence.deviceIdForPhone(contact.phone) ?? contact.phone);
         }
       },
     });
-    mount.replaceChildren(contactsScreen.el);
+    ui?.showContacts(contactsScreen.el);
     void contactsScreen.init();
   };
 
@@ -179,10 +180,10 @@ async function boot(): Promise<void> {
   // If an incoming call arrives while the contacts screen is showing (no push notification,
   // e.g. a new user who hasn't set up push yet), switch to UIManager so the call dialog appears.
   app.calls.events.on('state', (s) => {
-    if (s?.status === 'ringing' && s.direction === 'incoming' && !ui) {
-      contactsScreen?.destroy();
-      contactsScreen = null;
-      showMainUI();
+    if (s?.status === 'ringing' && s.direction === 'incoming') {
+      // If still on contacts screen, hide it so the incoming call dialog is visible.
+      if (ui) ui.hideContacts();
+      else showMainUI();
     }
   });
 
@@ -194,13 +195,7 @@ async function boot(): Promise<void> {
     if (authRetrying) {
       // Second failure even after URL refresh → token truly invalid, force re-login.
       authRetrying = false;
-      app.identity.clearAuth();
-      app.signaling.stop();
-      contactsScreen?.destroy(); contactsScreen = null;
-      renderOnboarding(mount, app.config.serverUrl, (result) => {
-        app.identity.setAuth(result.token, result.name, result.phone, result.role);
-        void app.signaling.start();
-      });
+      doLogout();
       return;
     }
     // First failure: re-fetch the pointer URL in case the tunnel changed, then retry.
@@ -263,7 +258,7 @@ async function boot(): Promise<void> {
       }
       lastBack = now;
       contactsScreen?.setStatus('Press back again to exit');
-      setTimeout(() => contactsScreen?.setStatus(''), 2000);
+      setTimeout(() => contactsScreen?.setStatus?.(''), 2000);
       return true;
     };
   }
