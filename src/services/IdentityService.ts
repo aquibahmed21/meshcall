@@ -8,6 +8,7 @@ interface StoredIdentity {
   displayName: string;
   phone: string;
   token: string;
+  role: string;
 }
 
 /**
@@ -23,6 +24,7 @@ export class IdentityService {
   private name: string;
   private _phone: string;
   private _token: string;
+  private _role: string;
 
   constructor() {
     const stored = storage.get<StoredIdentity | null>(KEY, null);
@@ -30,12 +32,15 @@ export class IdentityService {
     this.name = stored?.displayName?.trim() ?? '';
     this._phone = stored?.phone ?? '';
     this._token = stored?.token ?? '';
+    this._role = stored?.role ?? 'user';
     this.persist();
   }
 
   get displayName(): string { return this.name; }
   get phone(): string { return this._phone; }
   get token(): string { return this._token; }
+  get role(): string { return this._role; }
+  get isAdmin(): boolean { return this._role === 'admin' || this._role === 'root'; }
 
   /** True after the user has entered their name (also after setAuth). */
   get isRegistered(): boolean { return this.name.length > 0; }
@@ -44,10 +49,11 @@ export class IdentityService {
   get isLoggedIn(): boolean { return !!this._token && this.name.length > 0; }
 
   /** Called after a successful register/login response from the server. */
-  setAuth(token: string, name: string, phone: string): void {
+  setAuth(token: string, name: string, phone: string, role = 'user'): void {
     this._token = token;
     this.name = name.replace(/\s+/g, ' ').trim().slice(0, 40);
     this._phone = phone;
+    this._role = role || 'user';
     this.persist();
   }
 
@@ -64,6 +70,7 @@ export class IdentityService {
     this._token = '';
     this._phone = '';
     this.name = '';
+    this._role = 'user';
     this.persist();
   }
 
@@ -73,6 +80,7 @@ export class IdentityService {
       displayName: this.name,
       phone: this._phone,
       token: this._token,
+      role: this._role,
     } satisfies StoredIdentity);
   }
 }

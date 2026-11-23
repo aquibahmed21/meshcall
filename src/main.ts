@@ -176,13 +176,23 @@ async function boot(): Promise<void> {
   app.notifications.events.on('pushCall', (ctx) => handleLaunchContext(ctx, 'push'));
   app.notifications.events.on('pushChat', (ctx) => handleLaunchContext(ctx, 'push'));
 
+  // If an incoming call arrives while the contacts screen is showing (no push notification,
+  // e.g. a new user who hasn't set up push yet), switch to UIManager so the call dialog appears.
+  app.calls.events.on('state', (s) => {
+    if (s?.status === 'ringing' && s.direction === 'incoming' && !ui) {
+      contactsScreen?.destroy();
+      contactsScreen = null;
+      showMainUI();
+    }
+  });
+
   // If the server rejects our token (expired / revoked), show the sign-in screen.
   app.signaling.events.on('authFailed', () => {
     app.identity.clearAuth();
     app.signaling.stop();
     contactsScreen?.destroy(); contactsScreen = null;
     renderOnboarding(mount, app.config.serverUrl, (result) => {
-      app.identity.setAuth(result.token, result.name, result.phone);
+      app.identity.setAuth(result.token, result.name, result.phone, result.role);
       void app.signaling.start();
     });
   });
@@ -205,9 +215,25 @@ async function boot(): Promise<void> {
     }
   };
 
+  // Double-press back to exit (while on the contacts/root screen).
+  if (isNative) {
+    let lastBack = 0;
+    native.onRootBack = () => {
+      const now = Date.now();
+      if (now - lastBack < 2000) {
+        native.exitApp();
+        return true;
+      }
+      lastBack = now;
+      contactsScreen?.setStatus('Press back again to exit');
+      setTimeout(() => contactsScreen?.setStatus(''), 2000);
+      return true;
+    };
+  }
+
   if (!app.identity.isLoggedIn) {
     renderOnboarding(mount, app.config.serverUrl, (result) => {
-      app.identity.setAuth(result.token, result.name, result.phone);
+      app.identity.setAuth(result.token, result.name, result.phone, result.role);
       void launch();
     });
   } else {

@@ -5,6 +5,7 @@ export interface AuthResult {
   token: string;
   name: string;
   phone: string;
+  role: string;
 }
 
 /**
@@ -108,7 +109,7 @@ export function renderOnboarding(
         if (!res.ok) {
           throw new Error(data.error || `Server error ${res.status}`);
         }
-        onDone({ token: data.token, name: data.name, phone: data.phone });
+        onDone({ token: data.token, name: data.name, phone: data.phone, role: data.role ?? 'user' });
       } catch (err) {
         const msg = err instanceof Error ? err.message : 'Network error – check the server URL';
         errorEl.textContent = msg;

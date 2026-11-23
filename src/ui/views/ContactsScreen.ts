@@ -2,6 +2,7 @@ import { h } from '../dom';
 import { icons } from '../icons';
 import type { AppContext } from '../../app';
 import type { ContactsService, Contact } from '../../services/ContactsService';
+import { AdminScreen } from './AdminScreen';
 import { isNative } from '../../native/native';
 
 export interface ContactsScreenOptions {
@@ -38,6 +39,17 @@ export class ContactsScreen {
     this.statusEl = h('p', { class: 'contacts-status' }, '');
     this.listEl = h('div', { class: 'contacts-list' });
 
+    const adminBtn = opts.app.identity.isAdmin
+      ? h('button', {
+          class: 'icon-btn',
+          type: 'button',
+          title: 'Admin',
+          'aria-label': 'Admin panel',
+          html: icons.settings,
+          onclick: () => this.showAdmin(),
+        })
+      : null;
+
     const header = h(
       'div',
       { class: 'contacts-header' },
@@ -53,6 +65,7 @@ export class ContactsScreen {
         html: icons.users,
         onclick: () => void this.syncDevice(),
       }),
+      ...(adminBtn ? [adminBtn] : []),
     );
 
     this.el = h(
@@ -86,6 +99,16 @@ export class ContactsScreen {
     this.off = null;
   }
 
+  private showAdmin(): void {
+    const mount = this.el.parentElement;
+    if (!mount) return;
+    const admin = new AdminScreen(this.opts.app, () => {
+      mount.replaceChildren(this.el);
+    });
+    mount.replaceChildren(admin.el);
+    void admin.init();
+  }
+
   private scheduleSearch(): void {
     if (this.searchTimer) clearTimeout(this.searchTimer);
     this.searchTimer = setTimeout(() => void this.doSearch(), 300);
@@ -115,7 +138,7 @@ export class ContactsScreen {
     setTimeout(() => this.setStatus(''), 3000);
   }
 
-  private setStatus(msg: string): void {
+  setStatus(msg: string): void {
     this.statusEl.textContent = msg;
     this.statusEl.hidden = !msg;
   }
