@@ -34,11 +34,12 @@ export interface PermissionStatus {
   microphone: PermState;
   camera: PermState;
   bluetooth: PermState;
+  contacts: PermState;
   notifications: PermState;
   fullScreen: PermState;
   battery: PermState;
 }
-const ALL_GRANTED: PermissionStatus = { microphone: 'granted', camera: 'granted', bluetooth: 'granted', notifications: 'granted', fullScreen: 'granted', battery: 'granted' };
+const ALL_GRANTED: PermissionStatus = { microphone: 'granted', camera: 'granted', bluetooth: 'granted', contacts: 'granted', notifications: 'granted', fullScreen: 'granted', battery: 'granted' };
 
 interface NativeBridge {
   startService(o: { inCall: boolean; video: boolean; text?: string }): Promise<void>;

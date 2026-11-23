@@ -26,7 +26,8 @@ import com.getcapacitor.PermissionState;
         @Permission(alias = "notifications", strings = {Manifest.permission.POST_NOTIFICATIONS}),
         @Permission(alias = "camera", strings = {Manifest.permission.CAMERA}),
         @Permission(alias = "microphone", strings = {Manifest.permission.RECORD_AUDIO}),
-        @Permission(alias = "bluetooth", strings = {Manifest.permission.BLUETOOTH_CONNECT})
+        @Permission(alias = "bluetooth", strings = {Manifest.permission.BLUETOOTH_CONNECT}),
+        @Permission(alias = "contacts", strings = {Manifest.permission.READ_CONTACTS})
     }
 )
 public class MeshCallPlugin extends Plugin {
@@ -336,6 +337,37 @@ public class MeshCallPlugin extends Plugin {
     }
 
     /** Everything MeshCall needs, in one call: granted | denied | prompt. */
+    @PluginMethod
+    public void permissionStatus(PluginCall call) {
+        JSObject o = new JSObject();
+        o.put("microphone", runtimeState("microphone", 23));
+        o.put("camera", runtimeState("camera", 23));
+        o.put("bluetooth", runtimeState("bluetooth", 31));
+        o.put("contacts", runtimeState("contacts", 23));
+        o.put("notifications", notificationState());
+        boolean fs = true;
+        if (Build.VERSION.SDK_INT >= 34) fs = getContext().getSystemService(android.app.NotificationManager.class).canUseFullScreenIntent();
+        o.put("fullScreen", fs ? "granted" : "denied");
+        PowerManager pm = (PowerManager) getContext().getSystemService(Context.POWER_SERVICE);
+        o.put("battery", pm.isIgnoringBatteryOptimizations(getContext().getPackageName()) ? "granted" : "denied");
+        call.resolve(o);
+    }
+
+    /** Ask for the runtime permissions that are not granted yet (system dialogs, one after another). */
+    @PluginMethod
+    public void requestRuntimePermissions(PluginCall call) {
+        java.util.List<String> need = new java.util.ArrayList<>();
+        if (!"granted".equals(runtimeState("microphone", 23))) need.add("microphone");
+        if (!"granted".equals(runtimeState("camera", 23))) need.add("camera");
+        if (!"granted".equals(runtimeState("bluetooth", 31))) need.add("bluetooth");
+        if (!"granted".equals(runtimeState("contacts", 23))) need.add("contacts");
+        if (Build.VERSION.SDK_INT >= 33 && getPermissionState("notifications") != PermissionState.GRANTED) need.add("notifications");
+        if (need.isEmpty()) {
+            permissionStatus(call);
+            return;
+        }
+        requestPermissionForAliases(need.toArray(new String[0]), call, "runtimePermissionsResult");
+    }
     private static String deviceName(int type) {
         switch (type) {
             case android.media.AudioDeviceInfo.TYPE_BUILTIN_EARPIECE: return "earpiece";
@@ -535,41 +567,6 @@ public class MeshCallPlugin extends Plugin {
         JSObject o = new JSObject();
         o.put("route", route);
         call.resolve(o);
-    }
-
-    @PluginMethod
-    public void permissionStatus(PluginCall call) {
-        JSObject o = new JSObject();
-        o.put("microphone", runtimeState("microphone", 23));
-        o.put("camera", runtimeState("camera", 23));
-        o.put("bluetooth", runtimeState("bluetooth", 31));
-        o.put("notifications", notificationState());
-        boolean fs = true;
-        if (Build.VERSION.SDK_INT >= 34) fs = getContext().getSystemService(android.app.NotificationManager.class).canUseFullScreenIntent();
-        o.put("fullScreen", fs ? "granted" : "denied");
-        PowerManager pm = (PowerManager) getContext().getSystemService(Context.POWER_SERVICE);
-        o.put("battery", pm.isIgnoringBatteryOptimizations(getContext().getPackageName()) ? "granted" : "denied");
-        call.resolve(o);
-    }
-
-    /** Ask for the runtime permissions that are not granted yet (system dialogs, one after another). */
-    @PluginMethod
-    public void requestRuntimePermissions(PluginCall call) {
-        java.util.List<String> need = new java.util.ArrayList<>();
-        if (!"granted".equals(runtimeState("microphone", 23))) need.add("microphone");
-        if (!"granted".equals(runtimeState("camera", 23))) need.add("camera");
-        if (!"granted".equals(runtimeState("bluetooth", 31))) need.add("bluetooth");
-        if (Build.VERSION.SDK_INT >= 33 && getPermissionState("notifications") != PermissionState.GRANTED) need.add("notifications");
-        if (need.isEmpty()) {
-            permissionStatus(call);
-            return;
-        }
-        requestPermissionForAliases(need.toArray(new String[0]), call, "runtimePermissionsResult");
-    }
-
-    @PermissionCallback
-    private void runtimePermissionsResult(PluginCall call) {
-        permissionStatus(call);
     }
 
     @PluginMethod
