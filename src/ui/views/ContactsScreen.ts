@@ -26,6 +26,7 @@ export class ContactsScreen {
   private searchTimer: ReturnType<typeof setTimeout> | null = null;
   private syncDone = false;
   private off: (() => void) | null = null;
+  private offPresence: (() => void) | null = null;
 
   constructor(private readonly opts: ContactsScreenOptions) {
     this.searchInput = h('input', {
@@ -81,6 +82,10 @@ export class ContactsScreen {
     this.searchInput.addEventListener('search', () => this.doSearch());
 
     this.off = opts.contacts.events.on('change', () => this.renderContacts());
+
+    // Live online status: whenever presence changes, sync online flags from PresenceService
+    // so the contacts list updates the moment someone comes online or goes offline.
+    this.offPresence = opts.app.presence.events.on('change', () => this.syncOnlineFromPresence());
   }
 
   /** Call once to trigger initial render + device sync. */
@@ -97,6 +102,30 @@ export class ContactsScreen {
   destroy(): void {
     this.off?.();
     this.off = null;
+    this.offPresence?.();
+    this.offPresence = null;
+  }
+
+  /** Update contact online flags from live PresenceService data and re-render. */
+  private syncOnlineFromPresence(): void {
+    let changed = false;
+    const contacts = this.opts.contacts.contacts;
+    for (const c of contacts) {
+      const deviceId = this.opts.app.presence.deviceIdForPhone(c.phone);
+      const online = deviceId ? this.opts.app.presence.status(deviceId) === 'online' : false;
+      if (online !== c.online) {
+        // Update the contact's online flag in the service.
+        (c as { online: boolean }).online = online;
+        changed = true;
+      }
+    }
+    // Also sync search results if a search is active.
+    for (const c of this.searchResults) {
+      const deviceId = this.opts.app.presence.deviceIdForPhone(c.phone);
+      const online = deviceId ? this.opts.app.presence.status(deviceId) === 'online' : false;
+      if (online !== c.online) { (c as { online: boolean }).online = online; changed = true; }
+    }
+    if (changed) this.renderContacts();
   }
 
   private showAdmin(): void {
@@ -193,11 +222,11 @@ export class ContactsScreen {
       html: icons.cam,
       onclick: (e: Event) => { e.stopPropagation(); this.opts.onCall(c, 'video'); },
     });
+    // Messages can be sent to offline users — delivered via push when they reconnect.
     const msgBtn = h('button', {
       class: 'btn btn-sm',
       type: 'button',
-      disabled: !c.online,
-      title: c.online ? 'Message' : 'User is offline',
+      title: 'Message',
       html: icons.chat,
       onclick: (e: Event) => { e.stopPropagation(); this.opts.onMessage(c); },
     });
