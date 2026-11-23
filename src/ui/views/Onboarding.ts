@@ -22,7 +22,7 @@ export function renderOnboarding(
     const phoneInput = h('input', {
       type: 'tel',
       id: 'ob-phone',
-      placeholder: '+91 98765 43210',
+      placeholder: '9876543210',
       autocomplete: 'tel',
       required: true,
     }) as HTMLInputElement;

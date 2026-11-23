@@ -186,15 +186,52 @@ async function boot(): Promise<void> {
     }
   });
 
-  // If the server rejects our token (expired / revoked), show the sign-in screen.
+  // On auth failure: first try fetching a fresh server URL (the Cloudflare tunnel may have
+  // changed) and retry. Only show the login screen if the token is genuinely rejected on
+  // the NEW URL too (i.e. the secret changed, e.g. server wiped its data).
+  let authRetrying = false;
   app.signaling.events.on('authFailed', () => {
-    app.identity.clearAuth();
-    app.signaling.stop();
-    contactsScreen?.destroy(); contactsScreen = null;
-    renderOnboarding(mount, app.config.serverUrl, (result) => {
-      app.identity.setAuth(result.token, result.name, result.phone, result.role);
+    if (authRetrying) {
+      // Second failure even after URL refresh → token truly invalid, force re-login.
+      authRetrying = false;
+      app.identity.clearAuth();
+      app.signaling.stop();
+      contactsScreen?.destroy(); contactsScreen = null;
+      renderOnboarding(mount, app.config.serverUrl, (result) => {
+        app.identity.setAuth(result.token, result.name, result.phone, result.role);
+        void app.signaling.start();
+      });
+      return;
+    }
+    // First failure: re-fetch the pointer URL in case the tunnel changed, then retry.
+    authRetrying = true;
+    log.info('Auth failed – refreshing server URL and retrying…');
+    resolveServerUrl().then((url) => {
+      CONFIG.serverUrl = url;
       void app.signaling.start();
     });
+  });
+
+  // Periodically re-fetch the server URL while disconnected so the app auto-reconnects
+  // when the Cloudflare tunnel restarts with a new URL.
+  let urlPollTimer: ReturnType<typeof setInterval> | null = null;
+  app.signaling.events.on('status', (status) => {
+    if (status === 'connected') {
+      authRetrying = false;
+      if (urlPollTimer) { clearInterval(urlPollTimer); urlPollTimer = null; }
+    } else if (status === 'unavailable' || status === 'reconnecting') {
+      if (!urlPollTimer) {
+        urlPollTimer = setInterval(() => {
+          resolveServerUrl().then((url) => {
+            if (url !== CONFIG.serverUrl) {
+              log.info(`Server URL changed → ${url}`);
+              CONFIG.serverUrl = url;
+              app.signaling.reconnectNow('url-changed');
+            }
+          });
+        }, 15_000);
+      }
+    }
   });
 
   const launch = async () => {
