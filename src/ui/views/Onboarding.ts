@@ -1,4 +1,4 @@
-import { logo } from '../icons';
+import { logo, icons } from '../icons';
 import { h } from '../dom';
 
 export interface AuthResult {
@@ -8,12 +8,6 @@ export interface AuthResult {
   role: string;
 }
 
-/**
- * First-launch / sign-in screen.
- * Users register with a phone number, password and display name, or sign in
- * with their phone + password. On success, `onDone` is called with the
- * server-issued JWT and account details.
- */
 export function renderOnboarding(
   root: HTMLElement,
   serverUrl: string,
@@ -24,76 +18,106 @@ export function renderOnboarding(
   function render() {
     const isRegister = mode === 'register';
 
+    // ── inputs ────────────────────────────────────────────────────
     const phoneInput = h('input', {
       type: 'tel',
       id: 'ob-phone',
       placeholder: '+91 98765 43210',
       autocomplete: 'tel',
       required: true,
-    });
+    }) as HTMLInputElement;
+
+    const nameInput = h('input', {
+      type: 'text',
+      id: 'ob-name',
+      maxlength: 40,
+      autocomplete: 'nickname',
+      placeholder: 'Your display name',
+      required: true,
+    }) as HTMLInputElement;
+
     const passwordInput = h('input', {
       type: 'password',
       id: 'ob-password',
       placeholder: isRegister ? 'At least 6 characters' : 'Password',
       autocomplete: isRegister ? 'new-password' : 'current-password',
       required: true,
+    }) as HTMLInputElement;
+
+    // Eye toggle button
+    let showPw = false;
+    const eyeBtn = h('button', {
+      type: 'button',
+      class: 'ob-eye',
+      'aria-label': 'Toggle password visibility',
+      html: icons.eyeOff,
+      onclick: () => {
+        showPw = !showPw;
+        passwordInput.type = showPw ? 'text' : 'password';
+        eyeBtn.innerHTML = showPw ? icons.eye : icons.eyeOff;
+      },
     });
-    const nameInput = h('input', {
-      type: 'text',
-      id: 'ob-name',
-      maxlength: 40,
-      autocomplete: 'nickname',
-      placeholder: 'e.g. Aquib',
-      required: true,
-    });
+    const passwordWrap = h('div', { class: 'ob-pw-wrap' }, passwordInput, eyeBtn);
 
-    const errorEl = h('p', { class: 'ob-error', style: 'display:none;color:var(--color-danger,#e74c3c);font-size:.875rem;margin:.25rem 0 0' });
+    // ── field groups ──────────────────────────────────────────────
+    const phoneGroup = h('div', { class: 'ob-field' },
+      h('label', { for: 'ob-phone', class: 'ob-label' }, 'Mobile number'),
+      h('div', { class: 'ob-input-wrap' }, phoneInput),
+    );
+    const nameGroup = h('div', { class: 'ob-field' },
+      h('label', { for: 'ob-name', class: 'ob-label' }, 'Display name'),
+      h('div', { class: 'ob-input-wrap' }, nameInput),
+    );
+    const passwordGroup = h('div', { class: 'ob-field' },
+      h('label', { for: 'ob-password', class: 'ob-label' }, 'Password'),
+      passwordWrap,
+    );
 
-    const submitBtn = h('button', { class: 'btn primary', type: 'submit' }, isRegister ? 'Create account' : 'Sign in');
+    // ── error ─────────────────────────────────────────────────────
+    const errorEl = h('div', { class: 'ob-error', hidden: true });
 
-    const switchLink = h(
-      'p',
-      { class: 'hint' },
+    // ── submit ────────────────────────────────────────────────────
+    const submitBtn = h('button', { class: 'ob-submit', type: 'submit' },
+      isRegister ? 'Create account' : 'Sign in',
+    );
+
+    // ── mode switch ───────────────────────────────────────────────
+    const switchBtn = h('button', { type: 'button', class: 'ob-switch' },
       isRegister ? 'Already have an account? ' : "Don't have an account? ",
+      h('span', {}, isRegister ? 'Sign in' : 'Register'),
     );
-    const switchAnchor = h('a', { href: '#', style: 'cursor:pointer' }, isRegister ? 'Sign in' : 'Register');
-    switchLink.appendChild(switchAnchor);
-
-    const fields: HTMLElement[] = [
-      h('label', { for: 'ob-phone' }, 'Mobile number'),
-      phoneInput,
-      ...(isRegister ? [h('label', { for: 'ob-name' }, 'Display name'), nameInput] : []),
-      h('label', { for: 'ob-password' }, 'Password'),
-      passwordInput,
-    ];
-
-    const form = h(
-      'form',
-      { class: 'onboarding card' },
-      h('div', { class: 'brand-mark big', html: logo }),
-      h('h1', {}, isRegister ? 'Create account' : 'Welcome back'),
-      ...fields,
-      errorEl,
-      submitBtn,
-      switchLink,
-      h('p', { class: 'hint' }, 'Calls are peer-to-peer (WebRTC). Your account lives on this server.'),
-    );
-
-    switchAnchor.addEventListener('click', (e) => {
-      e.preventDefault();
+    switchBtn.addEventListener('click', () => {
       mode = isRegister ? 'login' : 'register';
       render();
     });
 
+    // ── form ──────────────────────────────────────────────────────
+    const form = h('form', { class: 'ob-card' },
+      h('div', { class: 'ob-brand' },
+        h('div', { class: 'ob-logo', html: logo }),
+        h('h1', { class: 'ob-title' }, 'MeshCall'),
+        h('p', { class: 'ob-subtitle' }, isRegister ? 'Create your account' : 'Welcome back'),
+      ),
+      h('div', { class: 'ob-fields' },
+        phoneGroup,
+        ...(isRegister ? [nameGroup] : []),
+        passwordGroup,
+      ),
+      errorEl,
+      submitBtn,
+      h('div', { class: 'ob-divider' }),
+      switchBtn,
+    );
+
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
-      errorEl.style.display = 'none';
+      errorEl.hidden = true;
       submitBtn.setAttribute('disabled', '');
-      submitBtn.textContent = isRegister ? 'Creating…' : 'Signing in…';
+      submitBtn.textContent = isRegister ? 'Creating account…' : 'Signing in…';
 
-      const phone = (phoneInput as HTMLInputElement).value.trim();
-      const password = (passwordInput as HTMLInputElement).value;
-      const name = isRegister ? (nameInput as HTMLInputElement).value.trim() : '';
+      const phone = phoneInput.value.trim();
+      const password = passwordInput.value;
+      const name = isRegister ? nameInput.value.trim() : '';
 
       try {
         const endpoint = isRegister ? '/api/register' : '/api/login';
@@ -106,21 +130,19 @@ export function renderOnboarding(
           body: JSON.stringify(body),
         });
         const data = await res.json();
-        if (!res.ok) {
-          throw new Error(data.error || `Server error ${res.status}`);
-        }
+        if (!res.ok) throw new Error(data.error || `Server error ${res.status}`);
         onDone({ token: data.token, name: data.name, phone: data.phone, role: data.role ?? 'user' });
       } catch (err) {
         const msg = err instanceof Error ? err.message : 'Network error – check the server URL';
         errorEl.textContent = msg;
-        errorEl.style.display = 'block';
+        errorEl.hidden = false;
         submitBtn.removeAttribute('disabled');
         submitBtn.textContent = isRegister ? 'Create account' : 'Sign in';
       }
     });
 
-    root.replaceChildren(h('div', { class: 'onboarding-wrap' }, form));
-    (phoneInput as HTMLInputElement).focus();
+    root.replaceChildren(h('div', { class: 'ob-wrap' }, form));
+    phoneInput.focus();
   }
 
   render();

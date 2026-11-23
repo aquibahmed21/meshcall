@@ -1350,12 +1350,7 @@ select {
 }
 
 /* ───────────────────────── onboarding ───────────────────────── */
-.onboarding-wrap {
-  display: grid;
-  place-items: center;
-  min-height: 100%;
-  padding: 24px;
-}
+/* Legacy .card used by error screens */
 .card {
   width: min(400px, 100%);
   padding: 28px;
@@ -1363,18 +1358,194 @@ select {
   background: var(--panel);
   border: 1px solid var(--line);
 }
-.onboarding {
+
+.ob-wrap {
+  display: grid;
+  place-items: center;
+  min-height: 100%;
+  min-height: 100dvh;
+  padding: 20px;
+  background: var(--bg);
+}
+
+.ob-card {
+  width: min(420px, 100%);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 24px;
+  padding: 36px 32px 28px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 0;
+  box-shadow: 0 24px 60px rgba(0,0,0,.45);
+}
+
+/* brand */
+.ob-brand {
+  text-align: center;
+  margin-bottom: 28px;
+}
+.ob-logo {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 64px;
+  height: 64px;
+  background: linear-gradient(135deg, var(--accent) 0%, #5b6af5 100%);
+  border-radius: 20px;
+  margin-bottom: 14px;
+  box-shadow: 0 8px 24px rgba(59,158,255,.35);
+}
+.ob-logo svg.logo {
+  width: 36px;
+  height: 36px;
+  color: #fff;
+}
+.ob-title {
+  margin: 0 0 4px;
+  font-size: 1.5rem;
+  font-weight: 700;
+  letter-spacing: -.02em;
+  color: var(--text);
+}
+.ob-subtitle {
+  margin: 0;
+  font-size: .9rem;
+  color: var(--muted);
+}
+
+/* fields */
+.ob-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin-bottom: 20px;
+}
+.ob-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.ob-label {
+  font-size: .78rem;
+  font-weight: 600;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.ob-input-wrap,
+.ob-pw-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+.ob-input-wrap input,
+.ob-pw-wrap input {
+  width: 100%;
+  height: 48px;
+  padding: 0 14px;
+  border-radius: 12px;
+  border: 1.5px solid var(--line);
+  background: var(--bg-2);
+  color: var(--text);
+  font-size: 1rem;
+  transition: border-color .15s, box-shadow .15s;
+  outline: none;
+}
+.ob-pw-wrap input {
+  padding-right: 48px;
+}
+.ob-input-wrap input:focus,
+.ob-pw-wrap input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(59,158,255,.18);
+}
+.ob-eye {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--muted);
+  border-radius: 8px;
+  transition: color .15s, background .15s;
+  padding: 0;
+}
+.ob-eye:hover {
+  color: var(--text);
+  background: var(--panel-2);
+}
+.ob-eye svg {
+  pointer-events: none;
+}
+
+/* error */
+.ob-error {
+  margin-bottom: 14px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: rgba(231,76,60,.12);
+  border: 1px solid rgba(231,76,60,.3);
+  color: #f08080;
+  font-size: .875rem;
+  line-height: 1.4;
+}
+
+/* submit */
+.ob-submit {
+  width: 100%;
+  height: 50px;
+  border-radius: 14px;
+  background: linear-gradient(135deg, var(--accent) 0%, #5b6af5 100%);
+  color: #fff;
+  font-size: 1rem;
+  font-weight: 600;
+  letter-spacing: .01em;
+  border: none;
+  cursor: pointer;
+  transition: opacity .15s, transform .1s;
+  box-shadow: 0 6px 20px rgba(59,158,255,.3);
+  margin-bottom: 20px;
+}
+.ob-submit:hover { opacity: .92; }
+.ob-submit:active { transform: scale(.98); }
+.ob-submit:disabled { opacity: .55; cursor: not-allowed; transform: none; }
+
+/* divider */
+.ob-divider {
+  height: 1px;
+  background: var(--line);
+  margin-bottom: 16px;
+}
+
+/* switch */
+.ob-switch {
+  width: 100%;
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: .875rem;
+  cursor: pointer;
+  padding: 0;
+  line-height: 1.5;
   text-align: center;
 }
-.onboarding h1 {
-  margin: 0;
+.ob-switch span {
+  color: var(--accent);
+  font-weight: 600;
+  margin-left: 2px;
 }
-.onboarding label {
-  text-align: left;
-  color: var(--muted);
+.ob-switch:hover span { text-decoration: underline; }
+
+@media (max-width: 480px) {
+  .ob-card { padding: 28px 20px 22px; border-radius: 20px; }
 }
 
 /* ───────────────────────── responsive ───────────────────────── */
