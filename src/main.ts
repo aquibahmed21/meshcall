@@ -1,6 +1,6 @@
 import './styles/main.css';
 import { createApp, joinRoom, startApp } from './app';
-import { CONFIG, resolveServerUrl } from './config';
+import { CONFIG, resolveServerUrl, resolveIceServers } from './config';
 import { createLogger, logHub } from './core/logger';
 import { renderOnboarding } from './ui/views/Onboarding';
 import { renderPermissionsScreen } from './ui/views/PermissionsPanel';
@@ -273,7 +273,8 @@ async function boot(): Promise<void> {
   }
 }
 
-resolveServerUrl().then((url) => {
+resolveServerUrl().then(async (url) => {
   CONFIG.serverUrl = url;
+  await resolveIceServers(url);
   void boot();
 });

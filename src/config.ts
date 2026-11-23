@@ -162,3 +162,27 @@ export async function resolveServerUrl(): Promise<string> {
   }
   return DEFAULT_SERVER_URL;
 }
+
+/**
+ * Fetch TURN/STUN config from the server and patch CONFIG.iceServers in place.
+ * Called once at boot after the server URL is known. If the server returns no
+ * extra ICE servers, the compile-time defaults (Google STUN) stay in effect.
+ */
+export async function resolveIceServers(serverUrl: string): Promise<void> {
+  try {
+    const res = await fetch(`${serverUrl}/api/ice-servers`, { cache: 'no-store' });
+    if (!res.ok) return;
+    const json = (await res.json()) as { iceServers?: RTCIceServer[] };
+    if (!Array.isArray(json.iceServers) || json.iceServers.length === 0) return;
+    // Merge server-supplied TURN/STUN with Google STUN (keep Google first).
+    const googleStun: RTCIceServer = { urls: GOOGLE_STUN };
+    CONFIG.iceServers = [googleStun, ...json.iceServers];
+    CONFIG.hasTurn = json.iceServers.some((s) => {
+      const urls = Array.isArray(s.urls) ? s.urls : [s.urls];
+      return urls.some((u) => u.startsWith('turn:') || u.startsWith('turns:'));
+    });
+    log.info('ICE servers loaded from server:', json.iceServers.map((s) => Array.isArray(s.urls) ? s.urls[0] : s.urls));
+  } catch (err) {
+    log.warn('Could not fetch ICE servers from server:', err);
+  }
+}
