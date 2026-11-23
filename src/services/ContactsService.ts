@@ -59,14 +59,17 @@ export class ContactsService {
     this._loadFromStorage();
   }
 
-  /** Key scoped to the logged-in phone so accounts don't share contacts. */
-  private get storageKey(): string {
-    return `${CONTACTS_KEY_PREFIX}${this.identity.phone || '_'}`;
+  /** Key scoped to the logged-in phone so accounts don't share contacts.
+   *  Returns null when not logged in (no contacts should be loaded/saved). */
+  private get storageKey(): string | null {
+    return this.identity.isLoggedIn ? `${CONTACTS_KEY_PREFIX}${this.identity.phone}` : null;
   }
 
   private _loadFromStorage(): void {
     this._contacts.clear();
-    for (const c of storage.get<Contact[]>(this.storageKey, [])) {
+    const key = this.storageKey;
+    if (!key) return; // not logged in — no per-account contacts to load
+    for (const c of storage.get<Contact[]>(key, [])) {
       if (c?.phone) this._contacts.set(c.phone, c);
     }
   }
@@ -231,6 +234,8 @@ export class ContactsService {
   }
 
   private persist(): void {
-    storage.set(this.storageKey, [...this._contacts.values()]);
+    const key = this.storageKey;
+    if (!key) return; // not logged in — don't persist
+    storage.set(key, [...this._contacts.values()]);
   }
 }

@@ -125,7 +125,8 @@ export class PresenceService {
   }
 
   private knownKey(): string {
-    return `${KNOWN_KEY}.${this.room?.roomId ?? ''}`;
+    if (!this.room) return `${KNOWN_KEY}.__none`;
+    return `${KNOWN_KEY}.${this.room.roomId}`;
   }
 
   setBusy(busy: boolean, callId?: string): void {
@@ -186,7 +187,8 @@ export class PresenceService {
   }
 
   private hiddenKey(): string {
-    return `${HIDDEN_KEY}.${this.room?.roomId ?? ''}`;
+    if (!this.room) return `${HIDDEN_KEY}.__none`;
+    return `${HIDDEN_KEY}.${this.room.roomId}`;
   }
 
   list(): UserPresence[] {

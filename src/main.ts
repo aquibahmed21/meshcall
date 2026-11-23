@@ -210,10 +210,11 @@ async function boot(): Promise<void> {
   // Periodically re-fetch the server URL while disconnected so the app auto-reconnects
   // when the Cloudflare tunnel restarts with a new URL.
   let urlPollTimer: ReturnType<typeof setInterval> | null = null;
+  const clearUrlPollTimer = () => { if (urlPollTimer) { clearInterval(urlPollTimer); urlPollTimer = null; } };
   app.signaling.events.on('status', (status) => {
     if (status === 'connected') {
       authRetrying = false;
-      if (urlPollTimer) { clearInterval(urlPollTimer); urlPollTimer = null; }
+      clearUrlPollTimer();
     } else if (status === 'unavailable' || status === 'reconnecting') {
       if (!urlPollTimer) {
         urlPollTimer = setInterval(() => {
@@ -228,6 +229,8 @@ async function boot(): Promise<void> {
       }
     }
   });
+  // Cleanup on unload
+  window.addEventListener('beforeunload', clearUrlPollTimer);
 
   const launch = async () => {
     await startApp(app);

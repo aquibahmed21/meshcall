@@ -27,6 +27,7 @@ export class ContactsScreen {
   private syncDone = false;
   private off: (() => void) | null = null;
   private offPresence: (() => void) | null = null;
+  private _initCalled = false;
 
   constructor(private readonly opts: ContactsScreenOptions) {
     this.searchInput = h('input', {
@@ -90,6 +91,8 @@ export class ContactsScreen {
 
   /** Call once to trigger initial render + device sync. */
   async init(): Promise<void> {
+    if (this._initCalled) return; // idempotent
+    this._initCalled = true;
     this.renderContacts();
     if (isNative && !this.syncDone) {
       this.syncDone = true;
@@ -104,6 +107,7 @@ export class ContactsScreen {
     this.off = null;
     this.offPresence?.();
     this.offPresence = null;
+    this._initCalled = false;
   }
 
   /** Re-render whenever presence changes so online status is always current. */
