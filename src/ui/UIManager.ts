@@ -111,6 +111,9 @@ export class UIManager {
     this.wire();
     this.rejoin = app.calls.rejoinOffer;
     this.renderAll();
+    // Process any call state that was already set before UIManager was created
+    // (e.g. incoming call that triggered the switch from ContactsScreen to UIManager).
+    this.onCallState();
   }
 
   private newInvite(): void {
@@ -189,6 +192,7 @@ export class UIManager {
     this.rejoin = this.app.calls.rejoinOffer;
     this.setView('people');
     this.renderAll();
+    this.onCallState();
   }
 
   /** Header identity: avatar with a presence dot and my name. */
