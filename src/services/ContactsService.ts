@@ -15,6 +15,38 @@ export interface Contact {
 
 const CONTACTS_KEY = 'voip.contacts';
 
+/**
+ * Generate lookup variants for a stripped phone number so that device contacts
+ * stored without a country code still match server records that have one.
+ * e.g. "9876543210" → ["+919876543210", "919876543210", "9876543210"]
+ */
+function phoneVariants(num: string): string[] {
+  const vs = new Set<string>([num]);
+  // If 10 digits (Indian mobile), add +91 and 91 prefixes.
+  if (/^[6-9]\d{9}$/.test(num)) {
+    vs.add(`+91${num}`);
+    vs.add(`91${num}`);
+  }
+  // If starts with 0 and 11 digits, strip the 0 (trunk prefix).
+  if (num.startsWith('0') && num.length === 11) {
+    const without0 = num.slice(1);
+    vs.add(without0);
+    vs.add(`+91${without0}`);
+    vs.add(`91${without0}`);
+  }
+  // If starts with +91 and remaining is 10 digits, also add without prefix.
+  if (num.startsWith('+91') && num.length === 13) {
+    vs.add(num.slice(3));
+    vs.add(`91${num.slice(3)}`);
+  }
+  // If starts with 91 (no +) and 12 digits, add + and bare 10-digit.
+  if (num.startsWith('91') && num.length === 12 && !num.startsWith('+')) {
+    vs.add(`+${num}`);
+    vs.add(num.slice(2));
+  }
+  return [...vs];
+}
+
 export class ContactsService {
   readonly events = new Emitter<{ change: void }>();
   private _contacts = new Map<string, Contact>();
@@ -57,7 +89,9 @@ export class ContactsService {
 
   /** Search the server for users matching a phone/name query. */
   async search(q: string): Promise<Contact[]> {
-    const url = `${this._serverUrl}/api/users/search?q=${encodeURIComponent(q)}`;
+    // Strip spaces/dashes so "+91 98765 43210" matches the stored "+919876543210".
+    const normalised = q.replace(/[\s\-().]/g, '');
+    const url = `${this._serverUrl}/api/users/search?q=${encodeURIComponent(normalised)}`;
     try {
       const res = await fetch(url, {
         headers: { Authorization: `Bearer ${this.identity.token}` },
@@ -130,26 +164,47 @@ export class ContactsService {
     }
 
     // Extract all phone numbers, normalise, deduplicate.
+    // Build a map from every variant of a number back to the canonical raw number.
     const phoneToName = new Map<string, string>();
+    // variantToRaw lets us look up the canonical key after the server responds.
+    const variantToRaw = new Map<string, string>();
+
     for (const c of rawContacts) {
       const name = c.displayName?.trim() ?? '';
       for (const ph of c.phoneNumbers ?? []) {
-        const num = (ph.number ?? '').replace(/[\s\-().]/g, '');
-        if (num) phoneToName.set(num, name || num);
+        const stripped = (ph.number ?? '').replace(/[\s\-().]/g, '');
+        if (!stripped) continue;
+        const displayName = name || stripped;
+
+        const variants = phoneVariants(stripped);
+        for (const v of variants) {
+          if (!phoneToName.has(v)) {
+            phoneToName.set(v, displayName);
+            variantToRaw.set(v, stripped);
+          }
+        }
       }
     }
 
     const phones = [...phoneToName.keys()];
     if (!phones.length) return [];
 
+    // Build a reverse lookup: server phone → device display name.
+    // The server may return a different format (e.g. "+919876543210") than what
+    // the device stored ("9876543210"), so we check all variants we sent.
+    const serverPhoneToDeviceName = new Map<string, string>();
+    for (const [variant, name] of phoneToName) {
+      for (const v of phoneVariants(variant)) serverPhoneToDeviceName.set(v, name);
+    }
+
     const registered = await this.lookup(phones);
     for (const r of registered) {
-      const name = phoneToName.get(r.phone) ?? r.name;
-      this._contacts.set(r.phone, { ...r, name, source: 'device' });
+      const deviceName = serverPhoneToDeviceName.get(r.phone) ?? r.name;
+      this._contacts.set(r.phone, { ...r, name: deviceName, source: 'device' });
     }
     this.persist();
     this.events.emit('change', undefined);
-    return registered.map((r) => ({ ...r, name: phoneToName.get(r.phone) ?? r.name, source: 'device' as const }));
+    return registered.map((r) => ({ ...r, name: serverPhoneToDeviceName.get(r.phone) ?? r.name, source: 'device' as const }));
   }
 
   private persist(): void {
