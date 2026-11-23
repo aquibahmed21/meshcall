@@ -85,7 +85,7 @@ export function createApp(): AppContext {
   calls.isLinked = (id) => links.isLinked(id);
   const history = new CallHistoryService(calls, identity);
   const contacts = new ContactsService(identity);
-  contacts.setServerUrl(config.serverUrl);
+  contacts.setServerUrl(config.serverUrl, config);
   return { links, files, invites, history, dms, pwa, config, identity, settings, signaling, presence, network, media, devices, webrtc, notifications, push, calls, groups, live, chat, rooms, contacts };
 }
 

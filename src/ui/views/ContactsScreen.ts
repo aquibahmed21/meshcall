@@ -98,7 +98,13 @@ export class ContactsScreen {
       this.renderContacts();
       return;
     }
-    this.searchResults = await this.opts.contacts.search(q);
+    try {
+      this.searchResults = await this.opts.contacts.search(q);
+    } catch (err) {
+      this.searchResults = [];
+      this.setStatus(err instanceof Error ? err.message : 'Search failed');
+      setTimeout(() => this.setStatus(''), 4000);
+    }
     this.renderContacts();
   }
 

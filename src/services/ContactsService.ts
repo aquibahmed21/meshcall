@@ -1,5 +1,6 @@
 import { Emitter } from '../core/emitter';
 import { storage } from '../core/storage';
+import type { AppConfig } from '../config';
 import type { IdentityService } from './IdentityService';
 
 export interface Contact {
@@ -50,7 +51,7 @@ function phoneVariants(num: string): string[] {
 export class ContactsService {
   readonly events = new Emitter<{ change: void }>();
   private _contacts = new Map<string, Contact>();
-  private _serverUrl = '';
+  private _config: AppConfig | null = null;
 
   constructor(
     private readonly identity: IdentityService,
@@ -60,9 +61,13 @@ export class ContactsService {
     }
   }
 
-  /** Must be called (or updated) whenever the server URL resolves. */
-  setServerUrl(url: string): void {
-    this._serverUrl = url;
+  /** Must be called once after createApp() so the service reads the live config. */
+  setServerUrl(_url: string, config?: AppConfig): void {
+    if (config) this._config = config;
+  }
+
+  private get serverUrl(): string {
+    return this._config?.serverUrl ?? '';
   }
 
   get contacts(): Contact[] {
@@ -72,7 +77,7 @@ export class ContactsService {
   /** Look up a list of phone numbers on the server and update local contact records. */
   async lookup(phones: string[]): Promise<Contact[]> {
     if (!phones.length) return [];
-    const url = `${this._serverUrl}/api/users/lookup`;
+    const url = `${this.serverUrl}/api/users/lookup`;
     try {
       const res = await fetch(url, {
         method: 'POST',
@@ -91,19 +96,18 @@ export class ContactsService {
   async search(q: string): Promise<Contact[]> {
     // Strip spaces/dashes so "+91 98765 43210" matches the stored "+919876543210".
     const normalised = q.replace(/[\s\-().]/g, '');
-    const url = `${this._serverUrl}/api/users/search?q=${encodeURIComponent(normalised)}`;
-    try {
-      const res = await fetch(url, {
-        headers: { Authorization: `Bearer ${this.identity.token}` },
-      });
-      if (!res.ok) return [];
-      const rows = (await res.json()) as Array<{ phone: string; name: string; online: boolean }>;
-      return rows
-        .filter((r) => r.phone !== this.identity.phone)
-        .map((r) => ({ phone: r.phone, name: r.name, registered: true, online: r.online, source: 'manual' as const }));
-    } catch {
-      return [];
+    const url = `${this.serverUrl}/api/users/search?q=${encodeURIComponent(normalised)}`;
+    const res = await fetch(url, {
+      headers: { Authorization: `Bearer ${this.identity.token}` },
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({})) as { error?: string };
+      throw new Error(body.error ?? `Server error ${res.status}`);
     }
+    const rows = (await res.json()) as Array<{ phone: string; name: string; online: boolean }>;
+    return rows
+      .filter((r) => r.phone !== this.identity.phone)
+      .map((r) => ({ phone: r.phone, name: r.name, registered: true, online: r.online, source: 'manual' as const }));
   }
 
   /** Save a contact locally. */
