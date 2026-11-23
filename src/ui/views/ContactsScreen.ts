@@ -106,26 +106,31 @@ export class ContactsScreen {
     this.offPresence = null;
   }
 
-  /** Update contact online flags from live PresenceService data and re-render. */
+  /** Re-render whenever presence changes so online status is always current. */
   private syncOnlineFromPresence(): void {
-    let changed = false;
-    const contacts = this.opts.contacts.contacts;
-    for (const c of contacts) {
-      const deviceId = this.opts.app.presence.deviceIdForPhone(c.phone);
-      const online = deviceId ? this.opts.app.presence.status(deviceId) === 'online' : false;
-      if (online !== c.online) {
-        // Update the contact's online flag in the service.
-        (c as { online: boolean }).online = online;
-        changed = true;
-      }
-    }
-    // Also sync search results if a search is active.
-    for (const c of this.searchResults) {
-      const deviceId = this.opts.app.presence.deviceIdForPhone(c.phone);
-      const online = deviceId ? this.opts.app.presence.status(deviceId) === 'online' : false;
-      if (online !== c.online) { (c as { online: boolean }).online = online; changed = true; }
-    }
-    if (changed) this.renderContacts();
+    this.renderContacts();
+  }
+
+  /** Compute live online status from PresenceService for a contact's phone number. */
+  private isOnline(phone: string): boolean {
+    const deviceId = this.opts.app.presence.deviceIdForPhone(phone);
+    return deviceId ? this.opts.app.presence.status(deviceId) === 'online' : false;
+  }
+
+  /** Generate a stable colored avatar background from a phone/name string. */
+  private avatarColor(seed: string): string {
+    let h = 0;
+    for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) & 0xfffffff;
+    const hue = h % 360;
+    return `hsl(${hue}, 55%, 45%)`;
+  }
+
+  /** Get 1-2 letter initials from a display name. */
+  private initials(name: string): string {
+    const parts = name.trim().split(/\s+/).filter(Boolean);
+    if (!parts.length) return '?';
+    if (parts.length === 1) return parts[0]!.slice(0, 2).toUpperCase();
+    return (parts[0]![0]! + parts[parts.length - 1]![0]!).toUpperCase();
   }
 
   private showAdmin(): void {
@@ -191,9 +196,18 @@ export class ContactsScreen {
   }
 
   private renderContact(c: Contact, isSearchResult: boolean): HTMLElement {
-    const onlineEl = h('span', { class: `contact-status ${c.online ? 'online' : 'offline'}` });
+    // Always read online status live from PresenceService so buttons update immediately
+    // when a user comes online, without waiting for the next contact-list fetch.
+    const online = this.isOnline(c.phone);
+
+    const avatar = h('div', {
+      class: 'contact-avatar',
+      style: `background:${this.avatarColor(c.phone)}`,
+    }, this.initials(c.name));
+
+    const statusDot = h('span', { class: `contact-status ${online ? 'online' : 'offline'}` });
     const nameEl = h('span', { class: 'contact-name' }, c.name);
-    const phoneEl = h('span', { class: 'contact-phone' }, c.phone);
+    const statusText = h('span', { class: `contact-status-text ${online ? 'online' : ''}` }, online ? 'Online' : c.phone);
 
     const saveBtn = !this.opts.contacts.has(c.phone)
       ? h('button', {
@@ -209,16 +223,16 @@ export class ContactsScreen {
     const audioBtn = h('button', {
       class: 'btn btn-sm',
       type: 'button',
-      disabled: !c.online,
-      title: c.online ? 'Audio call' : 'User is offline',
+      disabled: !online,
+      title: online ? 'Audio call' : 'User is offline',
       html: icons.phone,
       onclick: (e: Event) => { e.stopPropagation(); this.opts.onCall(c, 'audio'); },
     });
     const videoBtn = h('button', {
       class: 'btn btn-sm',
       type: 'button',
-      disabled: !c.online,
-      title: c.online ? 'Video call' : 'User is offline',
+      disabled: !online,
+      title: online ? 'Video call' : 'User is offline',
       html: icons.cam,
       onclick: (e: Event) => { e.stopPropagation(); this.opts.onCall(c, 'video'); },
     });
@@ -233,8 +247,9 @@ export class ContactsScreen {
 
     return h(
       'div',
-      { class: `contact-row ${c.online ? 'is-online' : ''}` },
-      h('div', { class: 'contact-info' }, onlineEl, h('div', { class: 'contact-text' }, nameEl, phoneEl)),
+      { class: `contact-row ${online ? 'is-online' : ''}` },
+      h('div', { class: 'contact-avatar-wrap' }, avatar, statusDot),
+      h('div', { class: 'contact-info' }, h('div', { class: 'contact-text' }, nameEl, statusText)),
       h('div', { class: 'contact-actions' }, ...(saveBtn && isSearchResult ? [saveBtn] : []), audioBtn, videoBtn, msgBtn),
     );
   }

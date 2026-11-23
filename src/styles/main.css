@@ -3598,12 +3598,15 @@ html.in-pip .tile video { object-fit: cover !important; }
 .contacts-empty { padding: 32px 16px; text-align: center; opacity: 0.5; font-size: 0.9rem; }
 .contact-row { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; gap: 10px; border-bottom: 1px solid var(--border-subtle, color-mix(in srgb, var(--border) 50%, transparent)); }
 .contact-row.is-online { background: color-mix(in srgb, var(--accent) 4%, transparent); }
-.contact-info { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; }
-.contact-status { flex: none; width: 10px; height: 10px; border-radius: 50%; background: var(--border); }
+.contact-avatar-wrap { position: relative; flex: none; }
+.contact-avatar { width: 44px; height: 44px; border-radius: 50%; display: grid; place-items: center; color: #fff; font-size: 0.85rem; font-weight: 700; letter-spacing: 0.03em; user-select: none; }
+.contact-status { position: absolute; bottom: 1px; right: 1px; width: 11px; height: 11px; border-radius: 50%; background: var(--border); border: 2px solid var(--bg, #fff); }
 .contact-status.online { background: #22c55e; }
+.contact-info { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; }
 .contact-text { display: flex; flex-direction: column; min-width: 0; }
 .contact-name { font-weight: 600; font-size: 0.95rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.contact-phone { font-size: 0.78rem; opacity: 0.6; }
+.contact-status-text { font-size: 0.78rem; opacity: 0.5; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.contact-status-text.online { opacity: 1; color: #22c55e; }
 .contact-actions { display: flex; gap: 6px; flex: none; }
 .contact-actions .btn-sm { padding: 6px 8px; min-width: 36px; display: grid; place-items: center; }
 .contact-actions .btn-sm svg { width: 18px; height: 18px; }
