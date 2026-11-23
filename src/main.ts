@@ -266,6 +266,7 @@ async function boot(): Promise<void> {
   if (!app.identity.isLoggedIn) {
     renderOnboarding(mount, app.config.serverUrl, (result) => {
       app.identity.setAuth(result.token, result.name, result.phone, result.role);
+      app.contacts.reloadForPhone();
       void launch();
     });
   } else {

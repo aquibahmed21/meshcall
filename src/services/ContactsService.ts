@@ -14,7 +14,7 @@ export interface Contact {
   source: 'manual' | 'device';
 }
 
-const CONTACTS_KEY = 'voip.contacts';
+const CONTACTS_KEY_PREFIX = 'voip.contacts.';
 
 /**
  * Generate lookup variants for a stripped phone number so that device contacts
@@ -56,9 +56,28 @@ export class ContactsService {
   constructor(
     private readonly identity: IdentityService,
   ) {
-    for (const c of storage.get<Contact[]>(CONTACTS_KEY, [])) {
+    this._loadFromStorage();
+  }
+
+  /** Key scoped to the logged-in phone so accounts don't share contacts. */
+  private get storageKey(): string {
+    return `${CONTACTS_KEY_PREFIX}${this.identity.phone || '_'}`;
+  }
+
+  private _loadFromStorage(): void {
+    this._contacts.clear();
+    for (const c of storage.get<Contact[]>(this.storageKey, [])) {
       if (c?.phone) this._contacts.set(c.phone, c);
     }
+  }
+
+  /**
+   * Re-read contacts for the now-logged-in phone. Call this after setAuth()
+   * so a new login always starts with the correct (per-account) contact list.
+   */
+  reloadForPhone(): void {
+    this._loadFromStorage();
+    this.events.emit('change', undefined);
   }
 
   /** Must be called once after createApp() so the service reads the live config. */
@@ -212,6 +231,6 @@ export class ContactsService {
   }
 
   private persist(): void {
-    storage.set(CONTACTS_KEY, [...this._contacts.values()]);
+    storage.set(this.storageKey, [...this._contacts.values()]);
   }
 }
