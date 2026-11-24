@@ -40,6 +40,8 @@ export class ContactsScreen {
   private actionsFor: string | null = null;
   private actionsBack: (() => void) | null = null;
   private suppressClick = false;
+  /** Last-known deviceId per phone — persists after the contact goes offline. */
+  private phoneToDeviceId = new Map<string, string>();
   private searchWrap: HTMLElement;
   private countEl: HTMLElement;
 
@@ -124,7 +126,15 @@ export class ContactsScreen {
     });
 
     this.off = opts.contacts.events.on('change', () => this.renderList());
-    this.offPresence = opts.app.presence.events.on('change', () => this.renderList());
+    this.offPresence = opts.app.presence.events.on('change', () => {
+      // Update phone→deviceId cache while the contact is online so we can
+      // still find their call/message history after they go offline.
+      for (const c of opts.contacts.contacts) {
+        const did = opts.app.presence.deviceIdForPhone(c.phone);
+        if (did) this.phoneToDeviceId.set(c.phone, did);
+      }
+      this.renderList();
+    });
     this.offDms = opts.app.dms.events.on('change', () => this.renderList());
   }
 
@@ -194,13 +204,17 @@ export class ContactsScreen {
     }
   }
 
+  private deviceIdFor(phone: string): string | null {
+    return this.opts.app.presence.deviceIdForPhone(phone) ?? this.phoneToDeviceId.get(phone) ?? null;
+  }
+
   private isOnline(phone: string): boolean {
     const deviceId = this.opts.app.presence.deviceIdForPhone(phone);
     return deviceId ? this.opts.app.presence.status(deviceId) === 'online' : false;
   }
 
   private lastActivity(phone: string): { text: string; time: string; ts: number } | null {
-    const deviceId = this.opts.app.presence.deviceIdForPhone(phone);
+    const deviceId = this.deviceIdFor(phone);
     if (!deviceId) return null;
     const msgs = this.opts.app.dms.conversation(deviceId).messages;
     const m = msgs[msgs.length - 1];
@@ -340,7 +354,7 @@ export class ContactsScreen {
   private renderRow(c: Contact, isSearchResult: boolean): HTMLElement {
     const online = this.isOnline(c.phone);
     const activity = this.lastActivity(c.phone);
-    const deviceId = this.opts.app.presence.deviceIdForPhone(c.phone);
+    const deviceId = this.deviceIdFor(c.phone);
     const unread = deviceId ? this.opts.app.dms.unreadFor(deviceId) : 0;
     const isSaved = this.opts.contacts.has(c.phone);
     const showActions = this.actionsFor === c.phone;
