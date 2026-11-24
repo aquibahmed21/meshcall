@@ -176,7 +176,7 @@ export class ContactsScreen {
     return deviceId ? this.opts.app.presence.status(deviceId) === 'online' : false;
   }
 
-  private lastActivity(phone: string): { text: string; time: string } | null {
+  private lastActivity(phone: string): { text: string; time: string; ts: number } | null {
     const deviceId = this.opts.app.presence.deviceIdForPhone(phone);
     if (!deviceId) return null;
     const msgs = this.opts.app.dms.conversation(deviceId).messages;
@@ -188,7 +188,7 @@ export class ContactsScreen {
     if (!m && !call) return null;
     if (m && (!call || m.timestamp >= call.startedAt)) {
       const text = m.deleted ? 'Deleted message' : `${m.own ? 'You: ' : ''}${m.file ? `📎 ${m.text ? m.text : m.file.name}` : m.text.replace(/\s+/g, ' ')}`;
-      return { text, time: shortTime(m.timestamp) };
+      return { text, time: shortTime(m.timestamp), ts: m.timestamp };
     }
     const c = call!;
     const kind = c.media === 'video' ? 'video call' : 'call';
@@ -196,7 +196,7 @@ export class ContactsScreen {
       ? `📞 ${c.direction === 'incoming' ? 'Incoming' : 'Outgoing'} ${kind}`
       : c.outcome === 'missed' || c.outcome === 'no-answer' ? `📞 Missed ${kind}`
       : `📞 ${kind}`;
-    return { text: callText, time: shortTime(c.startedAt) };
+    return { text: callText, time: shortTime(c.startedAt), ts: c.startedAt };
   }
 
   private showAdmin(): void {
@@ -282,7 +282,21 @@ export class ContactsScreen {
 
   private renderList(): void {
     const q = this.searchInput.value.trim();
-    const items: Contact[] = q ? this.searchResults : this.opts.contacts.contacts;
+
+    let items: Contact[];
+    if (q) {
+      items = this.searchResults;
+    } else {
+      // Main list: only contacts with call/message history, sorted most-recent first.
+      type WithTs = { contact: Contact; ts: number };
+      const withTs: WithTs[] = [];
+      for (const c of this.opts.contacts.contacts) {
+        const a = this.lastActivity(c.phone);
+        if (a) withTs.push({ contact: c, ts: a.ts });
+      }
+      withTs.sort((a, b) => b.ts - a.ts);
+      items = withTs.map(x => x.contact);
+    }
 
     const online = this.opts.contacts.contacts.filter(c => this.isOnline(c.phone)).length;
     this.countEl.textContent = `${online} online`;
@@ -291,7 +305,7 @@ export class ContactsScreen {
       this.listEl.replaceChildren(
         h('li', { class: 'empty' }, q
           ? 'No users found'
-          : 'No contacts yet — tap the contacts icon to discover people on MeshCall',
+          : 'No recent conversations — search to find contacts',
         ),
       );
       return;
