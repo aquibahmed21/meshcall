@@ -100,18 +100,25 @@ export class ContactsService {
   async lookup(phones: string[]): Promise<Contact[]> {
     if (!phones.length) return [];
     const url = `${this.serverUrl}/api/users/lookup`;
-    try {
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${this.identity.token}` },
-        body: JSON.stringify({ phones }),
-      });
-      if (!res.ok) return [];
-      const rows = (await res.json()) as Array<{ phone: string; name: string; online: boolean }>;
-      return rows.map((r) => ({ phone: r.phone, name: r.name, registered: true, online: r.online, source: 'manual' as const }));
-    } catch {
-      return [];
+    // Chunk into batches of 500 so large contact lists don't get silently truncated.
+    const CHUNK = 500;
+    const results: Contact[] = [];
+    for (let i = 0; i < phones.length; i += CHUNK) {
+      const chunk = phones.slice(i, i + CHUNK);
+      try {
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${this.identity.token}` },
+          body: JSON.stringify({ phones: chunk }),
+        });
+        if (!res.ok) continue;
+        const rows = (await res.json()) as Array<{ phone: string; name: string; online: boolean }>;
+        results.push(...rows.map((r) => ({ phone: r.phone, name: r.name, registered: true, online: r.online, source: 'manual' as const })));
+      } catch {
+        // ignore network errors for this chunk
+      }
     }
+    return results;
   }
 
   /** Search the server for users matching a phone/name query. */
@@ -210,31 +217,34 @@ export class ContactsService {
     } catch {
       return [];
     }
-    if (!plugin) return [];
+    if (!plugin) { console.log('[SYNC] plugin not available'); return []; }
 
     let rawContacts: ContactPayload[] = [];
     try {
       const { contacts } = await plugin.getContacts({ projection: { name: true, phones: true } });
       rawContacts = contacts;
-    } catch {
+      console.log(`[SYNC] raw contacts from device: ${rawContacts.length}`);
+      // Log first 3 contacts so we can see the actual structure
+      rawContacts.slice(0, 3).forEach((c, i) => {
+        console.log(`[SYNC] contact[${i}] name=${JSON.stringify(c.name)} phones=${JSON.stringify((c as any).phones ?? (c as any).phoneNumbers ?? 'MISSING')}`);
+      });
+    } catch (err) {
+      console.log(`[SYNC] getContacts threw: ${err}`);
       return [];
     }
 
     // Extract all phone numbers, normalise, deduplicate.
-    // Build a map from every variant of a number back to the canonical raw number.
     const phoneToName = new Map<string, string>();
-    // variantToRaw lets us look up the canonical key after the server responds.
     const variantToRaw = new Map<string, string>();
 
     for (const c of rawContacts) {
-      // v8 plugin: name lives in c.name.display (or given+family), phones in c.phones[].number
       const n = c.name;
       const name = (n?.display ?? [n?.given, n?.family].filter(Boolean).join(' ') ?? '').trim();
       for (const ph of c.phones ?? []) {
-        const stripped = (ph.number ?? '').replace(/[\s\-().+]/g, '');
+        const raw = ph.number ?? '';
+        const stripped = raw.replace(/[\s\-().+]/g, '');
         if (!stripped) continue;
         const displayName = name || stripped;
-
         const variants = phoneVariants(stripped);
         for (const v of variants) {
           if (!phoneToName.has(v)) {
@@ -246,17 +256,21 @@ export class ContactsService {
     }
 
     const phones = [...phoneToName.keys()];
-    if (!phones.length) return [];
+    console.log(`[SYNC] total phone variants to lookup: ${phones.length}`);
+    if (!phones.length) {
+      console.log('[SYNC] no phones extracted — check field names above');
+      return [];
+    }
+    // Log a sample of variants sent
+    console.log(`[SYNC] sample variants: ${phones.slice(0, 10).join(', ')}`);
 
-    // Build a reverse lookup: server phone → device display name.
-    // The server may return a different format (e.g. "+919876543210") than what
-    // the device stored ("9876543210"), so we check all variants we sent.
     const serverPhoneToDeviceName = new Map<string, string>();
     for (const [variant, name] of phoneToName) {
       for (const v of phoneVariants(variant)) serverPhoneToDeviceName.set(v, name);
     }
 
     const registered = await this.lookup(phones);
+    console.log(`[SYNC] server returned ${registered.length} registered: ${registered.map(r => r.phone).join(', ')}`);
     for (const r of registered) {
       const deviceName = serverPhoneToDeviceName.get(r.phone) ?? r.name;
       const existing = this._contacts.get(r.phone);
