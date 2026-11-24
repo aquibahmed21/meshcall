@@ -121,47 +121,23 @@ export class ContactsService {
     return results;
   }
 
-  /** Search the server for users matching a phone/name query. */
+  /** Search the server for users matching a phone/name query. Returns server results only. */
   async search(q: string): Promise<Contact[]> {
     // Strip spaces/dashes so "+91 98765 43210" matches the stored "+919876543210".
     const normalised = q.replace(/[\s\-().]/g, '').toLowerCase();
     const url = `${this.serverUrl}/api/users/search?q=${encodeURIComponent(normalised)}`;
-    let serverResults: Array<{ phone: string; name: string; online: boolean }> = [];
     try {
       const res = await fetch(url, {
         headers: { Authorization: `Bearer ${this.identity.token}` },
       });
-      if (res.ok) {
-        serverResults = (await res.json()) as Array<{ phone: string; name: string; online: boolean }>;
-      }
-    } catch {
-      // ignore network errors, fall back to local only
-    }
-
-    // Also search local contacts (manual + device) so users can find contacts
-    // that aren't registered on this server but are in their device contacts / call history.
-    const localResults: Contact[] = [];
-    const qLower = normalised.toLowerCase();
-    for (const c of this.contacts) {
-      if (c.phone === this.identity.phone) continue;
-      const phoneMatch = c.phone.toLowerCase().includes(qLower);
-      const nameMatch = c.name.toLowerCase().includes(qLower);
-      // Also try phoneVariants for cross-format matching (e.g. "9876543210" vs "+919876543210")
-      const variantMatch = phoneVariants(c.phone).some(v => v.toLowerCase().includes(qLower));
-      if (phoneMatch || nameMatch || variantMatch) {
-        localResults.push({ ...c });
-      }
-    }
-
-    // Merge: server results take priority (authoritative name/online), but include local-only matches
-    const serverPhones = new Set(serverResults.map(r => r.phone));
-    const merged = [
-      ...serverResults
+      if (!res.ok) return [];
+      const rows = (await res.json()) as Array<{ phone: string; name: string; online: boolean }>;
+      return rows
         .filter(r => r.phone !== this.identity.phone)
-        .map(r => ({ phone: r.phone, name: r.name, registered: true, online: r.online, source: 'manual' as const })),
-      ...localResults.filter(c => !serverPhones.has(c.phone)),
-    ];
-    return merged.slice(0, 20);
+        .map(r => ({ phone: r.phone, name: r.name, registered: true, online: r.online, source: 'manual' as const }));
+    } catch {
+      return [];
+    }
   }
 
   /** Save a contact locally. */

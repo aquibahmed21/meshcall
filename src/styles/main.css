@@ -2827,6 +2827,15 @@ body.menu-open .toasts {
   gap: 4px;
   padding-right: 6px;
 }
+.user.search-result {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  padding: 0 4px 0 10px;
+  min-height: 56px;
+}
+.user.search-result .me-avatar { flex: none; margin-right: 10px; }
+.user.search-result .search-actions { flex: none; display: flex; gap: 2px; }
 .icon-btn.call-btn {
   border-radius: 50%;
   background: rgba(46, 204, 113, 0.14);

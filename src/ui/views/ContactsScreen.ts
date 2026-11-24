@@ -322,7 +322,45 @@ export class ContactsScreen {
     const isSaved = this.opts.contacts.has(c.phone);
     const showActions = this.actionsFor === c.phone;
 
-    // Long-press detection
+    // Search results: static action buttons — no long-press needed.
+    if (isSearchResult) {
+      const li = h('li', { class: `user ${online ? 'online' : 'offline'} search-result`, 'data-phone': c.phone },
+        h('span', { class: 'me-avatar' },
+          h('span', { class: 'avatar', style: `--avatar:${colorFor(c.phone)}` }, initials(c.name)),
+          h('span', { class: `presence-dot ${online ? 'online' : 'offline'}`, 'aria-hidden': 'true' }),
+        ),
+        h('span', { class: 'grow user-info' },
+          h('span', { class: 'user-name' }, c.name),
+          h('span', { class: 'user-last' }, c.phone),
+        ),
+        h('span', { class: 'row-actions search-actions' },
+          h('button', {
+            class: 'icon-btn call-btn',
+            type: 'button',
+            title: 'Audio call',
+            html: icons.phone,
+            onclick: (e: Event) => { e.stopPropagation(); if (!isSaved) this.opts.contacts.add(c.phone, c.name); this.opts.onCall(c, 'audio'); },
+          }),
+          h('button', {
+            class: 'icon-btn call-btn',
+            type: 'button',
+            title: 'Video call',
+            html: icons.cam,
+            onclick: (e: Event) => { e.stopPropagation(); if (!isSaved) this.opts.contacts.add(c.phone, c.name); this.opts.onCall(c, 'video'); },
+          }),
+          h('button', {
+            class: 'icon-btn',
+            type: 'button',
+            title: 'Message',
+            html: icons.chat,
+            onclick: (e: Event) => { e.stopPropagation(); if (!isSaved) this.opts.contacts.add(c.phone, c.name); this.opts.onMessage(c); },
+          }),
+        ),
+      );
+      return li;
+    }
+
+    // Long-press detection (contact list rows only)
     let pressTimer: ReturnType<typeof setTimeout> | undefined;
     let pressStart: { x: number; y: number } | null = null;
 
@@ -356,13 +394,6 @@ export class ContactsScreen {
       ),
       ...(activity ? [h('span', { class: 'user-time' }, activity.time)] : []),
       ...(unread && !showActions ? [h('span', { class: 'badge' }, unread > 9 ? '9+' : String(unread))] : []),
-      ...(isSearchResult && !isSaved ? [h('button', {
-        class: 'icon-btn',
-        type: 'button',
-        title: 'Save contact',
-        html: icons.userPlus,
-        onclick: (e: Event) => { e.stopPropagation(); this.opts.contacts.add(c.phone, c.name); },
-      })] : []),
     );
 
     // Long-press to reveal actions
