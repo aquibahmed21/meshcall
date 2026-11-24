@@ -107,13 +107,10 @@ async function boot(): Promise<void> {
         }
       },
       onMessage: (contact) => {
-        ui?.hideContacts();
+        // Do NOT hideContacts() here — the drawer is a full-screen overlay, contacts stays
+        // in the stage underneath so it's still there when the drawer closes.
         const deviceId = app.presence.deviceIdForPhone(contact.phone);
-        if (deviceId) {
-          ui?.openConversation(deviceId);
-        } else {
-          ui?.openConversation(app.presence.deviceIdForPhone(contact.phone) ?? contact.phone);
-        }
+        ui?.openConversation(deviceId ?? contact.phone);
       },
     });
     ui?.showContacts(contactsScreen.el);

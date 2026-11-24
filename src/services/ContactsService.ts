@@ -195,7 +195,13 @@ export class ContactsService {
    */
   async syncDeviceContacts(): Promise<Contact[]> {
     // Dynamically import to avoid breaking web builds where the plugin doesn't exist.
-    type ContactsPlugin = { getContacts: (opts: object) => Promise<{ contacts: Array<{ displayName?: string; phoneNumbers?: Array<{ number?: string }> }> }> };
+    // ContactPayload from @capacitor-community/contacts v8:
+    //   name?: { display: string|null; given: string|null; family: string|null }
+    //   phones?: Array<{ type, label?, number: string|null }>
+    type NamePayload = { display: string | null; given?: string | null; family?: string | null };
+    type PhonePayload = { number: string | null };
+    type ContactPayload = { name?: NamePayload; phones?: PhonePayload[] };
+    type ContactsPlugin = { getContacts: (opts: object) => Promise<{ contacts: ContactPayload[] }> };
     let plugin: ContactsPlugin | null = null;
     try {
       const mod = await import('@capacitor-community/contacts');
@@ -206,7 +212,7 @@ export class ContactsService {
     }
     if (!plugin) return [];
 
-    let rawContacts: Array<{ displayName?: string; phoneNumbers?: Array<{ number?: string }> }> = [];
+    let rawContacts: ContactPayload[] = [];
     try {
       const { contacts } = await plugin.getContacts({ projection: { name: true, phones: true } });
       rawContacts = contacts;
@@ -221,9 +227,11 @@ export class ContactsService {
     const variantToRaw = new Map<string, string>();
 
     for (const c of rawContacts) {
-      const name = c.displayName?.trim() ?? '';
-      for (const ph of c.phoneNumbers ?? []) {
-        const stripped = (ph.number ?? '').replace(/[\s\-().]/g, '');
+      // v8 plugin: name lives in c.name.display (or given+family), phones in c.phones[].number
+      const n = c.name;
+      const name = (n?.display ?? [n?.given, n?.family].filter(Boolean).join(' ') ?? '').trim();
+      for (const ph of c.phones ?? []) {
+        const stripped = (ph.number ?? '').replace(/[\s\-().+]/g, '');
         if (!stripped) continue;
         const displayName = name || stripped;
 

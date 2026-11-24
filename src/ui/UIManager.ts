@@ -58,6 +58,7 @@ export class UIManager {
   private diagBack: (() => void) | null = null;
   private menuBack: (() => void) | null = null;
   private callGuard: (() => void) | null = null;
+  private _contactsBack: (() => void) | null = null;
   /** Bottom of the Back stack: Back with nothing open asks before leaving the app. */
   private exitGuard: (() => void) | null = null;
   private exiting = false;
@@ -200,12 +201,16 @@ export class UIManager {
   showContacts(el: HTMLElement): void {
     this.stage.replaceChildren(el);
     this.setView('contacts');
+    // Push a backStack entry so Back returns to contacts screen
+    this._contactsBack = backStack.push(() => this.hideContacts());
   }
 
   /** Leave the contacts view and return to the people pane. */
   hideContacts(): void {
     this.stage.replaceChildren(this.idle);
     this.setView('people');
+    this._contactsBack?.();
+    this._contactsBack = null;
   }
 
   /** Header identity: avatar with a presence dot and my name. */

@@ -4,6 +4,7 @@ import type { AppContext } from '../../app';
 import type { ContactsService, Contact } from '../../services/ContactsService';
 import { AdminScreen } from './AdminScreen';
 import { isNative } from '../../native/native';
+import { colorFor, initials } from '../dom';
 
 export interface ContactsScreenOptions {
   app: AppContext;
@@ -12,11 +13,16 @@ export interface ContactsScreenOptions {
   onMessage: (contact: Contact) => void;
 }
 
-/**
- * WhatsApp-style contacts screen.
- * Shown immediately after login, while the hidden voip room is being joined in the background.
- * Replaced by UIManager once the user initiates a call or message.
- */
+const LONG_PRESS_MS = 450;
+
+function shortTime(ts: number): string {
+  const d = new Date(ts);
+  const now = new Date();
+  if (d.toDateString() === now.toDateString()) return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  const days = (now.getTime() - ts) / 86_400_000;
+  return days < 6 ? d.toLocaleDateString([], { weekday: 'short' }) : d.toLocaleDateString([], { day: 'numeric', month: 'short' });
+}
+
 export class ContactsScreen {
   readonly el: HTMLElement;
   private listEl: HTMLElement;
@@ -27,19 +33,25 @@ export class ContactsScreen {
   private syncDone = false;
   private off: (() => void) | null = null;
   private offPresence: (() => void) | null = null;
+  private offDms: (() => void) | null = null;
   private _initCalled = false;
+  /** Phone number of the row currently showing inline actions */
+  private actionsFor: string | null = null;
+  private suppressClick = false;
+  private searchWrap: HTMLElement;
+  private countEl: HTMLElement;
 
   constructor(private readonly opts: ContactsScreenOptions) {
     this.searchInput = h('input', {
       type: 'search',
-      placeholder: 'Search by name or phone…',
-      class: 'contacts-search',
+      placeholder: 'Search…',
+      class: 'cs-search',
       autocomplete: 'off',
       enterkeyhint: 'search',
     }) as HTMLInputElement;
 
-    this.statusEl = h('p', { class: 'contacts-status' }, '');
-    this.listEl = h('div', { class: 'contacts-list' });
+    this.statusEl = h('p', { class: 'cs-status', hidden: true }, '');
+    this.listEl = h('ul', { class: 'user-list cs-list', 'aria-label': 'Contacts' });
 
     const adminBtn = opts.app.identity.isAdmin
       ? h('button', {
@@ -52,29 +64,49 @@ export class ContactsScreen {
         })
       : null;
 
-    const header = h(
+    this.countEl = h('span', { class: 'cs-online-count' }, '');
+
+    const toolbar = h(
       'div',
-      { class: 'contacts-header' },
-      h('div', { class: 'contacts-me' },
-        h('span', { class: 'contacts-me-name' }, opts.app.identity.displayName),
-        h('span', { class: 'contacts-me-phone' }, opts.app.identity.phone),
+      { class: 'cs-toolbar' },
+      this.countEl,
+      h('div', { class: 'cs-toolbar-actions' },
+        h('button', {
+          class: 'icon-btn',
+          type: 'button',
+          title: 'Search',
+          'aria-label': 'Search',
+          html: icons.search,
+          onclick: () => this.openSearch(),
+        }),
+        h('button', {
+          class: 'icon-btn',
+          type: 'button',
+          title: 'Find contacts on MeshCall',
+          'aria-label': 'Find contacts on MeshCall',
+          html: icons.users,
+          onclick: () => void this.discoverDeviceContacts(),
+        }),
+        ...(adminBtn ? [adminBtn] : []),
       ),
+    );
+
+    this.searchWrap = h('div', { class: 'cs-search-wrap', hidden: true },
+      this.searchInput,
       h('button', {
         class: 'icon-btn',
         type: 'button',
-        title: 'Sync device contacts',
-        'aria-label': 'Sync device contacts',
-        html: icons.users,
-        onclick: () => void this.syncDevice(),
+        'aria-label': 'Close search',
+        html: icons.close,
+        onclick: () => this.closeSearch(),
       }),
-      ...(adminBtn ? [adminBtn] : []),
     );
 
     this.el = h(
       'div',
-      { class: 'contacts-screen' },
-      header,
-      h('div', { class: 'contacts-search-wrap' }, this.searchInput),
+      { class: 'cs-screen' },
+      toolbar,
+      this.searchWrap,
       this.statusEl,
       this.listEl,
     );
@@ -82,21 +114,26 @@ export class ContactsScreen {
     this.searchInput.addEventListener('input', () => this.scheduleSearch());
     this.searchInput.addEventListener('search', () => this.doSearch());
 
-    this.off = opts.contacts.events.on('change', () => this.renderContacts());
+    // Close inline actions when tapping outside
+    document.addEventListener('click', (e) => {
+      if (this.actionsFor && !this.listEl.contains(e.target as Node)) {
+        this.showActions(null);
+      }
+    });
 
-    // Live online status: whenever presence changes, sync online flags from PresenceService
-    // so the contacts list updates the moment someone comes online or goes offline.
-    this.offPresence = opts.app.presence.events.on('change', () => this.syncOnlineFromPresence());
+    this.off = opts.contacts.events.on('change', () => this.renderList());
+    this.offPresence = opts.app.presence.events.on('change', () => this.renderList());
+    this.offDms = opts.app.dms.events.on('change', () => this.renderList());
   }
 
-  /** Call once to trigger initial render + device sync. */
   async init(): Promise<void> {
-    if (this._initCalled) return; // idempotent
+    if (this._initCalled) return;
     this._initCalled = true;
-    this.renderContacts();
+    this.renderList();
     if (isNative && !this.syncDone) {
       this.syncDone = true;
-      await this.syncDevice();
+      // silent background sync on first load — no sheet, just merges into the list
+      await this.opts.contacts.syncDeviceContacts();
     } else {
       await this.opts.contacts.refreshOnlineStatus();
     }
@@ -107,42 +144,65 @@ export class ContactsScreen {
     this.off = null;
     this.offPresence?.();
     this.offPresence = null;
+    this.offDms?.();
+    this.offDms = null;
     this._initCalled = false;
   }
 
-  /** Re-render whenever presence changes so online status is always current. */
-  private syncOnlineFromPresence(): void {
-    this.renderContacts();
+  setStatus(msg: string): void {
+    this.statusEl.textContent = msg;
+    this.statusEl.hidden = !msg;
   }
 
-  /** Compute live online status from PresenceService for a contact's phone number. */
+  private openSearch(): void {
+    this.searchWrap.hidden = false;
+    this.searchInput.focus();
+  }
+
+  private closeSearch(): void {
+    this.searchWrap.hidden = true;
+    this.searchInput.value = '';
+    this.searchResults = [];
+    this.renderList();
+  }
+
+  private showActions(phone: string | null): void {
+    this.actionsFor = phone;
+    this.renderList();
+  }
+
   private isOnline(phone: string): boolean {
     const deviceId = this.opts.app.presence.deviceIdForPhone(phone);
     return deviceId ? this.opts.app.presence.status(deviceId) === 'online' : false;
   }
 
-  /** Generate a stable colored avatar background from a phone/name string. */
-  private avatarColor(seed: string): string {
-    let h = 0;
-    for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) & 0xfffffff;
-    const hue = h % 360;
-    return `hsl(${hue}, 55%, 45%)`;
-  }
-
-  /** Get 1-2 letter initials from a display name. */
-  private initials(name: string): string {
-    const parts = name.trim().split(/\s+/).filter(Boolean);
-    if (!parts.length) return '?';
-    if (parts.length === 1) return parts[0]!.slice(0, 2).toUpperCase();
-    return (parts[0]![0]! + parts[parts.length - 1]![0]!).toUpperCase();
+  private lastActivity(phone: string): { text: string; time: string } | null {
+    const deviceId = this.opts.app.presence.deviceIdForPhone(phone);
+    if (!deviceId) return null;
+    const msgs = this.opts.app.dms.conversation(deviceId).messages;
+    const m = msgs[msgs.length - 1];
+    const calls = this.opts.app.history.list()
+      .filter(e => e.peers.some(p => p.deviceId === deviceId))
+      .sort((a, b) => b.startedAt - a.startedAt);
+    const call = calls[0];
+    if (!m && !call) return null;
+    if (m && (!call || m.timestamp >= call.startedAt)) {
+      const text = m.deleted ? 'Deleted message' : `${m.own ? 'You: ' : ''}${m.file ? `📎 ${m.text ? m.text : m.file.name}` : m.text.replace(/\s+/g, ' ')}`;
+      return { text, time: shortTime(m.timestamp) };
+    }
+    const c = call!;
+    const kind = c.media === 'video' ? 'video call' : 'call';
+    const callText = c.outcome === 'answered'
+      ? `📞 ${c.direction === 'incoming' ? 'Incoming' : 'Outgoing'} ${kind}`
+      : c.outcome === 'missed' || c.outcome === 'no-answer' ? `📞 Missed ${kind}`
+      : `📞 ${kind}`;
+    return { text: callText, time: shortTime(c.startedAt) };
   }
 
   private showAdmin(): void {
     const mount = this.el.parentElement;
     if (!mount) return;
-    const admin = new AdminScreen(this.opts.app, () => {
-      mount.replaceChildren(this.el);
-    });
+    const admin = new AdminScreen(this.opts.app, () => { mount.replaceChildren(this.el); });
     mount.replaceChildren(admin.el);
     void admin.init();
   }
@@ -154,114 +214,202 @@ export class ContactsScreen {
 
   private async doSearch(): Promise<void> {
     const q = this.searchInput.value.trim();
-    if (!q) {
-      this.searchResults = [];
-      this.renderContacts();
-      return;
-    }
+    if (!q) { this.searchResults = []; this.renderList(); return; }
     try {
       this.searchResults = await this.opts.contacts.search(q);
-    } catch (err) {
+    } catch {
       this.searchResults = [];
-      this.setStatus(err instanceof Error ? err.message : 'Search failed');
-      setTimeout(() => this.setStatus(''), 4000);
     }
-    this.renderContacts();
+    this.renderList();
   }
 
-  private async syncDevice(): Promise<void> {
-    this.setStatus('Syncing device contacts…');
+  /** Tap the device-contacts icon: scan and show a discovery bottom sheet. */
+  private async discoverDeviceContacts(): Promise<void> {
+    this.setStatus('Scanning device contacts…');
     const found = await this.opts.contacts.syncDeviceContacts();
-    this.setStatus(found.length > 0 ? `Found ${found.length} contact${found.length !== 1 ? 's' : ''} on MeshCall` : 'No device contacts found on MeshCall');
-    setTimeout(() => this.setStatus(''), 3000);
+    this.setStatus('');
+    if (!found.length) {
+      this.showDiscoverySheet([]);
+      return;
+    }
+    this.showDiscoverySheet(found);
   }
 
-  setStatus(msg: string): void {
-    this.statusEl.textContent = msg;
-    this.statusEl.hidden = !msg;
+  /** Bottom sheet listing device contacts who are on MeshCall. */
+  private showDiscoverySheet(found: Contact[]): void {
+    const mount = this.el.parentElement ?? document.body;
+
+    const close = () => sheet.remove();
+
+    const rows = found.length
+      ? found.map(c => {
+          const saved = this.opts.contacts.has(c.phone);
+          return h('li', { class: 'cs-disc-row' },
+            h('span', { class: 'me-avatar' },
+              h('span', { class: 'avatar', style: `--avatar:${colorFor(c.phone)}` }, initials(c.name)),
+            ),
+            h('span', { class: 'grow user-info' },
+              h('span', { class: 'user-name' }, c.name),
+              h('span', { class: 'user-last' }, c.phone),
+            ),
+            saved
+              ? h('button', { class: 'btn small', disabled: true }, 'Saved')
+              : h('button', {
+                  class: 'btn small primary',
+                  type: 'button',
+                  onclick: () => {
+                    this.opts.contacts.add(c.phone, c.name);
+                    this.opts.onMessage(c);
+                    close();
+                  },
+                }, 'Message'),
+          );
+        })
+      : [h('li', { class: 'cs-disc-empty' }, 'None of your device contacts are on MeshCall yet.')];
+
+    const sheet = h('div', { class: 'cs-disc-backdrop', onclick: (e: Event) => { if (e.target === sheet) close(); } },
+      h('div', { class: 'cs-disc-sheet' },
+        h('div', { class: 'cs-disc-header' },
+          h('span', { class: 'cs-disc-title' }, found.length ? `${found.length} contact${found.length !== 1 ? 's' : ''} on MeshCall` : 'No contacts found'),
+          h('button', { class: 'icon-btn', type: 'button', 'aria-label': 'Close', html: icons.close, onclick: close }),
+        ),
+        h('ul', { class: 'cs-disc-list' }, ...rows),
+      ),
+    );
+
+    mount.appendChild(sheet);
   }
 
-  private renderContacts(): void {
+  private renderList(): void {
     const q = this.searchInput.value.trim();
     const items: Contact[] = q ? this.searchResults : this.opts.contacts.contacts;
 
+    const online = this.opts.contacts.contacts.filter(c => this.isOnline(c.phone)).length;
+    this.countEl.textContent = `${online} online`;
+
     if (!items.length) {
       this.listEl.replaceChildren(
-        h('p', { class: 'contacts-empty' },
-          q ? 'No users found' : 'No contacts yet — search by phone number to add people',
+        h('li', { class: 'empty' }, q
+          ? 'No users found'
+          : 'No contacts yet — tap the contacts icon to discover people on MeshCall',
         ),
       );
       return;
     }
 
-    this.listEl.replaceChildren(
-      ...items.map((c) => this.renderContact(c, !!q)),
-    );
+    this.listEl.replaceChildren(...items.map(c => this.renderRow(c, !!q)));
   }
 
-  private renderContact(c: Contact, isSearchResult: boolean): HTMLElement {
-    // Always read online status live from PresenceService so buttons update immediately
-    // when a user comes online, without waiting for the next contact-list fetch.
+  private renderRow(c: Contact, isSearchResult: boolean): HTMLElement {
     const online = this.isOnline(c.phone);
+    const activity = this.lastActivity(c.phone);
+    const deviceId = this.opts.app.presence.deviceIdForPhone(c.phone);
+    const unread = deviceId ? this.opts.app.dms.unreadFor(deviceId) : 0;
+    const isSaved = this.opts.contacts.has(c.phone);
+    const showActions = this.actionsFor === c.phone;
 
-    const avatar = h('div', {
-      class: 'contact-avatar',
-      style: `background:${this.avatarColor(c.phone)}`,
-    }, this.initials(c.name));
+    // Long-press detection
+    let pressTimer: ReturnType<typeof setTimeout> | undefined;
+    let pressStart: { x: number; y: number } | null = null;
 
-    const statusDot = h('span', { class: `contact-status ${online ? 'online' : 'offline'}` });
-    const nameEl = h('span', { class: 'contact-name' }, c.name);
-    const statusText = h('span', { class: `contact-status-text ${online ? 'online' : ''}` }, online ? 'Online' : c.phone);
+    const cancelPress = () => {
+      if (pressTimer) clearTimeout(pressTimer);
+      pressTimer = undefined;
+      pressStart = null;
+    };
 
-    const saveBtn = !this.opts.contacts.has(c.phone)
-      ? h('button', {
+    const row = h('button', {
+      class: 'user-row',
+      type: 'button',
+      'aria-label': `${c.name}`,
+      onclick: (e: Event) => {
+        e.stopPropagation();
+        if (this.suppressClick) { this.suppressClick = false; return; }
+        if (this.actionsFor) { this.showActions(null); return; }
+        if (!isSaved) this.opts.contacts.add(c.phone, c.name);
+        this.opts.onMessage(c);
+      },
+    },
+      h('span', { class: 'me-avatar' },
+        h('span', { class: 'avatar', style: `--avatar:${colorFor(c.phone)}` }, initials(c.name)),
+        h('span', { class: `presence-dot ${online ? 'online' : 'offline'}`, 'aria-hidden': 'true' }),
+      ),
+      h('span', { class: 'grow user-info' },
+        h('span', { class: 'user-name' }, c.name),
+        activity
+          ? h('span', { class: 'user-last' }, activity.text)
+          : h('span', { class: 'user-last' }, c.phone),
+      ),
+      ...(activity ? [h('span', { class: 'user-time' }, activity.time)] : []),
+      ...(unread && !showActions ? [h('span', { class: 'badge' }, unread > 9 ? '9+' : String(unread))] : []),
+      ...(isSearchResult && !isSaved ? [h('button', {
+        class: 'icon-btn',
+        type: 'button',
+        title: 'Save contact',
+        html: icons.userPlus,
+        onclick: (e: Event) => { e.stopPropagation(); this.opts.contacts.add(c.phone, c.name); },
+      })] : []),
+    );
+
+    // Long-press to reveal actions
+    row.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
+      pressStart = { x: e.clientX, y: e.clientY };
+      pressTimer = setTimeout(() => {
+        pressTimer = undefined;
+        this.suppressClick = true;
+        document.addEventListener('pointerup', () => setTimeout(() => { this.suppressClick = false; }, 60), { once: true });
+        navigator.vibrate?.(15);
+        this.showActions(c.phone);
+      }, LONG_PRESS_MS);
+    });
+    row.addEventListener('pointermove', (e) => {
+      if (pressStart && Math.hypot(e.clientX - pressStart.x, e.clientY - pressStart.y) > 10) cancelPress();
+    });
+    row.addEventListener('pointerup', cancelPress);
+    row.addEventListener('pointercancel', cancelPress);
+    row.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      cancelPress();
+      this.suppressClick = true;
+      this.showActions(c.phone);
+      setTimeout(() => { this.suppressClick = false; }, 0);
+    });
+
+    const li = h('li', { class: `user ${online ? 'online' : 'offline'}${showActions ? ' actions' : ''}`, 'data-phone': c.phone }, row);
+
+    if (showActions) {
+      li.append(h('span', { class: 'row-actions' },
+        h('button', {
+          class: 'icon-btn call-btn',
+          type: 'button',
+          title: 'Audio call',
+          html: icons.phone,
+          onclick: () => { this.showActions(null); this.opts.onCall(c, 'audio'); },
+        }),
+        h('button', {
+          class: 'icon-btn call-btn',
+          type: 'button',
+          title: 'Video call',
+          html: icons.cam,
+          onclick: () => { this.showActions(null); this.opts.onCall(c, 'video'); },
+        }),
+        isSaved ? h('button', {
+          class: 'icon-btn',
+          type: 'button',
+          title: 'Remove contact',
+          html: icons.trash,
+          onclick: () => { this.showActions(null); this.opts.contacts.remove(c.phone); },
+        }) : h('button', {
           class: 'icon-btn',
           type: 'button',
           title: 'Save contact',
-          'aria-label': 'Save contact',
           html: icons.userPlus,
-          onclick: (e: Event) => { e.stopPropagation(); this.opts.contacts.add(c.phone, c.name); },
-        })
-      : null;
+          onclick: () => { this.showActions(null); this.opts.contacts.add(c.phone, c.name); },
+        }),
+      ));
+    }
 
-    const audioBtn = h('button', {
-      class: 'btn btn-sm',
-      type: 'button',
-      disabled: !online,
-      title: online ? 'Audio call' : 'User is offline',
-      html: icons.phone,
-      onclick: (e: Event) => { e.stopPropagation(); this.opts.onCall(c, 'audio'); },
-    });
-    const videoBtn = h('button', {
-      class: 'btn btn-sm',
-      type: 'button',
-      disabled: !online,
-      title: online ? 'Video call' : 'User is offline',
-      html: icons.cam,
-      onclick: (e: Event) => { e.stopPropagation(); this.opts.onCall(c, 'video'); },
-    });
-    // Messages can be sent to offline users — delivered via push when they reconnect.
-    const msgBtn = h('button', {
-      class: 'btn btn-sm',
-      type: 'button',
-      title: 'Message',
-      html: icons.chat,
-      onclick: (e: Event) => {
-        e.stopPropagation();
-        // Auto-save contact if messaging a search result (not yet in local contacts)
-        if (!this.opts.contacts.has(c.phone)) {
-          this.opts.contacts.add(c.phone, c.name);
-        }
-        this.opts.onMessage(c);
-      },
-    });
-
-    return h(
-      'div',
-      { class: `contact-row ${online ? 'is-online' : ''}` },
-      h('div', { class: 'contact-avatar-wrap' }, avatar, statusDot),
-      h('div', { class: 'contact-info' }, h('div', { class: 'contact-text' }, nameEl, statusText)),
-      h('div', { class: 'contact-actions' }, ...(saveBtn && isSearchResult ? [saveBtn] : []), audioBtn, videoBtn, msgBtn),
-    );
+    return li;
   }
 }
