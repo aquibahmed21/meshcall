@@ -40,8 +40,6 @@ export class ContactsScreen {
   private actionsFor: string | null = null;
   private actionsBack: (() => void) | null = null;
   private suppressClick = false;
-  /** Last-known deviceId per phone — persists after the contact goes offline. */
-  private phoneToDeviceId = new Map<string, string>();
   private searchWrap: HTMLElement;
   private countEl: HTMLElement;
 
@@ -127,11 +125,11 @@ export class ContactsScreen {
 
     this.off = opts.contacts.events.on('change', () => this.renderList());
     this.offPresence = opts.app.presence.events.on('change', () => {
-      // Update phone→deviceId cache while the contact is online so we can
-      // still find their call/message history after they go offline.
+      // Persist the deviceId while the contact is online so DM history
+      // is accessible after they go offline or the app restarts.
       for (const c of opts.contacts.contacts) {
         const did = opts.app.presence.deviceIdForPhone(c.phone);
-        if (did) this.phoneToDeviceId.set(c.phone, did);
+        if (did) opts.contacts.learnDeviceId(c.phone, did);
       }
       this.renderList();
     });
@@ -205,7 +203,11 @@ export class ContactsScreen {
   }
 
   private deviceIdFor(phone: string): string | null {
-    return this.opts.app.presence.deviceIdForPhone(phone) ?? this.phoneToDeviceId.get(phone) ?? null;
+    // Live presence first; fall back to persisted deviceId stored in the contact record.
+    const live = this.opts.app.presence.deviceIdForPhone(phone);
+    if (live) return live;
+    const c = this.opts.contacts.contacts.find(x => x.phone === phone);
+    return c?.deviceId ?? null;
   }
 
   private isOnline(phone: string): boolean {

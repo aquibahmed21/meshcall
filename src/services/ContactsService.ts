@@ -12,9 +12,12 @@ export interface Contact {
   online: boolean;
   /** Source of this contact entry */
   source: 'manual' | 'device';
+  /** Last-known signaling deviceId — persisted so DM history survives offline restarts. */
+  deviceId?: string;
 }
 
 const CONTACTS_KEY_PREFIX = 'voip.contacts.';
+const DELETED_KEY_PREFIX = 'voip.deleted.';
 
 /**
  * Generate lookup variants for a stripped phone number so that device contacts
@@ -51,6 +54,7 @@ function phoneVariants(num: string): string[] {
 export class ContactsService {
   readonly events = new Emitter<{ change: void }>();
   private _contacts = new Map<string, Contact>();
+  private _deleted = new Set<string>();
   private _config: AppConfig | null = null;
 
   constructor(
@@ -65,12 +69,21 @@ export class ContactsService {
     return this.identity.isLoggedIn ? `${CONTACTS_KEY_PREFIX}${this.identity.phone}` : null;
   }
 
+  private get deletedKey(): string | null {
+    return this.identity.isLoggedIn ? `${DELETED_KEY_PREFIX}${this.identity.phone}` : null;
+  }
+
   private _loadFromStorage(): void {
     this._contacts.clear();
+    this._deleted.clear();
     const key = this.storageKey;
-    if (!key) return; // not logged in — no per-account contacts to load
+    if (!key) return;
     for (const c of storage.get<Contact[]>(key, [])) {
       if (c?.phone) this._contacts.set(c.phone, c);
+    }
+    const dkey = this.deletedKey;
+    if (dkey) {
+      for (const p of storage.get<string[]>(dkey, [])) this._deleted.add(p);
     }
   }
 
@@ -140,21 +153,36 @@ export class ContactsService {
     }
   }
 
-  /** Save a contact locally. */
+  /** Save a contact locally. Clears the deleted-blocklist entry so it can be re-added. */
   add(phone: string, name: string, source: Contact['source'] = 'manual'): void {
-    this._contacts.set(phone, { phone, name, registered: true, online: false, source });
+    this._deleted.delete(phone);
+    this.persistDeleted();
+    const existing = this._contacts.get(phone);
+    this._contacts.set(phone, { ...existing, phone, name, registered: true, online: false, source });
     this.persist();
     this.events.emit('change', undefined);
   }
 
+  /** Remove a contact and blocklist it so device-sync doesn't re-add it. */
   remove(phone: string): void {
     this._contacts.delete(phone);
+    this._deleted.add(phone);
     this.persist();
+    this.persistDeleted();
     this.events.emit('change', undefined);
   }
 
   has(phone: string): boolean {
     return this._contacts.has(phone);
+  }
+
+  /** Store the contact's last-known signaling deviceId so DM history is accessible offline. */
+  learnDeviceId(phone: string, deviceId: string): void {
+    const c = this._contacts.get(phone);
+    if (c && c.deviceId !== deviceId) {
+      c.deviceId = deviceId;
+      this.persist();
+    }
   }
 
   /** Refresh online status of all saved contacts from the server. */
@@ -247,24 +275,33 @@ export class ContactsService {
 
     const registered = await this.lookup(phones);
     console.log(`[SYNC] server returned ${registered.length} registered: ${registered.map(r => r.phone).join(', ')}`);
+    const added: Contact[] = [];
     for (const r of registered) {
+      // Skip contacts the user explicitly deleted — they re-appear only on fresh call/message.
+      if (this._deleted.has(r.phone)) continue;
       const deviceName = serverPhoneToDeviceName.get(r.phone) ?? r.name;
       const existing = this._contacts.get(r.phone);
-      // Merge: keep existing contact if manually added, but update name/online status
       if (existing && existing.source === 'manual') {
         this._contacts.set(r.phone, { ...existing, name: deviceName, online: r.online });
       } else {
         this._contacts.set(r.phone, { ...r, name: deviceName, source: 'device' });
       }
+      added.push({ ...r, name: deviceName, source: 'device' as const });
     }
     this.persist();
     this.events.emit('change', undefined);
-    return registered.map((r) => ({ ...r, name: serverPhoneToDeviceName.get(r.phone) ?? r.name, source: 'device' as const }));
+    return added;
   }
 
   private persist(): void {
     const key = this.storageKey;
-    if (!key) return; // not logged in — don't persist
+    if (!key) return;
     storage.set(key, [...this._contacts.values()]);
+  }
+
+  private persistDeleted(): void {
+    const key = this.deletedKey;
+    if (!key) return;
+    storage.set(key, [...this._deleted]);
   }
 }
