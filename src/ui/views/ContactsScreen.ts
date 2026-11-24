@@ -5,6 +5,7 @@ import type { ContactsService, Contact } from '../../services/ContactsService';
 import { AdminScreen } from './AdminScreen';
 import { isNative } from '../../native/native';
 import { colorFor, initials } from '../dom';
+import { backStack } from '../BackStack';
 
 export interface ContactsScreenOptions {
   app: AppContext;
@@ -37,6 +38,7 @@ export class ContactsScreen {
   private _initCalled = false;
   /** Phone number of the row currently showing inline actions */
   private actionsFor: string | null = null;
+  private actionsBack: (() => void) | null = null;
   private suppressClick = false;
   private searchWrap: HTMLElement;
   private countEl: HTMLElement;
@@ -167,8 +169,29 @@ export class ContactsScreen {
   }
 
   private showActions(phone: string | null): void {
+    // Release any previous back-stack entry first.
+    this.actionsBack?.();
+    this.actionsBack = null;
     this.actionsFor = phone;
+    if (phone) {
+      // Push a back-stack entry so the Android back button dismisses the action strip.
+      this.actionsBack = backStack.push(() => {
+        this.actionsFor = null;
+        this.actionsBack = null;
+        this.renderList();
+      });
+    }
     this.renderList();
+  }
+
+  /** Call when the contacts screen becomes visible (e.g. after navigating back from calls). */
+  onShow(): void {
+    if (this.searchInput.value || !this.searchWrap.hidden) {
+      this.searchInput.value = '';
+      this.searchWrap.hidden = true;
+      this.searchResults = [];
+      this.renderList();
+    }
   }
 
   private isOnline(phone: string): boolean {

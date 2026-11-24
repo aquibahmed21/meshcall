@@ -93,7 +93,7 @@ async function boot(): Promise<void> {
     document.title = 'MeshCall';
     // Ensure UIManager is mounted first so topbar + bottom-nav are always visible.
     if (!ui) showMainUI();
-    if (contactsScreen) { ui?.showContacts(contactsScreen.el); return; }
+    if (contactsScreen) { ui?.showContacts(contactsScreen.el); contactsScreen.onShow(); return; }
     contactsScreen = new ContactsScreen({
       app,
       contacts: app.contacts,
