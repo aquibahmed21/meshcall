@@ -70,16 +70,25 @@ async function boot(): Promise<void> {
       ui = new UIManager(app, mount, {
         onLeaveRoom: () => showContactsScreen(),
         onLogout: doLogout,
+        onStageShow: () => contactsScreen?.onShow(),
+        onPeopleNav: () => showContactsScreen(),
       });
     } else {
       ui.attach(mount);
     }
-    // Android, first time: ask for permissions + battery exemption.
-    if (isNative && !isHeadless && !native.setupDone) {
-      const overlay = document.createElement('div');
-      overlay.className = 'perm-overlay';
-      document.body.appendChild(overlay);
-      renderPermissionsScreen(overlay, () => overlay.remove());
+    // Android: show permissions screen if any critical permissions are missing.
+    console.log(`[PERM] showMainUI: isNative=${isNative} isHeadless=${isHeadless}`);
+    if (isNative && !isHeadless) {
+      void native.permissionStatus().then((s) => {
+        const missing = s.microphone !== 'granted' || s.notifications !== 'granted';
+        console.log(`[PERM] status: mic=${s.microphone} notif=${s.notifications} missing=${missing} setupDone=${native.setupDone}`);
+        if (!native.setupDone || missing) {
+          const overlay = document.createElement('div');
+          overlay.className = 'perm-overlay';
+          document.body.appendChild(overlay);
+          renderPermissionsScreen(overlay, () => overlay.remove());
+        }
+      });
     }
     if (ctx?.kind === 'incoming-call' && ctx.action === 'callback') void callBack(ctx);
     else if (ctx?.kind === 'incoming-call' && ctx.callType === 'live') { if (ctx.action === 'accept') app.live.acceptInvite(ctx.callId); }
@@ -93,7 +102,7 @@ async function boot(): Promise<void> {
     document.title = 'MeshCall';
     // Ensure UIManager is mounted first so topbar + bottom-nav are always visible.
     if (!ui) showMainUI();
-    if (contactsScreen) { ui?.showContacts(contactsScreen.el); contactsScreen.onShow(); return; }
+    if (contactsScreen) { console.log('[CS] showContactsScreen: revisit'); ui?.showContacts(contactsScreen.el); contactsScreen.onShow(); return; }
     contactsScreen = new ContactsScreen({
       app,
       contacts: app.contacts,

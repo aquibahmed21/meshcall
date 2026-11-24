@@ -66,6 +66,7 @@ public class MainActivity extends BridgeActivity {
         CallService.activityAlive = true;
         HeadlessHost.stop(); // the real UI takes over the connection
         registerPlugin(MeshCallPlugin.class);
+        registerPlugin(getcapacitor.community.contacts.ContactsPlugin.class);
         super.onCreate(savedInstanceState);
         // Hardware volume keys always control the MEDIA volume, which is what call audio plays on.
         setVolumeControlStream(android.media.AudioManager.STREAM_MUSIC);

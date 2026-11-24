@@ -93,6 +93,11 @@ export class ContactsService {
    */
   reloadForPhone(): void {
     this._loadFromStorage();
+    // Remove own number if it was previously synced in.
+    if (this.identity.isLoggedIn && this._contacts.has(this.identity.phone)) {
+      this._contacts.delete(this.identity.phone);
+      this.persist();
+    }
     this.events.emit('change', undefined);
   }
 
@@ -277,7 +282,8 @@ export class ContactsService {
     console.log(`[SYNC] server returned ${registered.length} registered: ${registered.map(r => r.phone).join(', ')}`);
     const added: Contact[] = [];
     for (const r of registered) {
-      // Skip contacts the user explicitly deleted — they re-appear only on fresh call/message.
+      // Skip own phone number and explicitly deleted contacts.
+      if (r.phone === this.identity.phone) continue;
       if (this._deleted.has(r.phone)) continue;
       const deviceName = serverPhoneToDeviceName.get(r.phone) ?? r.name;
       const existing = this._contacts.get(r.phone);

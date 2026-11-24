@@ -330,6 +330,11 @@ public class MeshCallPlugin extends Plugin {
         notificationPermission(call);
     }
 
+    @PermissionCallback
+    private void runtimePermissionsResult(PluginCall call) {
+        permissionStatus(call);
+    }
+
     private String runtimeState(String alias, int minSdk) {
         if (Build.VERSION.SDK_INT < minSdk) return "granted";
         PermissionState st = getPermissionState(alias);

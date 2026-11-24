@@ -23,6 +23,10 @@ type MobileView = 'people' | 'live' | 'call' | 'contacts';
 export interface UIManagerOptions {
   onLeaveRoom: () => void;
   onLogout: () => void;
+  /** Called when the stage transitions to the contacts view (ContactsScreen becomes visible). */
+  onStageShow?: () => void;
+  /** Called when the user taps the People nav button; if set, navigates to ContactsScreen instead of the sidebar. */
+  onPeopleNav?: () => void;
 }
 
 /**
@@ -58,7 +62,6 @@ export class UIManager {
   private diagBack: (() => void) | null = null;
   private menuBack: (() => void) | null = null;
   private callGuard: (() => void) | null = null;
-  private _contactsBack: (() => void) | null = null;
   /** Bottom of the Back stack: Back with nothing open asks before leaving the app. */
   private exitGuard: (() => void) | null = null;
   private exiting = false;
@@ -87,7 +90,11 @@ export class UIManager {
     this.nav = h(
       'nav',
       { class: 'bottom-nav', 'aria-label': 'Sections' },
-      this.navBtn('people', 'People', icons.users),
+      this.navBtn('people', 'People', icons.users, () => {
+        if (this.viewBack) { this.viewBack(); this.viewBack = null; }
+        if (this.opts.onPeopleNav) this.opts.onPeopleNav();
+        else this.setView('people');
+      }),
       this.navBtn('live', 'Live', icons.live),
       this.navBtn('call', 'Call', icons.phone),
     );
@@ -201,16 +208,12 @@ export class UIManager {
   showContacts(el: HTMLElement): void {
     this.stage.replaceChildren(el);
     this.setView('contacts');
-    // Push a backStack entry so Back returns to contacts screen
-    this._contactsBack = backStack.push(() => this.hideContacts());
   }
 
-  /** Leave the contacts view and return to the people pane. */
+  /** Leave the contacts view (called when a call starts). */
   hideContacts(): void {
     this.stage.replaceChildren(this.idle);
     this.setView('people');
-    this._contactsBack?.();
-    this._contactsBack = null;
   }
 
   /** Header identity: avatar with a presence dot and my name. */
@@ -259,7 +262,6 @@ export class UIManager {
       h('button', { class: `menu-item ${cls}`.trim(), role: 'menuitem', type: 'button', onclick: () => (this.setTopMenu(false), run()) }, h('span', { html: icon }), label);
     this.topMenu.replaceChildren(
       ...nodes(
-        room ? h('div', { class: 'menu-label', title: room.roomName }, h('small', {}, 'Room'), h('strong', {}, room.roomName)) : null,
         room ? item(icons.userPlus, 'Start invite', () => this.newInvite()) : null,
         room ? item(icons.live, 'Go live', () => (this.app.calls.inCall ? this.toasts.show('info', 'You are already in a call') : openGoLive(this.app))) : null,
         item(icons.bellOff, isDndActive(this.app.settings.get()) ? 'DND on' : 'DND', () => this.app.settings.update({ dnd: !this.app.settings.get().dnd }), this.app.settings.get().dnd ? 'on' : ''),
@@ -552,15 +554,26 @@ export class UIManager {
     if (view === 'people') {
       if (!viaBack) this.viewBack?.();
       this.viewBack = null;
-    } else if (!this.viewBack && this.mobile.matches) {
-      this.viewBack = backStack.push(() => this.setView('people', true));
+    } else if (!this.viewBack && this.mobile.matches && view !== 'contacts') {
+      this.viewBack = backStack.push(() => {
+        this.viewBack = null;
+        if (this.opts.onPeopleNav) this.opts.onPeopleNav();
+        else this.setView('people', true);
+      });
     }
     this.view = view;
     this.root.dataset.view = view;
+    // Notify whenever ContactsScreen becomes the active view so it can reset search state.
+    if (view === 'contacts') {
+      this.opts.onStageShow?.();
+    }
     // Mobile: the bottom tabs choose the sidebar pane (Call tab without a call = call history).
     // Contacts view has no matching sidebar pane — keep current pane.
     if (this.mobile.matches && view !== 'contacts') this.sidebar.setPane(view === 'call' ? 'calls' : view);
-    for (const b of this.nav.querySelectorAll('button')) b.setAttribute('aria-current', b.dataset.view === view ? 'page' : 'false');
+    for (const b of this.nav.querySelectorAll('button')) {
+      const isActive = b.dataset.view === view || (view === 'contacts' && b.dataset.view === 'people');
+      b.setAttribute('aria-current', isActive ? 'page' : 'false');
+    }
     this.syncCallBadge();
     this.renderBanner();
   }
@@ -573,8 +586,8 @@ export class UIManager {
     this.callNavBadge.textContent = n > 9 ? '9+' : String(n);
   }
 
-  private navBtn(view: MobileView, label: string, icon: string): HTMLButtonElement {
-    const b = h('button', { 'data-view': view, 'aria-label': label, onclick: () => this.setView(view) }, h('span', { html: icon }), h('span', {}, label));
+  private navBtn(view: MobileView, label: string, icon: string, onClick?: () => void): HTMLButtonElement {
+    const b = h('button', { 'data-view': view, 'aria-label': label, onclick: onClick ?? (() => this.setView(view)) }, h('span', { html: icon }), h('span', {}, label));
     if (view === 'call') b.append(this.callNavBadge);
     return b;
   }

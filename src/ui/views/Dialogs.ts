@@ -314,7 +314,7 @@ export function openIncomingCall(app: AppContext, call: CallState): Modal {
   const who = call.remoteUser?.name ?? 'Someone';
   m.setContent(
     h('div', { class: 'avatar big pulse', style: `--avatar:${colorFor(call.remoteUser?.deviceId ?? '')}` }, initials(who)),
-    h('p', { class: 'incoming-text' }, call.kind === 'group' ? `${who} invites you to “${call.title ?? 'a group call'}”` : `${who} is calling you`),
+    h('p', { class: 'incoming-text' }, `${who} is calling you`),
     h(
       'div',
       { class: 'incoming-actions' },

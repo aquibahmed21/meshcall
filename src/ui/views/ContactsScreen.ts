@@ -3,7 +3,8 @@ import { icons } from '../icons';
 import type { AppContext } from '../../app';
 import type { ContactsService, Contact } from '../../services/ContactsService';
 import { AdminScreen } from './AdminScreen';
-import { isNative } from '../../native/native';
+import { isNative, native } from '../../native/native';
+import { renderPermissionsScreen } from './PermissionsPanel';
 import { colorFor, initials } from '../dom';
 import { backStack } from '../BackStack';
 
@@ -41,6 +42,7 @@ export class ContactsScreen {
   private actionsBack: (() => void) | null = null;
   private suppressClick = false;
   private searchWrap: HTMLElement;
+  private toolbarDefaultEl!: HTMLElement;
   private countEl: HTMLElement;
 
   constructor(private readonly opts: ContactsScreenOptions) {
@@ -68,32 +70,7 @@ export class ContactsScreen {
 
     this.countEl = h('span', { class: 'cs-online-count' }, '');
 
-    const toolbar = h(
-      'div',
-      { class: 'cs-toolbar' },
-      this.countEl,
-      h('div', { class: 'cs-toolbar-actions' },
-        h('button', {
-          class: 'icon-btn',
-          type: 'button',
-          title: 'Search',
-          'aria-label': 'Search',
-          html: icons.search,
-          onclick: () => this.openSearch(),
-        }),
-        h('button', {
-          class: 'icon-btn',
-          type: 'button',
-          title: 'Find contacts on MeshCall',
-          'aria-label': 'Find contacts on MeshCall',
-          html: icons.users,
-          onclick: () => void this.discoverDeviceContacts(),
-        }),
-        ...(adminBtn ? [adminBtn] : []),
-      ),
-    );
-
-    this.searchWrap = h('div', { class: 'cs-search-wrap', hidden: true },
+    this.searchWrap = h('div', { class: 'cs-search-inline', hidden: true },
       this.searchInput,
       h('button', {
         class: 'icon-btn',
@@ -104,11 +81,38 @@ export class ContactsScreen {
       }),
     );
 
+    const toolbarActions = h('div', { class: 'cs-toolbar-actions' },
+      h('button', {
+        class: 'icon-btn',
+        type: 'button',
+        title: 'Search',
+        'aria-label': 'Search',
+        html: icons.search,
+        onclick: () => this.openSearch(),
+      }),
+      h('button', {
+        class: 'icon-btn',
+        type: 'button',
+        title: 'Find contacts on MeshCall',
+        'aria-label': 'Find contacts on MeshCall',
+        html: icons.users,
+        onclick: () => void this.discoverDeviceContacts(),
+      }),
+      ...(adminBtn ? [adminBtn] : []),
+    );
+    this.toolbarDefaultEl = h('div', { class: 'cs-toolbar-default' }, this.countEl, toolbarActions);
+
+    const toolbar = h(
+      'div',
+      { class: 'cs-toolbar' },
+      this.toolbarDefaultEl,
+      this.searchWrap,
+    );
+
     this.el = h(
       'div',
       { class: 'cs-screen' },
       toolbar,
-      this.searchWrap,
       this.statusEl,
       this.listEl,
     );
@@ -165,12 +169,14 @@ export class ContactsScreen {
   }
 
   private openSearch(): void {
+    this.toolbarDefaultEl.hidden = true;
     this.searchWrap.hidden = false;
     this.searchInput.focus();
   }
 
   private closeSearch(): void {
     this.searchWrap.hidden = true;
+    this.toolbarDefaultEl.hidden = false;
     this.searchInput.value = '';
     this.searchResults = [];
     this.renderList();
@@ -194,20 +200,23 @@ export class ContactsScreen {
 
   /** Call when the contacts screen becomes visible (e.g. after navigating back from calls). */
   onShow(): void {
+    console.log(`[CS] onShow: searchValue="${this.searchInput.value}" searchWrapHidden=${this.searchWrap.hidden}`);
     if (this.searchInput.value || !this.searchWrap.hidden) {
       this.searchInput.value = '';
       this.searchWrap.hidden = true;
+      this.toolbarDefaultEl.hidden = false;
       this.searchResults = [];
       this.renderList();
     }
   }
 
   private deviceIdFor(phone: string): string | null {
-    // Live presence first; fall back to persisted deviceId stored in the contact record.
     const live = this.opts.app.presence.deviceIdForPhone(phone);
     if (live) return live;
     const c = this.opts.contacts.contacts.find(x => x.phone === phone);
-    return c?.deviceId ?? null;
+    const stored = c?.deviceId ?? null;
+    console.log(`[CS] deviceIdFor ${phone}: live=null stored=${stored}`);
+    return stored;
   }
 
   private isOnline(phone: string): boolean {
@@ -264,14 +273,25 @@ export class ContactsScreen {
 
   /** Tap the device-contacts icon: scan and show a discovery bottom sheet. */
   private async discoverDeviceContacts(): Promise<void> {
+    // If contacts permission not yet granted, show the unified permissions screen
+    // instead of letting the contacts plugin request it on its own.
+    if (isNative) {
+      const s = await native.permissionStatus();
+      if (s.contacts !== 'granted') {
+        const overlay = document.createElement('div');
+        overlay.className = 'perm-overlay';
+        document.body.appendChild(overlay);
+        renderPermissionsScreen(overlay, () => { overlay.remove(); void this.discoverDeviceContacts(); });
+        return;
+      }
+    }
     this.setStatus('Scanning device contacts…');
     const found = await this.opts.contacts.syncDeviceContacts();
     this.setStatus('');
-    if (!found.length) {
-      this.showDiscoverySheet([]);
-      return;
-    }
-    this.showDiscoverySheet(found);
+    // Filter out the user's own number
+    const myPhone = this.opts.app.identity.phone;
+    const others = found.filter(c => c.phone !== myPhone);
+    this.showDiscoverySheet(others);
   }
 
   /** Bottom sheet listing device contacts who are on MeshCall. */
@@ -282,8 +302,14 @@ export class ContactsScreen {
 
     const rows = found.length
       ? found.map(c => {
-          const saved = this.opts.contacts.has(c.phone);
-          return h('li', { class: 'cs-disc-row' },
+          return h('li', {
+            class: 'cs-disc-row',
+            onclick: () => {
+              if (!this.opts.contacts.has(c.phone)) this.opts.contacts.add(c.phone, c.name);
+              this.opts.onMessage(c);
+              close();
+            },
+          },
             h('span', { class: 'me-avatar' },
               h('span', { class: 'avatar', style: `--avatar:${colorFor(c.phone)}` }, initials(c.name)),
             ),
@@ -291,17 +317,16 @@ export class ContactsScreen {
               h('span', { class: 'user-name' }, c.name),
               h('span', { class: 'user-last' }, c.phone),
             ),
-            saved
-              ? h('button', { class: 'btn small', disabled: true }, 'Saved')
-              : h('button', {
-                  class: 'btn small primary',
-                  type: 'button',
-                  onclick: () => {
-                    this.opts.contacts.add(c.phone, c.name);
-                    this.opts.onMessage(c);
-                    close();
-                  },
-                }, 'Message'),
+            h('button', {
+              class: 'btn small primary',
+              type: 'button',
+              onclick: (e: Event) => {
+                e.stopPropagation();
+                if (!this.opts.contacts.has(c.phone)) this.opts.contacts.add(c.phone, c.name);
+                this.opts.onMessage(c);
+                close();
+              },
+            }, 'Message'),
           );
         })
       : [h('li', { class: 'cs-disc-empty' }, 'None of your device contacts are on MeshCall yet.')];
@@ -329,15 +354,19 @@ export class ContactsScreen {
       // Main list: only contacts with call/message history, sorted most-recent first.
       type WithTs = { contact: Contact; ts: number };
       const withTs: WithTs[] = [];
-      for (const c of this.opts.contacts.contacts) {
+      const all = this.opts.contacts.contacts;
+      console.log(`[CS] renderList: total contacts=${all.length} q="${q}"`);
+      for (const c of all) {
         const a = this.lastActivity(c.phone);
+        console.log(`[CS]   ${c.name}(${c.phone}) deviceId=${c.deviceId ?? 'none'} activity=${a ? a.text : 'null'}`);
         if (a) withTs.push({ contact: c, ts: a.ts });
       }
       withTs.sort((a, b) => b.ts - a.ts);
       items = withTs.map(x => x.contact);
+      console.log(`[CS] renderList: showing ${items.length} rows`);
     }
 
-    const online = this.opts.contacts.contacts.filter(c => this.isOnline(c.phone)).length;
+    const online = items.filter(c => this.isOnline(c.phone)).length;
     this.countEl.textContent = `${online} online`;
 
     if (!items.length) {
