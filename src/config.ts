@@ -22,15 +22,8 @@ export const POINTER_URL = (env.VITE_POINTER_URL || 'https://aquibahmed21.github
 /** Existing Web Push backend (see src/push/PushBackend.ts). Override with VITE_PUSH_SERVER_URL. */
 export const PUSH_SERVER_URL = 'https://web-push-3zaz.onrender.com';
 
-/** Public Google STUN servers – used for STUN only (Google runs no public TURN servers). */
+/** Public Google STUN servers – last-resort fallback when the VPS is unreachable. */
 export const GOOGLE_STUN = ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'];
-
-/** STUN order: Google's servers always first, then the configured ones (de-duplicated). */
-export function orderStunUrls(configured: string[]): string[] {
-  const norm = (u: string) => u.trim().toLowerCase();
-  const google = new Set(GOOGLE_STUN.map(norm));
-  return [...GOOGLE_STUN, ...configured.filter((u, i) => !google.has(norm(u)) && configured.findIndex((x) => norm(x) === norm(u)) === i)];
-}
 
 export type IceFallbackMode = 'gated' | 'native';
 
@@ -82,22 +75,27 @@ function list(value: string | undefined): string[] {
 
 function buildIceServers(): { servers: RTCIceServer[]; hasTurn: boolean; hasStun: boolean } {
   const servers: RTCIceServer[] = [];
-  // Google STUN first, then configured STUN, then TURN (the fallback relay).
-  const stunUrls = orderStunUrls(list(env.VITE_STUN_SERVER));
-  servers.push({ urls: stunUrls });
-
+  const stunUrls = list(env.VITE_STUN_SERVER);
   const turnUrls = list(env.VITE_TURN_SERVER);
   const username = env.VITE_TURN_USERNAME;
   const credential = env.VITE_TURN_CREDENTIAL;
+
+  if (stunUrls.length) {
+    servers.push({ urls: stunUrls });
+  }
   const hasTurn = turnUrls.length > 0 && !!username && !!credential;
   if (hasTurn) {
     servers.push({ urls: turnUrls.length === 1 ? turnUrls[0]! : turnUrls, username, credential });
   } else if (turnUrls.length) {
     log.warn('TURN URL configured without username/credential – TURN relay disabled');
-  } else {
-    log.warn('No TURN server configured – peers behind symmetric NAT/firewalls may fail to connect');
   }
-  return { servers, hasTurn, hasStun: stunUrls.length > 0 };
+  // If no compile-time ICE config, use Google STUN as a last-resort placeholder until
+  // resolveIceServers() replaces it with the VPS config at runtime.
+  if (!servers.length) {
+    servers.push({ urls: GOOGLE_STUN });
+    log.warn('No compile-time ICE config – using Google STUN as placeholder until VPS responds');
+  }
+  return { servers, hasTurn, hasStun: servers.some((s) => (Array.isArray(s.urls) ? s.urls : [s.urls]).some((u) => u.startsWith('stun:'))) };
 }
 
 const ice = buildIceServers();
@@ -174,9 +172,8 @@ export async function resolveIceServers(serverUrl: string): Promise<void> {
     if (!res.ok) return;
     const json = (await res.json()) as { iceServers?: RTCIceServer[] };
     if (!Array.isArray(json.iceServers) || json.iceServers.length === 0) return;
-    // Merge server-supplied TURN/STUN with Google STUN (keep Google first).
-    const googleStun: RTCIceServer = { urls: GOOGLE_STUN };
-    CONFIG.iceServers = [googleStun, ...json.iceServers];
+    // Trust the VPS completely — it already manages its own fallback STUN.
+    CONFIG.iceServers = json.iceServers;
     CONFIG.hasTurn = json.iceServers.some((s) => {
       const urls = Array.isArray(s.urls) ? s.urls : [s.urls];
       return urls.some((u) => u.startsWith('turn:') || u.startsWith('turns:'));
