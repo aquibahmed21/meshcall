@@ -163,23 +163,39 @@ export async function resolveServerUrl(): Promise<string> {
 
 /**
  * Fetch TURN/STUN config from the server and patch CONFIG.iceServers in place.
- * Called once at boot after the server URL is known. If the server returns no
- * extra ICE servers, the compile-time defaults (Google STUN) stay in effect.
+ * Called once at boot after the server URL is known. If the server returns empty,
+ * retries once after 3 s (server may still be starting). If still empty, the
+ * compile-time defaults (Google STUN) stay as a last-resort placeholder.
  */
 export async function resolveIceServers(serverUrl: string): Promise<void> {
-  try {
-    const res = await fetch(`${serverUrl}/api/ice-servers`, { cache: 'no-store' });
-    if (!res.ok) return;
-    const json = (await res.json()) as { iceServers?: RTCIceServer[] };
-    if (!Array.isArray(json.iceServers) || json.iceServers.length === 0) return;
-    // Trust the VPS completely — it already manages its own fallback STUN.
-    CONFIG.iceServers = json.iceServers;
-    CONFIG.hasTurn = json.iceServers.some((s) => {
-      const urls = Array.isArray(s.urls) ? s.urls : [s.urls];
-      return urls.some((u) => u.startsWith('turn:') || u.startsWith('turns:'));
-    });
-    log.info('ICE servers loaded from server:', json.iceServers.map((s) => Array.isArray(s.urls) ? s.urls[0] : s.urls));
-  } catch (err) {
-    log.warn('Could not fetch ICE servers from server:', err);
+  async function tryFetch(): Promise<RTCIceServer[] | null> {
+    try {
+      const res = await fetch(`${serverUrl}/api/ice-servers`, { cache: 'no-store' });
+      if (!res.ok) return null;
+      const json = (await res.json()) as { iceServers?: RTCIceServer[] };
+      return Array.isArray(json.iceServers) && json.iceServers.length > 0 ? json.iceServers : null;
+    } catch {
+      return null;
+    }
   }
+
+  let servers = await tryFetch();
+  if (!servers) {
+    // Server may be warming up — retry once after a short delay.
+    await new Promise((r) => setTimeout(r, 3000));
+    servers = await tryFetch();
+  }
+
+  if (!servers) {
+    log.warn('ICE servers not available from VPS — using Google STUN placeholder');
+    return;
+  }
+
+  // Trust the VPS completely — it already manages its own fallback STUN.
+  CONFIG.iceServers = servers;
+  CONFIG.hasTurn = servers.some((s) => {
+    const urls = Array.isArray(s.urls) ? s.urls : [s.urls];
+    return urls.some((u) => u.startsWith('turn:') || u.startsWith('turns:'));
+  });
+  log.info('ICE servers loaded from VPS:', servers.map((s) => (Array.isArray(s.urls) ? s.urls[0] : s.urls)));
 }
