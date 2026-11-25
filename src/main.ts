@@ -77,12 +77,12 @@ async function boot(): Promise<void> {
       ui.attach(mount);
     }
     // Android: show permissions screen if any critical permissions are missing.
-    console.log(`[PERM] showMainUI: isNative=${isNative} isHeadless=${isHeadless}`);
     if (isNative && !isHeadless) {
+      const isCallCtx = ctx?.kind === 'incoming-call';
       void native.permissionStatus().then((s) => {
         const missing = s.microphone !== 'granted' || s.notifications !== 'granted';
-        console.log(`[PERM] status: mic=${s.microphone} notif=${s.notifications} missing=${missing} setupDone=${native.setupDone}`);
-        if (!native.setupDone || missing) {
+        // Never block the screen with the perm overlay while a call is active or being set up.
+        if ((!native.setupDone || missing) && !isCallCtx && !app.calls.inCall) {
           const overlay = document.createElement('div');
           overlay.className = 'perm-overlay';
           document.body.appendChild(overlay);
@@ -190,6 +190,8 @@ async function boot(): Promise<void> {
       // If still on contacts screen, hide it so the incoming call dialog is visible.
       if (ui) ui.hideContacts();
       else showMainUI();
+      // Dismiss any permissions overlay that may be covering the screen.
+      document.querySelectorAll('.perm-overlay').forEach(el => el.remove());
     }
   });
 
