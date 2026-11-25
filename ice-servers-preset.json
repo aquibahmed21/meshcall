@@ -1,0 +1,51 @@
+{
+  "_note": "MeshCall ICE server presets. Import this file in the VPS Manager app (Settings → VoIP → TURN / STUN → Import).",
+  "presets": [
+    {
+      "name": "aahlaad.in (self-hosted coturn)",
+      "note": "Previously used in MeshCall .env.example. STUN + TURN on aahlaad.in. Replace credential before using.",
+      "stunServer": "stun:aahlaad.in:3478",
+      "turnServer": "turn:aahlaad.in:3478",
+      "turnUsername": "4133894400:saarathy",
+      "turnCredential": ""
+    },
+    {
+      "name": "Cloudflare TURN (auto credentials)",
+      "note": "Requires Cloudflare Calls TURN key. Configure Key ID + API Token in the Cloudflare TURN panel instead.",
+      "cfTurnKeyId": "",
+      "cfTurnApiToken": ""
+    },
+    {
+      "name": "Cloudflare STUN only",
+      "note": "Free Cloudflare STUN. No relay — will fail if both peers are behind symmetric NAT.",
+      "stunServer": "stun:stun.cloudflare.com:3478",
+      "turnServer": "",
+      "turnUsername": "",
+      "turnCredential": ""
+    },
+    {
+      "name": "Google STUN only",
+      "note": "Hardcoded in MeshCall since the beginning. No relay — Google runs no public TURN.",
+      "stunServer": "stun:stun.l.google.com:19302",
+      "turnServer": "",
+      "turnUsername": "",
+      "turnCredential": ""
+    },
+    {
+      "name": "Open Relay (Metered.ca)",
+      "note": "Free public TURN. Very limited bandwidth — for testing only.",
+      "stunServer": "stun:openrelay.metered.ca:80",
+      "turnServer": "turn:openrelay.metered.ca:80",
+      "turnUsername": "openrelayproject",
+      "turnCredential": "openrelayproject"
+    },
+    {
+      "name": "Open Relay TCP/443 (Metered.ca)",
+      "note": "Same as above but over TCP port 443 — works through strict firewalls that block UDP.",
+      "stunServer": "stun:openrelay.metered.ca:80",
+      "turnServer": "turns:openrelay.metered.ca:443?transport=tcp",
+      "turnUsername": "openrelayproject",
+      "turnCredential": "openrelayproject"
+    }
+  ]
+}
