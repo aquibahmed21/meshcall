@@ -6,7 +6,7 @@
       "note": "Previously used in MeshCall .env.example. STUN + TURN on aahlaad.in. Replace credential before using.",
       "stunServers": ["stun:aahlaad.in:3478"],
       "turnServers": [
-        { "urls": "turn:aahlaad.in:3478", "username": "4133894400:saarathy", "credential": "" }
+        { "urls": "turn:aahlaad.in:3478", "username": "4133894400:saarathy", "credential": "4qMCYoJ20rLihYzne4Cb9DJByVs=" }
       ]
     },
     {

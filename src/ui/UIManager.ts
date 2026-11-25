@@ -561,6 +561,11 @@ export class UIManager {
         else this.setView('people', true);
       });
     }
+    // If returning to the call view, make sure callView is back in the stage
+    // (showContacts replaces the stage content, displacing the callView element).
+    if (view === 'call' && this.callView && !this.stage.contains(this.callView.el)) {
+      this.stage.replaceChildren(this.callView.el);
+    }
     this.view = view;
     this.root.dataset.view = view;
     // Notify whenever ContactsScreen becomes the active view so it can reset search state.
